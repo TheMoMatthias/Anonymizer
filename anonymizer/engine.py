@@ -63,8 +63,14 @@ def analyze_unit(analyzer: AnalyzerEngine, unit: TextUnit, config: dict) -> list
 
     seen_spans: dict[tuple[int, int], Finding] = {}
 
+    # Restrict to our configured entity types -- otherwise Presidio's default
+    # registry also runs every built-in country-specific recognizer (US SSN,
+    # UK NINO, SG UEN, AU ABN/TFN, IN PAN/Aadhaar, ...) for the "en" pass,
+    # which coincidentally matches all sorts of unrelated numeric IDs.
+    wanted_entities = list(entities_cfg.keys())
+
     for lang in languages:
-        results = analyzer.analyze(text=unit.text, language=lang, allow_list=allow_list)
+        results = analyzer.analyze(text=unit.text, language=lang, entities=wanted_entities, allow_list=allow_list)
         for r in results:
             threshold = entities_cfg.get(r.entity_type, {}).get("confidence_threshold", 0.5)
             if r.score < threshold:
