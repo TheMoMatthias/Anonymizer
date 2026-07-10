@@ -1,0 +1,83 @@
+# Default entity/recognizer configuration.
+# Editable directly, or via the Settings tab in the app (which writes back here).
+languages:
+  - de
+  - en
+
+entities:
+  PERSON:
+    default_action: pseudonymize
+    confidence_threshold: 0.6
+  ORGANIZATION:
+    default_action: pseudonymize
+    confidence_threshold: 0.6
+  LOCATION:
+    default_action: pseudonymize
+    confidence_threshold: 0.6
+  EMAIL_ADDRESS:
+    default_action: anonymize
+    confidence_threshold: 0.5
+  PHONE_NUMBER:
+    default_action: anonymize
+    confidence_threshold: 0.5
+  DATE_TIME:
+    default_action: pseudonymize
+    confidence_threshold: 0.5
+  IBAN_CODE:
+    default_action: anonymize
+    confidence_threshold: 0.5
+  CREDIT_CARD:
+    default_action: anonymize
+    confidence_threshold: 0.5
+  DE_STEUER_ID:
+    default_action: anonymize
+    confidence_threshold: 0.7
+  DE_SV_NUMMER:
+    default_action: anonymize
+    confidence_threshold: 0.7
+  DE_KONTONUMMER:
+    default_action: anonymize
+    confidence_threshold: 0.6
+  DE_DEPOTNUMMER:
+    default_action: anonymize
+    confidence_threshold: 0.6
+  BANK_INTERNAL_REF:
+    default_action: pseudonymize
+    confidence_threshold: 0.5
+
+allow_list: []
+deny_list: []
+
+# Small curated set of German bank-specific recognizers Presidio doesn't ship.
+# context words boost score when found near a match (Presidio's built-in context logic).
+custom_recognizers:
+  - name: DE_STEUER_ID
+    language: de
+    patterns:
+      - regex: '\b\d{2}\s?\d{3}\s?\d{3}\s?\d{3}\b'
+        score: 0.6
+    context: ["steuer-id", "steueridentifikationsnummer", "steuernummer"]
+  - name: DE_SV_NUMMER
+    language: de
+    patterns:
+      - regex: '\b\d{2}[ ]?\d{6}[ ]?[A-Z][ ]?\d{3}\b'
+        score: 0.6
+    context: ["sozialversicherungsnummer", "rentenversicherungsnummer", "sv-nummer"]
+  - name: DE_KONTONUMMER
+    language: de
+    patterns:
+      - regex: '\b\d{6,10}\b'
+        score: 0.3
+    context: ["kontonummer", "konto-nr", "konto nr"]
+  - name: DE_DEPOTNUMMER
+    language: de
+    patterns:
+      - regex: '\b\d{6,12}\b'
+        score: 0.3
+    context: ["depotnummer", "depot-nr", "depot nr"]
+  - name: BANK_INTERNAL_REF
+    language: de
+    patterns:
+      - regex: '\b[A-Z]{2,4}-\d{4,10}\b'
+        score: 0.3
+    context: ["kunde nr", "kundennummer", "deal id", "referenznummer"]

@@ -1,0 +1,9 @@
+.claude/
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+uv.lock.bak
+tests/fixtures/generated/
+*.psd_report.json
+config.local.yaml

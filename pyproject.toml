@@ -1,0 +1,32 @@
+[project]
+name = "anonymizer"
+version = "0.1.0"
+description = "Local document anonymizer/pseudonymizer built on Presidio"
+requires-python = ">=3.11,<3.13"
+dependencies = [
+  "nicegui>=1.4",
+  "presidio-analyzer>=2.2",
+  "spacy>=3.7",
+  "python-docx>=1.1",
+  "openpyxl>=3.1",
+  "python-pptx>=0.6.23",
+  "pymupdf>=1.24",
+  "pyyaml>=6.0",
+  "cryptography>=42.0",
+  "keyring>=25.0",
+  "lxml>=5.0",
+  "pywin32>=306; platform_system == 'Windows'",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8.0"]
+
+[project.scripts]
+anonymizer = "anonymizer.gui.app:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["anonymizer"]
