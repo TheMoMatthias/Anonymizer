@@ -99,12 +99,19 @@ def main_page() -> None:
     with ui.column().classes("w-full max-w-4xl mx-auto gap-4 p-4"):
         with ui.card().classes("w-full"):
             ui.label("1. Choose a document").classes("font-bold")
-            with ui.row().classes("items-center gap-2 w-full"):
-                path_input = ui.input(label="File path", placeholder=r"C:\path\to\document.docx").classes(
-                    "flex-grow"
-                )
-                browse_button = ui.button("Browse...")
-                scan_button = ui.button("Scan").props("color=primary")
+
+            with ui.column().classes(
+                "w-full items-center justify-center gap-1 border-2 border-dashed rounded-lg p-8 cursor-pointer "
+                "hover:bg-gray-100"
+            ) as drop_zone:
+                ui.icon("upload_file").classes("text-4xl text-gray-400")
+                selected_label = ui.label("Click to select a document").classes("text-gray-700 font-medium")
+                ui.label(".docx  .doc  .xlsx  .xlsm  .xls  .pptx  .ppt  .pdf").classes("text-xs text-gray-400")
+
+            with ui.expansion("Enter a path manually instead").classes("w-full"):
+                path_input = ui.input(label="File path", placeholder=r"C:\path\to\document.docx").classes("w-full")
+
+            scan_button = ui.button("Scan").props("color=primary").classes("w-full mt-2")
 
         with ui.card().classes("w-full") as review_card:
             ui.label("2. Review detected entities").classes("font-bold")
@@ -123,6 +130,10 @@ def main_page() -> None:
         picked = await run.io_bound(_pick_file)
         if picked:
             path_input.value = picked
+            selected_label.text = picked
+
+    def on_manual_path_change(e) -> None:
+        selected_label.text = e.value or "Click to select a document"
 
     async def do_scan() -> None:
         result_label.text = ""
@@ -168,7 +179,8 @@ def main_page() -> None:
         result_label.text = f"Saved: {out_path}   |   Report: {report_path}"
         ui.notify("Saved anonymized copy", type="positive")
 
-    browse_button.on_click(browse)
+    drop_zone.on("click", browse)
+    path_input.on_value_change(on_manual_path_change)
     scan_button.on_click(do_scan)
     score_filter.on_value_change(on_filter_change)
     save_button.on_click(do_save)
