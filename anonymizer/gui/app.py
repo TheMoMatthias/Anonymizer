@@ -16,7 +16,7 @@ from ..core import build_preview
 from ..engine import build_analyzer
 from ..mapping import MappingStore
 from ..models import FileJob
-from ..pipeline import SUPPORTED_EXTENSIONS, ProcessingError, apply_document, scan_document
+from ..pipeline import SUPPORTED_EXTENSIONS, ProcessingError, apply_document, scan_document, sniff_language
 from . import review, settings_page, theme
 
 _analyzer = None
@@ -75,6 +75,7 @@ class PageState:
         self.jobs: list[FileJob] = []
         self.selected: int | None = None
         self.profile: str = profiles_mod.PROFILE_NAMES[0]
+        self.language: str = "auto"  # "auto" | "de" | "en"
 
     @property
     def current(self) -> FileJob | None:
@@ -181,14 +182,19 @@ def _intake_panel(state: PageState) -> None:
             ui.label(".docx .doc .xlsx .xlsm .xls .pptx .ppt .pdf").classes("az-muted text-xs mt-1")
 
         with ui.row().classes("items-center gap-2 w-full mt-3"):
-            ui.label("Profile").classes("az-muted text-xs")
+            ui.label("Profile").classes("az-muted text-xs w-16")
             prof = ui.select(profiles_mod.PROFILE_NAMES, value=state.profile).props("dense outlined").classes(
                 "flex-grow"
             )
             prof.on_value_change(lambda e: setattr(state, "profile", e.value))
-        ui.label("Presets the default action per category for a document type. Applies to files added next.").classes(
-            "az-muted text-xs"
-        )
+        with ui.row().classes("items-center gap-2 w-full mt-1"):
+            ui.label("Language").classes("az-muted text-xs w-16")
+            lang_labels = {"Auto-detect": "auto", "German": "de", "English": "en"}
+            lang_sel = ui.select(list(lang_labels), value="Auto-detect").props("dense outlined").classes("flex-grow")
+            lang_sel.on_value_change(lambda e: setattr(state, "language", lang_labels[e.value]))
+        ui.label(
+            "Auto-detect scans in the document's language (asks if unsure). Presets apply to files added next."
+        ).classes("az-muted text-xs")
 
         async def browse() -> None:
             picked = await run.io_bound(_pick_files)
@@ -330,17 +336,46 @@ def _preview_dialog(job: FileJob) -> None:
     dialog.open()
 
 
+async def _ask_language(n: int) -> str:
+    with ui.dialog() as dlg, ui.element("div").classes("az-card").style("max-width:420px"):
+        ui.label("Which language?").classes("az-h2")
+        ui.label(
+            f"Couldn't confidently detect the language of {n} file(s). Scan them with which model?"
+        ).classes("az-muted text-sm my-2")
+        with ui.row().classes("gap-2 justify-end w-full"):
+            ui.button("English", on_click=lambda: dlg.submit("en")).props("flat")
+            ui.button("German", on_click=lambda: dlg.submit("de")).props("color=primary")
+    result = await dlg
+    return result or "de"
+
+
 async def scan_all(state: PageState, refresh) -> None:
     analyzer, config = await run.io_bound(_ensure_analyzer)
     effective = profiles_mod.apply_profile(config, state.profile)
-    for job in state.jobs:
-        if job.status != "pending":
-            continue
+    pending = [j for j in state.jobs if j.status == "pending"]
+
+    # Resolve the scan language per file first (single-language scan is the fix
+    # for ordinary German words being flagged as names).
+    uncertain: list[FileJob] = []
+    for job in pending:
+        if state.language in ("de", "en"):
+            lang = state.language
+        else:
+            lang, confident = await run.io_bound(sniff_language, Path(job.path), effective)
+            if not confident:
+                uncertain.append(job)
+                continue
+        job.config = {**effective, "languages": [lang]}
+    if uncertain:
+        chosen = await _ask_language(len(uncertain))
+        for job in uncertain:
+            job.config = {**effective, "languages": [chosen]}
+
+    for job in pending:
         job.status = "scanning"
-        job.config = effective  # reuse identical config at apply (parity)
         refresh()
         try:
-            job.scan = await run.io_bound(scan_document, Path(job.path), analyzer, effective)
+            job.scan = await run.io_bound(scan_document, Path(job.path), analyzer, job.config)
             job.status = "review"
         except ProcessingError as exc:
             job.status = "failed"

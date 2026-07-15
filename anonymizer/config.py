@@ -24,7 +24,35 @@ def load_config() -> dict:
     if not path.exists():
         shutil.copy(DEFAULT_CONFIG_PATH, path)
     with open(path, "r", encoding="utf-8") as f:
-        return yaml.safe_load(f) or {}
+        cfg = yaml.safe_load(f) or {}
+    if _ensure_defaults(cfg):
+        save_config(cfg)
+    return cfg
+
+
+def _ensure_defaults(cfg: dict) -> bool:
+    """Additively upgrades an existing user config with any shipped defaults it
+    is missing -- new top-level keys (tiers, sensitivity), new entities/custom
+    recognizers, and new allow-list terms. NEVER overwrites a value the user
+    already has (their customization wins). Returns True if anything changed."""
+    shipped = yaml.safe_load(DEFAULT_CONFIG_PATH.read_text(encoding="utf-8")) or {}
+    changed = False
+
+    for key in ("tiers", "sensitivity", "languages"):
+        if key not in cfg and key in shipped:
+            cfg[key] = shipped[key]
+            changed = True
+
+    if merge_new_recognizers(cfg) > 0:
+        changed = True
+
+    existing_allow = set(cfg.get("allow_list", []))
+    new_allow = [a for a in shipped.get("allow_list", []) if a not in existing_allow]
+    if new_allow:
+        cfg.setdefault("allow_list", []).extend(new_allow)
+        changed = True
+
+    return changed
 
 
 def save_config(config: dict) -> None:

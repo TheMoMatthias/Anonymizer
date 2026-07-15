@@ -5,6 +5,7 @@ import tempfile
 from pathlib import Path
 
 from . import core
+from . import language
 from . import ocr as ocr_mod
 from .actions import decisions_lookup
 from .formats import docx_handler, legacy, pdf_handler, pptx_handler, xlsx_handler
@@ -62,6 +63,41 @@ def _guard_extractable(resolved: Path, units: list) -> None:
         )
 
 
+def _narrow_language(config: dict, units: list) -> dict:
+    """Collapses a multi-language config to the single detected language so only
+    ONE spaCy NER model runs -- this is the fix for the English model flagging
+    ordinary German words. Deterministic on the text, so scan and apply pick the
+    same language and stay in parity. A config already pinned to one language
+    (e.g. chosen in the GUI) is returned unchanged."""
+    langs = config.get("languages") or ["de"]
+    if len(langs) <= 1:
+        return config
+    sample = " ".join(u.text for u in units[:80])
+    lang, confident = language.detect_dominant(sample)
+    chosen = lang if (confident and lang in langs) else langs[0]
+    narrowed = dict(config)
+    narrowed["languages"] = [chosen]
+    return narrowed
+
+
+def sniff_language(path: Path, config: dict) -> tuple[str, bool]:
+    """(language, confident) for the GUI's 'ask the user if unsure' flow.
+    Best-effort and never raises -- an unreadable file returns an unconfident
+    German default so the caller prompts."""
+    try:
+        with tempfile.TemporaryDirectory() as tmp:
+            resolved = (
+                legacy.convert_to_modern(path, Path(tmp))
+                if path.suffix.lower() in legacy.LEGACY_EXTENSIONS
+                else path
+            )
+            handler = _handler_for(resolved)
+            units = handler.extract_text_units(resolved)
+        return language.detect_dominant(" ".join(u.text for u in units[:80]))
+    except Exception:  # noqa: BLE001
+        return ("de", False)
+
+
 def scan_document(path: Path, analyzer, config: dict) -> ScanResult:
     try:
         with tempfile.TemporaryDirectory() as tmp:
@@ -73,12 +109,13 @@ def scan_document(path: Path, analyzer, config: dict) -> ScanResult:
             handler = _handler_for(resolved)
             units = handler.extract_text_units(resolved)
             _guard_extractable(resolved, units)
-            findings = handler.scan(resolved, analyzer, config)
+            cfg = _narrow_language(config, units)
+            findings = handler.scan(resolved, analyzer, cfg)
     except ProcessingError:
         raise
     except Exception as exc:  # noqa: BLE001 -- fail loud, never silently pass
         raise ProcessingError(f"Could not read '{path.name}': {exc}") from exc
-    return core.build_scan_result(findings, units, config)
+    return core.build_scan_result(findings, units, cfg)
 
 
 def verify_output(out_path: Path, decisions: dict, analyzer, config: dict) -> list[Finding]:
@@ -115,9 +152,11 @@ def apply_document(
                 else path
             )
             handler = _handler_for(resolved)
+            units = handler.extract_text_units(resolved)
+            cfg = _narrow_language(config, units)
             with MappingStore(mapping_db_path) as mapping_store:
-                handler.apply(resolved, work_path, decisions, analyzer, config, mapping_store)
-            residual = verify_output(work_path, decisions, analyzer, config)
+                handler.apply(resolved, work_path, decisions, analyzer, cfg, mapping_store)
+            residual = verify_output(work_path, decisions, analyzer, cfg)
             if residual:
                 sample = ", ".join(sorted({f.entity_type for f in residual}))[:200]
                 raise ProcessingError(
