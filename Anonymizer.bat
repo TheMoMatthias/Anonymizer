@@ -1,6 +1,7 @@
 @echo off
 rem Double-click to launch the Document Anonymizer.
-rem On first run it sets up the environment automatically.
+rem Syncs dependencies (fast when already up to date) so a fresh `git pull` just
+rem works, re-applies the drag-and-drop patch, then launches.
 cd /d "%~dp0"
 
 where uv >nul 2>nul
@@ -11,16 +12,16 @@ if errorlevel 1 (
     exit /b 1
 )
 
-if not exist ".venv\" (
-    echo [Anonymizer] First run: setting up the environment.
-    echo This downloads the language models and may take a few minutes...
-    powershell -ExecutionPolicy Bypass -File "scripts\setup.ps1"
-    if errorlevel 1 (
-        echo [Anonymizer] Setup failed - see the messages above.
-        pause
-        exit /b 1
-    )
+echo [Anonymizer] Checking environment ^(first run / after an update downloads models, a few minutes^)...
+uv sync
+if errorlevel 1 (
+    echo [Anonymizer] Environment setup failed - see the messages above.
+    pause
+    exit /b 1
 )
+
+rem Enable native drag-and-drop (idempotent; safe to run every launch).
+uv run python "scripts\patch_nicegui_drop.py"
 
 echo [Anonymizer] Starting...
 uv run anonymizer
