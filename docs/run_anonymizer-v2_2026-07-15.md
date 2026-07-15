@@ -151,6 +151,25 @@ macro editing, a shared server. Raw PII never leaves the originating machine.
 Feature branch `feat/anonymizer-v2`, commit per phase, merge to master after
 your review.
 
+## PROGRESS — pilot feedback fixes (post-Phase-3)
+- [x] Install path fixed: spaCy models are direct-URL deps (uv sync installs +
+  keeps them; the old `spacy download` needed pip the venv lacks). Root
+  launchers Anonymizer.bat (sync+patch+launch) + Install.bat.
+- [x] UI layout: neutralized NiceGUI's default content wrapper, no-wrap two-col,
+  fixed a theme %-format bug.
+- [x] Over-flagging root cause fixed: was running BOTH de+en NER and merging;
+  English NER on German text flagged ordinary words as people. Now single
+  detected language per document (language.py, deterministic -> parity),
+  built-in patterns cross-registered per language, German model md->lg,
+  Language control (Auto/German/English) that asks when unsure. Config
+  auto-migrates new defaults into an existing user config.
+  Verified: German paragraph 7+ garbage -> 4 clean findings.
+- [x] Drag-drop hardened + self-diagnosing: native drop event was firing outside
+  the client context (UI updates never reached the window). Now buffers paths +
+  a ui.timer drains them in-context; startup banner when the drop patch isn't
+  applied; on-screen notice when a drop yields no path. (Native path-capture
+  itself still only verifiable on a real window.)
+
 ## PROGRESS — follow-up (post-Phase-3, user-requested)
 - [x] German phone recognizer (DE_PHONE, Contact class) — phones classify as
   Contact not DATE_TIME; regex guarded with `(?<!\d)` so it can't carve a fake
