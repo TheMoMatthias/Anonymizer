@@ -4,6 +4,23 @@ languages:
   - de
   - en
 
+# Trust-tier boundaries (score -> high/medium/low). High-tier findings are
+# eligible for auto-accept; medium/low are surfaced for active review.
+# high is set ABOVE spaCy's flat 0.85 NER confidence on purpose: raw name/place
+# guesses land in "review", while checksum-validated IDs (0.98) and context-
+# boosted matches auto-accept. This is what keeps fallible free-text NER under
+# human eyes without burying the reviewer in confident structured IDs.
+tiers:
+  high: 0.9
+  medium: 0.5
+
+# Global recall<->precision offset (the sensitivity slider). Positive lowers
+# every detection threshold (more recall, more review); 0 = shipped behaviour.
+sensitivity: 0.0
+
+# Default posture: pseudonymize (preserves relationships for downstream AI),
+# with hard one-way anonymize reserved for the highest-sensitivity identifiers
+# (tax ID, social-security number, payment cards). All editable in Settings.
 entities:
   PERSON:
     default_action: pseudonymize
@@ -15,37 +32,57 @@ entities:
     default_action: pseudonymize
     confidence_threshold: 0.6
   EMAIL_ADDRESS:
-    default_action: anonymize
+    default_action: pseudonymize
     confidence_threshold: 0.5
   PHONE_NUMBER:
-    default_action: anonymize
+    default_action: pseudonymize
     confidence_threshold: 0.5
   DATE_TIME:
     default_action: pseudonymize
     confidence_threshold: 0.5
   IBAN_CODE:
-    default_action: anonymize
-    confidence_threshold: 0.5
+    default_action: pseudonymize
+    confidence_threshold: 0.4
   CREDIT_CARD:
     default_action: anonymize
-    confidence_threshold: 0.5
+    confidence_threshold: 0.4
   DE_STEUER_ID:
     default_action: anonymize
-    confidence_threshold: 0.7
+    confidence_threshold: 0.6
   DE_SV_NUMMER:
     default_action: anonymize
     confidence_threshold: 0.7
   DE_KONTONUMMER:
-    default_action: anonymize
+    default_action: pseudonymize
     confidence_threshold: 0.6
   DE_DEPOTNUMMER:
-    default_action: anonymize
+    default_action: pseudonymize
     confidence_threshold: 0.6
   BANK_INTERNAL_REF:
     default_action: pseudonymize
     confidence_threshold: 0.5
 
-allow_list: []
+# Structural/banking words the German NER model routinely mislabels as
+# people/orgs/places. They are never PII, so suppressing them is pure precision
+# with no recall cost. Extend freely in Settings.
+allow_list:
+  - IBAN
+  - BIC
+  - Kunde
+  - Kundin
+  - Konto
+  - Kontonummer
+  - Depot
+  - Depotnummer
+  - Steuer-ID
+  - Steuernummer
+  - Sozialversicherungsnummer
+  - Betrag
+  - Datum
+  - EUR
+  - Euro
+  - GmbH
+  - Vertraulich
 deny_list: []
 
 # Small curated set of German bank-specific recognizers Presidio doesn't ship.

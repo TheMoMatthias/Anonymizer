@@ -6,7 +6,7 @@ from pathlib import Path
 from lxml import etree
 from pptx import Presentation
 
-from ..engine import analyze_unit
+from ..core import detect_unit
 from ..models import TextUnit
 from .run_replace import XmlRunAdapter, apply_findings_to_runs
 
@@ -67,7 +67,7 @@ def _extract_comment_units(path: Path) -> list[TextUnit]:
 def scan(path: Path, analyzer, config) -> list:
     findings = []
     for unit in extract_text_units(path):
-        findings.extend(analyze_unit(analyzer, unit, config))
+        findings.extend(detect_unit(analyzer, unit, config))
     return findings
 
 
@@ -77,7 +77,7 @@ def apply(path: Path, out_path: Path, decisions: dict, analyzer, config, mapping
         if not p.text.strip():
             continue
         unit = TextUnit(id="tmp", text=p.text)
-        findings = analyze_unit(analyzer, unit, config)
+        findings = detect_unit(analyzer, unit, config)
         apply_findings_to_runs(p.runs, findings, decisions, mapping_store)
     prs.save(out_path)
     _apply_comments(out_path, analyzer, config, decisions, mapping_store)
@@ -98,7 +98,7 @@ def _apply_comments(path: Path, analyzer, config, decisions: dict, mapping_store
             if not text_elem.text or not text_elem.text.strip():
                 continue
             unit = TextUnit(id="tmp", text=text_elem.text)
-            findings = analyze_unit(analyzer, unit, config)
+            findings = detect_unit(analyzer, unit, config)
             if not findings:
                 continue
             apply_findings_to_runs([XmlRunAdapter(text_elem)], findings, decisions, mapping_store)

@@ -5,7 +5,7 @@ from pathlib import Path
 import fitz
 
 from ..actions import decisions_lookup
-from ..engine import analyze_unit
+from ..core import detect_unit
 from ..models import TextUnit
 
 EXTENSIONS = (".pdf",)
@@ -25,7 +25,7 @@ def extract_text_units(path: Path) -> list[TextUnit]:
 def scan(path: Path, analyzer, config) -> list:
     findings = []
     for unit in extract_text_units(path):
-        findings.extend(analyze_unit(analyzer, unit, config))
+        findings.extend(detect_unit(analyzer, unit, config))
     return findings
 
 
@@ -39,7 +39,7 @@ def apply(path: Path, out_path: Path, decisions: dict, analyzer, config, mapping
         if not text.strip():
             continue
         unit = TextUnit(id="tmp", text=text)
-        findings = analyze_unit(analyzer, unit, config)
+        findings = detect_unit(analyzer, unit, config)
         for f in findings:
             if decisions_lookup(decisions, f.entity_type, f.value) == "skip":
                 continue

@@ -40,7 +40,7 @@ def sample_docx(tmp_path) -> Path:
     run = p.add_run("Hans Mueller")
     run.bold = True
     p.add_run(" ist Kunde. IBAN DE89370400440532013000.")
-    doc.add_paragraph("Steuer-ID: 12 345 678 901")
+    doc.add_paragraph("Steuer-ID: 86095742719")
     doc.sections[0].header.paragraphs[0].text = "Vertraulich - Hans Mueller"
     path = tmp_path / "sample.docx"
     doc.save(path)

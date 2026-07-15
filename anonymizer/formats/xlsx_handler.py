@@ -5,7 +5,7 @@ from pathlib import Path
 import openpyxl
 
 from ..actions import decisions_lookup, resolve_replacement
-from ..engine import analyze_unit
+from ..core import detect_unit
 from ..models import TextUnit
 
 EXTENSIONS = (".xlsx", ".xlsm", ".xls")
@@ -49,11 +49,11 @@ def extract_text_units(path: Path) -> list[TextUnit]:
     return units
 
 
-def _analyze_cell_text(text: str, header: str | None, analyzer, config) -> list:
+def _analyze_cell_text(text: str, header: str | None, analyzer, config, unit_id: str = "tmp") -> list:
     prefix = f"{header}: " if header else ""
     combined = prefix + text
-    unit = TextUnit(id="tmp", text=combined)
-    findings = analyze_unit(analyzer, unit, config)
+    unit = TextUnit(id=unit_id, text=combined)
+    findings = detect_unit(analyzer, unit, config)
     offset = len(prefix)
     result = []
     for f in findings:
@@ -68,10 +68,10 @@ def _analyze_cell_text(text: str, header: str | None, analyzer, config) -> list:
 def scan(path: Path, analyzer, config) -> list:
     wb = openpyxl.load_workbook(path, data_only=False)
     findings = []
-    for _key, text, header in _iter_cell_units(wb):
-        findings.extend(_analyze_cell_text(text, header, analyzer, config))
-    for _key, text in _iter_defined_name_units(wb):
-        findings.extend(_analyze_cell_text(text, None, analyzer, config))
+    for key, text, header in _iter_cell_units(wb):
+        findings.extend(_analyze_cell_text(text, header, analyzer, config, unit_id=key))
+    for key, text in _iter_defined_name_units(wb):
+        findings.extend(_analyze_cell_text(text, None, analyzer, config, unit_id=key))
     return findings
 
 
