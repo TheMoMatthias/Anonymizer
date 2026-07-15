@@ -181,4 +181,19 @@ your review.
     intact. NOT yet verified: pixel-level look and physical native drag-drop
     (need a manual walkthrough on the real window) + per-file/batch save-all
     convenience actions are minimal (save is per-selected-job).
-- [ ] Phase 3 — polish & compliance gaps
+- [x] Phase 3 — polish & compliance gaps (37 tests green)
+  - Closed PPTX modern threaded-comment gap (scan+apply a:t runs); output
+    re-scan now reads them too, so any residual fails loud
+  - profiles.py: Contracts / Client statements / HR / Maximize-recall presets +
+    global sensitivity slider; per-job config captured at scan and reused at
+    apply (parity across the profile/sensitivity offset)
+  - Settings restyled to the design system; sensitivity slider; mapping admin
+    (reset / rotate-key / per-entry erase) — all audit-logged
+  - Re-identify page (/reidentify): confirmation-gated un-mask + audit log view;
+    audit.py append-only log (no plaintext values)
+  - README + bundle FAQ refreshed for v2 (categories, batch, re-identify,
+    profiles, image-PDF refusal, model-prune note)
+  - Verified: 37 tests green; all three pages build headless (HTTP 200)
+  - NOT done here (deferred per contract): pixel-level look + physical native
+    drag-drop walkthrough on the real window; a "Save all" batch convenience;
+    German phone recognizer + DATE_TIME-noise detection tuning.

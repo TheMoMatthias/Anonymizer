@@ -83,6 +83,9 @@ class FileJob:
     error: str = ""
     out_path: str = ""
     report_path: str = ""
+    # The exact config this file was scanned with (profile + sensitivity applied)
+    # so apply re-detects with identical thresholds -- scan/apply parity.
+    config: dict | None = None
 
     @property
     def name(self) -> str:

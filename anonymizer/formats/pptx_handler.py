@@ -12,9 +12,23 @@ from .run_replace import XmlRunAdapter, apply_findings_to_runs
 
 P_NS = "http://schemas.openxmlformats.org/presentationml/2006/main"
 P = f"{{{P_NS}}}"
+# drawingml -- modern threaded comments (PowerPoint 2018+) store their text in
+# <a:t> runs, unlike the legacy <p:text> element. Scanning only p:text was the
+# documented gap that let a threaded comment leak PII into an "anonymized" file.
+A_NS = "http://schemas.openxmlformats.org/drawingml/2006/main"
+A = f"{{{A_NS}}}"
+COMMENT_TEXT_TAGS = (f"{P}text", f"{A}t")
 COMMENT_PARTS_GLOB = "ppt/comments/"
 
 EXTENSIONS = (".pptx", ".ppt")
+
+
+def _iter_comment_text_elements(tree):
+    """Yields every text-bearing element in a comment part -- both the legacy
+    <p:text> and the modern threaded-comment <a:t> runs."""
+    for elem in tree.iter():
+        if elem.tag in COMMENT_TEXT_TAGS:
+            yield elem
 
 
 def _iter_text_frame_paragraphs(shape):
@@ -52,7 +66,7 @@ def _comment_text_elements(path: Path):
         names = [n for n in zf.namelist() if n.startswith(COMMENT_PARTS_GLOB)]
         for name in names:
             tree = etree.fromstring(zf.read(name))
-            for text_elem in tree.iter(f"{P}text"):
+            for text_elem in _iter_comment_text_elements(tree):
                 yield name, tree, text_elem
 
 
@@ -94,7 +108,7 @@ def _apply_comments(path: Path, analyzer, config, decisions: dict, mapping_store
             continue
         tree = etree.fromstring(contents[name])
         part_changed = False
-        for text_elem in tree.iter(f"{P}text"):
+        for text_elem in _iter_comment_text_elements(tree):
             if not text_elem.text or not text_elem.text.strip():
                 continue
             unit = TextUnit(id="tmp", text=text_elem.text)

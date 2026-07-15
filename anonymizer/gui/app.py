@@ -8,9 +8,13 @@ from tkinter import filedialog
 
 from nicegui import app, run, ui
 
+from .. import audit as audit_mod
 from .. import config as config_mod
+from .. import profiles as profiles_mod
+from ..actions import reidentify_text
 from ..core import build_preview
 from ..engine import build_analyzer
+from ..mapping import MappingStore
 from ..models import FileJob
 from ..pipeline import SUPPORTED_EXTENSIONS, ProcessingError, apply_document, scan_document
 from . import review, settings_page, theme
@@ -70,6 +74,7 @@ class PageState:
     def __init__(self) -> None:
         self.jobs: list[FileJob] = []
         self.selected: int | None = None
+        self.profile: str = profiles_mod.PROFILE_NAMES[0]
 
     @property
     def current(self) -> FileJob | None:
@@ -103,6 +108,9 @@ def main_page() -> None:
                     ui.label("Local · offline · bank-grade PII redaction").classes("az-kicker")
             with ui.row().classes("items-center gap-1"):
                 ui.button(icon="dark_mode", on_click=lambda: dark.toggle()).props("flat round dense")
+                ui.button("Re-identify", icon="lock_open", on_click=lambda: ui.navigate.to("/reidentify")).props(
+                    "flat dense"
+                )
                 ui.button("Settings", icon="settings", on_click=lambda: ui.navigate.to("/settings")).props(
                     "flat dense"
                 )
@@ -159,6 +167,16 @@ def _intake_panel(state: PageState) -> None:
             ui.label("Drag files here").classes("text-sm font-medium")
             ui.label("or click to browse").classes("az-muted text-xs")
             ui.label(".docx .doc .xlsx .xlsm .xls .pptx .ppt .pdf").classes("az-muted text-xs mt-1")
+
+        with ui.row().classes("items-center gap-2 w-full mt-3"):
+            ui.label("Profile").classes("az-muted text-xs")
+            prof = ui.select(profiles_mod.PROFILE_NAMES, value=state.profile).props("dense outlined").classes(
+                "flex-grow"
+            )
+            prof.on_value_change(lambda e: setattr(state, "profile", e.value))
+        ui.label("Presets the default action per category for a document type. Applies to files added next.").classes(
+            "az-muted text-xs"
+        )
 
         async def browse() -> None:
             picked = await run.io_bound(_pick_files)
@@ -294,13 +312,15 @@ def _preview_dialog(job: FileJob) -> None:
 
 async def scan_all(state: PageState, refresh) -> None:
     analyzer, config = await run.io_bound(_ensure_analyzer)
+    effective = profiles_mod.apply_profile(config, state.profile)
     for job in state.jobs:
         if job.status != "pending":
             continue
         job.status = "scanning"
+        job.config = effective  # reuse identical config at apply (parity)
         refresh()
         try:
-            job.scan = await run.io_bound(scan_document, Path(job.path), analyzer, config)
+            job.scan = await run.io_bound(scan_document, Path(job.path), analyzer, effective)
             job.status = "review"
         except ProcessingError as exc:
             job.status = "failed"
@@ -312,7 +332,8 @@ async def scan_all(state: PageState, refresh) -> None:
 
 
 async def _save_job(state: PageState, job: FileJob) -> None:
-    analyzer, config = await run.io_bound(_ensure_analyzer)
+    analyzer, base = await run.io_bound(_ensure_analyzer)
+    config = job.config or base  # same config the file was scanned with (parity)
     grouped = job.scan.all_actionable()
     job.status = "saving"
     state.refresh()  # type: ignore[attr-defined]
@@ -350,6 +371,66 @@ def settings_page_route() -> None:
             ui.button("Back", icon="arrow_back", on_click=lambda: ui.navigate.to("/")).props("flat dense")
     with ui.column().classes("w-full max-w-5xl mx-auto gap-4 p-4"):
         settings_page.build()
+
+
+@ui.page("/reidentify")
+def reidentify_route() -> None:
+    theme.install()
+    ui.dark_mode(value=True)
+    with ui.element("div").classes("az-header w-full"):
+        with ui.row().classes("items-center justify-between px-6 py-3 w-full max-w-4xl mx-auto"):
+            with ui.column().classes("gap-0"):
+                ui.label("Re-identify").classes("az-h1")
+                ui.label("Restore original values in AI output — audit-logged").classes("az-kicker")
+            ui.button("Back", icon="arrow_back", on_click=lambda: ui.navigate.to("/")).props("flat dense")
+
+    with ui.column().classes("w-full max-w-4xl mx-auto gap-4 p-4"):
+        with ui.element("div").classes("az-card w-full"):
+            ui.label("Paste text containing placeholder tokens").classes("az-h2")
+            ui.label(
+                "Tokens like [PERSON_1] or [IBAN_3] are mapped back to their originals. One-way anonymized "
+                "tokens and unknown tokens are left as-is. This reverses anonymization — every un-mask is "
+                "written to the audit log."
+            ).classes("az-muted text-xs mb-2")
+            source = ui.textarea(placeholder="e.g. The advisor spoke with [PERSON_1] about account [IBAN_2].").props(
+                "outlined"
+            ).classes("w-full az-mono")
+            result_box = ui.textarea(label="Restored text").props("outlined readonly").classes("w-full az-mono mt-2")
+            result_box.visible = False
+
+            def do_reidentify() -> None:
+                text = source.value or ""
+                if not text.strip():
+                    return
+
+                def run_it() -> None:
+                    dlg.close()
+                    with MappingStore() as store:
+                        restored, n = reidentify_text(text, store)
+                    audit_mod.log_event("reidentify", f"{n} token(s) un-masked")
+                    result_box.value = restored
+                    result_box.visible = True
+                    ui.notify(f"Restored {n} value(s).", type="positive" if n else "info")
+
+                with ui.dialog() as dlg, ui.element("div").classes("az-card").style("max-width:460px"):
+                    ui.label("Re-identify this text?").classes("az-h2")
+                    ui.label(
+                        "This reveals real personal data behind the placeholders and records the action in the "
+                        "audit log."
+                    ).classes("az-muted text-sm my-2")
+                    with ui.row().classes("w-full justify-end gap-2"):
+                        ui.button("Cancel", on_click=dlg.close).props("flat")
+                        ui.button("Reveal", on_click=run_it).props("color=primary")
+                dlg.open()
+
+            ui.button("Re-identify", icon="lock_open", on_click=do_reidentify).props("color=primary").classes("mt-2")
+
+        with ui.expansion("Recent audit log").classes("w-full"):
+            entries = audit_mod.read_recent(30)
+            if not entries:
+                ui.label("No audited actions yet.").classes("az-muted text-xs")
+            for line in entries:
+                ui.label(line).classes("az-mono text-xs")
 
 
 def main() -> None:

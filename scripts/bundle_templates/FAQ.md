@@ -28,10 +28,37 @@ Maurice Matthias.
 Next to the original, named `<filename>_psd.<ext>` -- e.g. `Report.docx` ->
 `Report_psd.docx`, plus a `_report.json` audit file.
 
+## Why do I review by category now instead of hundreds of fields?
+Findings are grouped into categories (People, Financial IDs, Government IDs,
+Contact, …). You set one action per category; high-confidence, checksum-
+validated items are auto-accepted and tucked away. Expand a category only to
+override a specific value. This replaces clicking through every single field.
+
+## Can I process several files at once?
+Yes -- drag multiple files in (or add them one by one). They queue up; click a
+file to review it. Pick a "profile" (Contracts, Client statements, HR…) to
+preset the default action per category for that batch.
+
+## What are "possible misses"?
+Sensitive-looking strings (long numbers, emails, IBAN-shaped text) that no
+recognizer matched. They are NOT redacted -- they're listed so you can catch
+anything that slipped through. If one is sensitive, add it to the deny list in
+Settings and re-scan.
+
+## I got an AI answer back that says [PERSON_1] -- how do I read it?
+Open "Re-identify" (top of the window), paste the text, and confirm. Tokens are
+mapped back to the real values. This action is recorded in the audit log.
+
+## It refused my scanned PDF
+A scanned/photographed PDF has no real text layer, so nothing could be detected
+and it would look "clean" while hiding everything. The app refuses it on purpose
+rather than give you a false sense of safety. Re-create it with a text layer, or
+handle it another way.
+
 ## Is my data safe?
 Yes -- this app makes no network calls. Everything happens on your own
 computer. The mapping used to keep pseudonyms consistent (e.g. the same
-name always becoming "PERSON_3") is stored encrypted, only on your machine,
+name always becoming "[PERSON_3]") is stored encrypted, only on your machine,
 and isn't shared with colleagues -- each person's mapping is independent.
 
 ## I customized my recognizer settings -- will an update wipe them?
