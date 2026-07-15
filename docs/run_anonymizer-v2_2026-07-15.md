@@ -151,6 +151,23 @@ macro editing, a shared server. Raw PII never leaves the originating machine.
 Feature branch `feat/anonymizer-v2`, commit per phase, merge to master after
 your review.
 
+## PROGRESS — follow-up (post-Phase-3, user-requested)
+- [x] German phone recognizer (DE_PHONE, Contact class) — phones classify as
+  Contact not DATE_TIME; regex guarded with `(?<!\d)` so it can't carve a fake
+  phone out of IBAN/Steuer-ID digits. Regression test added.
+- [x] "Save all" button — saves every reviewed job sequentially with per-file
+  status/error surfacing.
+- [x] OCR for scanned PDFs — ocr.py (portable Tesseract: config/env/bundle/PATH
+  resolution + graceful degradation), pdf_handler OCRs no-text pages and redacts
+  via black boxes over span-mapped word boxes; pipeline refuses image PDFs only
+  when OCR is unavailable. Bundle `tesseract\` drop-in convention + launcher env
+  wiring + Settings status/path + FAQ. Deps: pytesseract, pillow.
+  - Verified without the binary: boxes_for_span + tesseract resolution unit
+    tests; scan-with-mocked-OCR detects PII; apply-with-mocked-OCR blackens the
+    redacted region (pixel check). Live OCR needs a real Tesseract on the target
+    (the user will test on their work PC).
+- 42 tests green; all pages build headless (HTTP 200).
+
 ## PROGRESS
 - [x] Phase 1 — detection & redaction core (29 tests green)
   - taxonomy.py (data classes + trust tiers), validators.py (IBAN/Luhn/Steuer-ID)

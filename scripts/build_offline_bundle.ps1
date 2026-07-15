@@ -43,6 +43,33 @@ Copy-Item (Join-Path $PSScriptRoot "bundle_templates\launch.bat") $bundleDir
 Copy-Item (Join-Path $PSScriptRoot "bundle_templates\install.ps1") $bundleDir
 Copy-Item (Join-Path $PSScriptRoot "bundle_templates\FAQ.md") $bundleDir
 
+Write-Host "Setting up the OCR (Tesseract) drop-in folder..."
+# OCR for scanned PDFs uses a PORTABLE Tesseract dropped into <bundle>\tesseract\.
+# If the repo vendors one at vendor\tesseract, ship it; otherwise leave the
+# folder with instructions so it can be added without a rebuild.
+$tessTarget = Join-Path $bundleDir "tesseract"
+$tessVendor = Join-Path $repoRoot "vendor\tesseract"
+if (Test-Path $tessVendor) {
+    Copy-Item $tessVendor $tessTarget -Recurse
+    Write-Host "  Bundled portable Tesseract from vendor\tesseract."
+} else {
+    New-Item -ItemType Directory -Force -Path $tessTarget | Out-Null
+    @"
+Drop a PORTABLE Tesseract-OCR here to enable OCR of scanned/image PDFs.
+
+Required layout (no installer, no admin rights):
+  tesseract\tesseract.exe
+  tesseract\tessdata\deu.traineddata
+  tesseract\tessdata\eng.traineddata
+
+A portable build (e.g. the UB Mannheim Windows build, or the contents of an
+existing install's Tesseract-OCR folder) works. The launcher auto-detects
+tesseract.exe here and turns OCR on. Without it, scanned PDFs are refused
+(never silently passed through).
+"@ | Set-Content -Path (Join-Path $tessTarget "README.txt") -Encoding UTF8
+    Write-Host "  No vendor\tesseract found; wrote drop-in instructions."
+}
+
 $sizeBytes = (Get-ChildItem -Path $bundleDir -Recurse | Measure-Object -Property Length -Sum).Sum
 $sizeMB = [math]::Round($sizeBytes / 1MB, 1)
 Write-Host ""

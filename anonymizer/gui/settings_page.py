@@ -4,6 +4,7 @@ from nicegui import ui
 
 from .. import audit as audit_mod
 from .. import config as config_mod
+from .. import ocr as ocr_mod
 from ..mapping import MappingStore
 from . import theme
 
@@ -14,6 +15,7 @@ def build() -> None:
     cfg = config_mod.load_config()
 
     _detection_section(cfg)
+    _ocr_section(cfg)
     _lists_and_recognizers(cfg)
     _mapping_admin()
 
@@ -56,6 +58,27 @@ def _detection_section(cfg: dict) -> None:
                 ui.label().bind_text_from(settings, "confidence_threshold", lambda v: f"{v:.2f}").classes(
                     "az-mono text-xs w-10"
                 )
+
+
+def _ocr_section(cfg: dict) -> None:
+    with ui.element("div").classes("az-card w-full"):
+        ui.label("OCR — scanned PDFs").classes("az-h2")
+        ocr_mod.reset_resolution()
+        available = ocr_mod.ocr_available(cfg)
+        with ui.row().classes("items-center gap-2 mb-1"):
+            theme.chip("available" if available else "not found", theme.POSITIVE if available else theme.WARNING,
+                       filled=available)
+            ui.label(
+                "Reads scanned/image PDFs via a portable Tesseract. Without it, scanned PDFs are refused "
+                "(never silently passed)."
+            ).classes("az-muted text-xs")
+        ui.input(label="Tesseract path (optional)", value=cfg.get("tesseract_path", "")).bind_value(
+            cfg, "tesseract_path"
+        ).props("dense outlined").classes("w-full")
+        ui.label(
+            "Leave blank to auto-detect a `tesseract` folder in the app bundle or on PATH. Save and reopen "
+            "this page to re-check."
+        ).classes("az-muted text-xs")
 
 
 def _lists_and_recognizers(cfg: dict) -> None:

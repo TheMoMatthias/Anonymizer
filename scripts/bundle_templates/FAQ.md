@@ -50,10 +50,25 @@ Open "Re-identify" (top of the window), paste the text, and confirm. Tokens are
 mapped back to the real values. This action is recorded in the audit log.
 
 ## It refused my scanned PDF
-A scanned/photographed PDF has no real text layer, so nothing could be detected
-and it would look "clean" while hiding everything. The app refuses it on purpose
-rather than give you a false sense of safety. Re-create it with a text layer, or
-handle it another way.
+A scanned/photographed PDF has no real text layer, so without OCR nothing could
+be detected and it would look "clean" while hiding everything. The app refuses
+it on purpose rather than give you a false sense of safety.
+
+To handle scanned PDFs, enable OCR (below).
+
+## How do I enable OCR for scanned PDFs?
+OCR reads text out of images. It needs a small, portable copy of Tesseract-OCR
+-- no installer, no admin rights:
+
+1. Get a portable Tesseract-OCR folder (e.g. copy an existing
+   `C:\Program Files\Tesseract-OCR` folder, or a portable build).
+2. Put it in this bundle so the layout is:
+   `tesseract\tesseract.exe` and `tesseract\tessdata\deu.traineddata` +
+   `eng.traineddata`.
+3. Re-launch. Scanned PDFs are now OCR'd and redacted with black boxes over the
+   detected text. You can confirm OCR is active on the Settings page.
+
+Alternatively, set the exact path to `tesseract.exe` in Settings.
 
 ## Is my data safe?
 Yes -- this app makes no network calls. Everything happens on your own

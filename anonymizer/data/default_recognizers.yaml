@@ -37,6 +37,9 @@ entities:
   PHONE_NUMBER:
     default_action: pseudonymize
     confidence_threshold: 0.5
+  DE_PHONE:
+    default_action: pseudonymize
+    confidence_threshold: 0.5
   DATE_TIME:
     default_action: pseudonymize
     confidence_threshold: 0.5
@@ -118,3 +121,13 @@ custom_recognizers:
       - regex: '\b[A-Z]{2,4}-\d{4,10}\b'
         score: 0.3
     context: ["kunde nr", "kundennummer", "deal id", "referenznummer"]
+  # German phone numbers. Claims phone-shaped spans so they classify as Contact
+  # rather than being mislabeled DATE_TIME by the English NER pass. Score is set
+  # high enough to win the span over spaCy's flat 0.85 date guess when context
+  # (telefon/tel/mobil/fax...) is present.
+  - name: DE_PHONE
+    language: de
+    patterns:
+      - regex: '(?<![\dA-Za-z])(?:(?:\+|00)49[\s\-/().]*|0)\d(?:[\s\-/().]*\d){5,}(?!\d)'
+        score: 0.6
+    context: ["telefon", "tel", "tel.", "mobil", "handy", "fax", "durchwahl", "phone", "rufnummer"]

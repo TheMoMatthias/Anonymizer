@@ -5,6 +5,7 @@ import tempfile
 from pathlib import Path
 
 from . import core
+from . import ocr as ocr_mod
 from .actions import decisions_lookup
 from .formats import docx_handler, legacy, pdf_handler, pptx_handler, xlsx_handler
 from .mapping import MappingStore
@@ -48,13 +49,16 @@ def output_path_for(path: Path) -> Path:
 
 
 def _guard_extractable(resolved: Path, units: list) -> None:
-    """Refuses an image/scanned PDF with no text layer rather than emitting a
-    false-clean output (nothing would be detected, so nothing redacted)."""
-    if resolved.suffix.lower() == ".pdf" and not units:
+    """Refuses an image/scanned PDF that yielded no text -- but only when OCR is
+    unavailable. With a portable Tesseract present, image pages are OCR'd, so
+    empty units there just mean a genuinely blank document. Never emit a
+    false-clean output."""
+    if resolved.suffix.lower() == ".pdf" and not units and not ocr_mod.ocr_available():
         raise ProcessingError(
             "This PDF has no extractable text layer -- it is almost certainly a "
-            "scanned/image PDF. It cannot be anonymized safely (OCR is not yet "
-            "supported), so no output was written."
+            "scanned/image PDF. OCR is not available (no Tesseract found), so it "
+            "cannot be anonymized safely and no output was written. See the FAQ "
+            "to enable OCR."
         )
 
 

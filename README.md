@@ -70,7 +70,12 @@ via the mapping) or **anonymized** (one-way `[PERSON]`), or skipped.
 - **Re-identify**: the *Re-identify* screen maps `[PERSON_1]`-style tokens in AI
   output back to the originals (confirmation-gated, audit-logged).
 - **PDF**: always true redaction (content physically removed via PyMuPDF).
-  Image/scanned PDFs (no text layer) are refused rather than passed through.
+  **Scanned/image PDFs** are OCR'd (via a portable Tesseract, if available) and
+  redacted with black boxes over the detected regions; if OCR is unavailable
+  they are refused rather than passed through as false-clean.
+- **OCR (optional)**: drop a portable Tesseract into the bundle's `tesseract\`
+  folder (or set its path in Settings) to enable scanned-PDF support — no
+  install, no admin rights. Needs `deu`+`eng` traineddata. See the FAQ.
 - **XLSM**: macros are always stripped from the anonymized output.
 - **Legacy formats** (`.doc`/`.xls`/`.ppt`): converted to modern OOXML via local
   Office COM automation before processing.
@@ -89,8 +94,9 @@ documents, Maximize recall) are chosen per run on the main screen.
 
 ## Out of scope (v2)
 
-Scanned/OCR PDFs (refused, not silently passed), standalone `.exe` packaging,
-macro editing, document-rendered preview, cloud/LLM-assisted detection.
+Standalone `.exe` packaging, macro editing, document-rendered preview,
+cloud/LLM-assisted detection. (Scanned PDFs are now supported via optional
+local OCR.)
 
 ## Tests
 

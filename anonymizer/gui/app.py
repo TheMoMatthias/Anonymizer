@@ -147,6 +147,17 @@ def main_page() -> None:
         if added:
             await scan_all(state, refresh_queue)
 
+    async def save_all() -> None:
+        pending_review = [j for j in state.jobs if j.status == "review"]
+        if not pending_review:
+            ui.notify("No reviewed files ready to save.", type="info")
+            return
+        for job in pending_review:
+            await _save_job(state, job)
+        done = sum(1 for j in state.jobs if j.status == "done")
+        failed = sum(1 for j in state.jobs if j.status == "failed")
+        ui.notify(f"Save all finished: {done} saved, {failed} failed.", type="positive" if not failed else "warning")
+
     _active_refs["on_files_dropped"] = add_files
     _active_refs["add_files"] = add_files
     _active_refs["refresh"] = refresh_queue
@@ -154,6 +165,7 @@ def main_page() -> None:
     # store on state so intake buttons can reach them
     state.add_files = add_files  # type: ignore[attr-defined]
     state.refresh = refresh_queue  # type: ignore[attr-defined]
+    state.save_all = save_all  # type: ignore[attr-defined]
 
     refresh_queue()
 
@@ -216,9 +228,17 @@ def _render_queue(container, state: PageState, select_job) -> None:
         with ui.element("div").classes("az-card w-full"):
             with ui.row().classes("items-center justify-between w-full mb-1"):
                 ui.label(f"Queue ({len(state.jobs)})").classes("az-h2")
-                ui.button("Clear", icon="clear_all", on_click=lambda: _clear(state)).props("flat dense").classes(
-                    "text-xs"
-                )
+                with ui.row().classes("items-center gap-1"):
+                    review_ready = sum(1 for j in state.jobs if j.status == "review")
+                    if review_ready:
+                        ui.button(
+                            f"Save all ({review_ready})",
+                            icon="save",
+                            on_click=lambda: state.save_all(),  # type: ignore[attr-defined]
+                        ).props("dense color=primary").classes("text-xs")
+                    ui.button("Clear", icon="clear_all", on_click=lambda: _clear(state)).props("flat dense").classes(
+                        "text-xs"
+                    )
             for i, job in enumerate(state.jobs):
                 selected = i == state.selected
                 border = f"border-left:3px solid {theme.PRIMARY};" if selected else "border-left:3px solid transparent;"

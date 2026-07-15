@@ -24,6 +24,7 @@ TOKEN_LABELS = {
     "GPE": "LOCATION",
     "EMAIL_ADDRESS": "EMAIL",
     "PHONE_NUMBER": "PHONE",
+    "DE_PHONE": "PHONE",
     "IBAN_CODE": "IBAN",
     "CREDIT_CARD": "CARD",
     "DE_STEUER_ID": "STEUER_ID",
