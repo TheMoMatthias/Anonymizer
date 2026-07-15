@@ -165,5 +165,20 @@ your review.
   - Detection-tuning backlog (Phase 1.5/refinement, non-architectural): German
     phone recognizer (0170… currently caught as DATE_TIME), DATE_TIME noise on
     bare numbers, per-document language detection to avoid the EN pass on DE text.
-- [ ] Phase 2 — frontend / drag-drop / batch / preview
+- [x] Phase 2 — frontend / drag-drop / batch / preview (32 tests green)
+  - gui/theme.py: graphite+teal design-token system, light/dark, self-contained
+    (system fonts, no CDN), styled chips/cards/dropzone
+  - gui/review.py: category-first review — per-data-class cards with a whole-
+    category bulk action, review-tier items surfaced, high-confidence auto-
+    accepted items collapsed, validated/tier/sensitivity chips, possible-misses
+    section, global bulk actions
+  - gui/app.py: rebuilt shell — warm-start analyzer at launch, multi-file native
+    drop + browse + manual fallbacks, batch queue with per-file status,
+    text-level before->after preview dialog, fail-loud save with verified state
+  - build_preview() + FileJob model as pure testable units (test_preview.py)
+  - Verified: 32 tests green; pages build headless (HTTP 200, themed content
+    renders); drop patch applies to nicegui 3.14 and pywebview 6.2.1 _dnd_state
+    intact. NOT yet verified: pixel-level look and physical native drag-drop
+    (need a manual walkthrough on the real window) + per-file/batch save-all
+    convenience actions are minimal (save is per-selected-job).
 - [ ] Phase 3 — polish & compliance gaps

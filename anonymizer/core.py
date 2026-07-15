@@ -12,7 +12,8 @@ from __future__ import annotations
 import re
 
 from . import taxonomy, validators
-from .models import DataClassGroup, Finding, GroupedFinding, ScanResult, TextUnit
+from .actions import token_label
+from .models import DataClassGroup, Finding, GroupedFinding, PreviewGroup, PreviewRow, ScanResult, TextUnit
 
 CONTEXT_SNIPPET_RADIUS = 40
 
@@ -224,3 +225,22 @@ def build_scan_result(findings: list[Finding], units: list[TextUnit], config: di
         "possible_misses": len(possible_misses),
     }
     return ScanResult(groups=groups, possible_misses=possible_misses, stats=stats)
+
+
+def build_preview(groups: list[DataClassGroup]) -> list[PreviewGroup]:
+    """Text-level before->after preview of what a Save will change, per data
+    class. Skipped values are omitted. Pseudonym tokens are shown as a template
+    ([PERSON_#]) because the exact number is assigned at apply time; the '#'
+    signals a stable, consistent token."""
+    preview: list[PreviewGroup] = []
+    for dcg in groups:
+        rows: list[PreviewRow] = []
+        for g in dcg.items:
+            if g.action == "skip":
+                continue
+            label = token_label(g.entity_type)
+            token = f"[{label}_#]" if g.action == "pseudonymize" else f"[{label}]"
+            rows.append(PreviewRow(entity_type=g.entity_type, value=g.value, action=g.action, token=token))
+        if rows:
+            preview.append(PreviewGroup(display=dcg.display, rows=rows))
+    return preview

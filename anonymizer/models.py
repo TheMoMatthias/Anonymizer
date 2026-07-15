@@ -59,6 +59,39 @@ class DataClassGroup:
 
 
 @dataclass
+class PreviewRow:
+    entity_type: str
+    value: str
+    action: str
+    token: str  # what the value becomes ("[PERSON_#]", "[IBAN]", ...)
+
+
+@dataclass
+class PreviewGroup:
+    display: str
+    rows: list["PreviewRow"] = field(default_factory=list)
+
+
+@dataclass
+class FileJob:
+    """One file moving through the batch: pending -> scanning -> review ->
+    saving -> done | failed."""
+
+    path: str
+    status: str = "pending"
+    scan: "ScanResult | None" = None
+    error: str = ""
+    out_path: str = ""
+    report_path: str = ""
+
+    @property
+    def name(self) -> str:
+        from pathlib import Path
+
+        return Path(self.path).name
+
+
+@dataclass
 class ScanResult:
     # Actionable findings grouped by data class, most-sensitive first.
     groups: list[DataClassGroup] = field(default_factory=list)
