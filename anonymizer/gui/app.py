@@ -1,10 +1,11 @@
 from __future__ import annotations
 
+import asyncio
 import tkinter as tk
 from pathlib import Path
 from tkinter import filedialog
 
-from nicegui import run, ui
+from nicegui import app, run, ui
 
 from .. import config as config_mod
 from ..engine import build_analyzer
@@ -15,6 +16,26 @@ _analyzer = None
 _config = None
 
 ACTIONS = ["pseudonymize", "anonymize", "skip"]
+
+# Native mode has exactly one window, so a single set of refs to the
+# currently-rendered page's file-selection widgets is enough -- the native
+# 'drop' event is a window-level event (not tied to a specific page/client),
+# dispatched safely onto the main asyncio loop by NiceGUI itself.
+_active_refs: dict = {}
+
+
+def _handle_native_drop(e) -> None:
+    paths = [p for p in e.args.get("files", []) if p]
+    if not paths:
+        return
+    if len(paths) > 1:
+        ui.notify("Only one file at a time is supported -- using the first one.", type="warning")
+    handler = _active_refs.get("on_file_selected")
+    if handler:
+        asyncio.create_task(handler(paths[0]))
+
+
+app.native.on("drop", _handle_native_drop)
 
 
 def _ensure_analyzer():
@@ -101,12 +122,17 @@ def main_page() -> None:
             ui.label("1. Choose a document").classes("font-bold")
 
             with ui.column().classes(
-                "w-full items-center justify-center gap-1 border-2 border-dashed rounded-lg p-8 cursor-pointer "
-                "hover:bg-gray-100"
+                "w-full items-center justify-center gap-1 border-2 border-dashed border-gray-300 rounded-lg p-8 "
+                "cursor-pointer hover:bg-gray-100 transition-colors"
             ) as drop_zone:
                 ui.icon("upload_file").classes("text-4xl text-gray-400")
-                selected_label = ui.label("Click to select a document").classes("text-gray-700 font-medium")
+                selected_label = ui.label("Drag a file here, or click to select a document").classes(
+                    "text-gray-700 font-medium"
+                )
                 ui.label(".docx  .doc  .xlsx  .xlsm  .xls  .pptx  .ppt  .pdf").classes("text-xs text-gray-400")
+
+            selection_progress = ui.linear_progress().props("indeterminate").classes("w-full")
+            selection_progress.visible = False
 
             with ui.expansion("Enter a path manually instead").classes("w-full"):
                 path_input = ui.input(label="File path", placeholder=r"C:\path\to\document.docx").classes("w-full")
@@ -126,14 +152,28 @@ def main_page() -> None:
             save_button = ui.button("Save _psd").props("color=primary")
             result_label = ui.label()
 
+    async def on_file_selected(raw_path: str) -> None:
+        path_input.value = raw_path
+        selected_label.text = raw_path
+        selection_progress.visible = True
+        await asyncio.sleep(0.4)  # brief, deliberate flash so selection feels acknowledged
+        selection_progress.visible = False
+
+    _active_refs["on_file_selected"] = on_file_selected
+
     async def browse() -> None:
         picked = await run.io_bound(_pick_file)
         if picked:
-            path_input.value = picked
-            selected_label.text = picked
+            await on_file_selected(picked)
 
     def on_manual_path_change(e) -> None:
-        selected_label.text = e.value or "Click to select a document"
+        selected_label.text = e.value or "Drag a file here, or click to select a document"
+
+    def on_drag_enter() -> None:
+        drop_zone.classes(remove="border-gray-300", add="border-blue-400 bg-blue-50")
+
+    def on_drag_leave() -> None:
+        drop_zone.classes(remove="border-blue-400 bg-blue-50", add="border-gray-300")
 
     async def do_scan() -> None:
         result_label.text = ""
@@ -180,6 +220,10 @@ def main_page() -> None:
         ui.notify("Saved anonymized copy", type="positive")
 
     drop_zone.on("click", browse)
+    drop_zone.on("dragenter.prevent", on_drag_enter)
+    drop_zone.on("dragover.prevent", lambda: None)
+    drop_zone.on("dragleave.prevent", on_drag_leave)
+    drop_zone.on("drop.prevent", on_drag_leave)
     path_input.on_value_change(on_manual_path_change)
     scan_button.on_click(do_scan)
     score_filter.on_value_change(on_filter_change)
