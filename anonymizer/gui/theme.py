@@ -50,6 +50,19 @@ _CSS = """
 
 body, .q-page, .nicegui-content { background: var(--bg) !important; color: var(--text); font-family: var(--font-sans); }
 
+/* NiceGUI wraps page content in a padded, gapped, centered column by default,
+   which fights our own layout (mis-aligned header, odd spacing). Neutralize it
+   and let our containers own all spacing/width. */
+.nicegui-content {
+  padding: 0 !important;
+  gap: 0 !important;
+  align-items: stretch !important;
+  max-width: none !important;
+  width: 100%;
+}
+.q-page { min-height: 100vh; }
+html, body { margin: 0; width: 100%; overflow-x: hidden; }
+
 .az-card {
   background: var(--surface); border: 1px solid var(--border); border-radius: 14px;
   box-shadow: var(--shadow); padding: 20px;
@@ -76,7 +89,7 @@ body, .q-page, .nicegui-content { background: var(--bg) !important; color: var(-
   transition: all .15s ease; cursor: pointer;
 }
 .az-dropzone:hover { background: var(--surface-2); border-color: var(--text-muted); }
-.az-dropzone.az-drag { border-color: %(accent)s; background: color-mix(in srgb, %(accent)s 8%%, var(--surface)); }
+.az-dropzone.az-drag { border-color: __ACCENT__; background: color-mix(in srgb, __ACCENT__ 8%, var(--surface)); }
 
 .az-stat { display:flex; flex-direction:column; gap:2px; }
 .az-stat .n { font-size: 1.4rem; font-weight: 700; line-height: 1; }
@@ -88,7 +101,7 @@ body, .q-page, .nicegui-content { background: var(--bg) !important; color: var(-
 
 .q-expansion-item { border:1px solid var(--border); border-radius:12px; background:var(--surface); overflow:hidden; }
 .az-row { border-top:1px solid var(--border); }
-""" % {"accent": ACCENT}
+""".replace("__ACCENT__", ACCENT)
 
 
 def install() -> None:

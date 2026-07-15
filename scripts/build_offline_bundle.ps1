@@ -19,21 +19,15 @@ if ($runtimeDir -ne $normalizedDir) {
     $pythonExe = Join-Path $normalizedDir "python.exe"
 }
 
-Write-Host "Installing the app and its dependencies into the bundled runtime..."
+Write-Host "Installing the app, its dependencies, and both spaCy models into the bundled runtime..."
 # This runtime exists solely to be this bundle's isolated environment (it's
 # never used as anyone's "system Python"), so overriding uv's externally-
 # managed guard here is intentional, not a safety bypass of a shared install.
+# The spaCy models are direct-URL dependencies in pyproject.toml, so this single
+# install pulls them in too -- no separate `spacy download` (which would need
+# pip in the relocatable runtime).
 uv pip install --python $pythonExe --break-system-packages "$repoRoot"
 if ($LASTEXITCODE -ne 0) { throw "uv pip install failed" }
-
-Write-Host "Downloading spaCy language models into the bundled runtime..."
-# spacy download shells out to this runtime's own pip internally, which
-# would hit the same externally-managed guard as above.
-$env:PIP_BREAK_SYSTEM_PACKAGES = "1"
-& $pythonExe -m spacy download de_core_news_md
-if ($LASTEXITCODE -ne 0) { throw "spacy download de_core_news_md failed" }
-& $pythonExe -m spacy download en_core_web_md
-if ($LASTEXITCODE -ne 0) { throw "spacy download en_core_web_md failed" }
 
 Write-Host "Patching nicegui for working native drag-and-drop..."
 & $pythonExe "$PSScriptRoot\patch_nicegui_drop.py"

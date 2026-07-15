@@ -115,9 +115,9 @@ def main_page() -> None:
                     "flat dense"
                 )
 
-    with ui.row().classes("w-full max-w-7xl mx-auto gap-4 p-4 items-start"):
+    with ui.row().classes("w-full max-w-7xl mx-auto gap-4 p-4 items-start flex-nowrap"):
         # -- Left: intake + queue -------------------------------------------
-        with ui.column().classes("gap-4").style("width: 340px; flex: none;"):
+        with ui.column().classes("gap-4").style("flex: 0 0 340px; max-width: 340px;"):
             _intake_panel(state)
             queue_container = ui.column().classes("w-full gap-2")
 

@@ -6,7 +6,12 @@ requires-python = ">=3.11,<3.13"
 dependencies = [
   "nicegui>=1.4",
   "presidio-analyzer>=2.2",
-  "spacy>=3.7",
+  "spacy>=3.8,<3.9",
+  # The two spaCy models as direct dependencies, so `uv sync` installs them and
+  # never prunes them (a plain `spacy download` needs pip, which the uv venv
+  # lacks). Pinned to 3.8.x to match spacy above.
+  "de_core_news_md @ https://github.com/explosion/spacy-models/releases/download/de_core_news_md-3.8.0/de_core_news_md-3.8.0-py3-none-any.whl",
+  "en_core_web_md @ https://github.com/explosion/spacy-models/releases/download/en_core_web_md-3.8.0/en_core_web_md-3.8.0-py3-none-any.whl",
   "python-docx>=1.1",
   "openpyxl>=3.1",
   "python-pptx>=0.6.23",
@@ -30,6 +35,10 @@ anonymizer = "anonymizer.gui.app:main"
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
+
+[tool.hatch.metadata]
+# Allow the spaCy model wheels declared as direct URL dependencies.
+allow-direct-references = true
 
 [tool.hatch.build.targets.wheel]
 packages = ["anonymizer"]
