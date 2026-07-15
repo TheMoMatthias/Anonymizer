@@ -54,6 +54,17 @@ def build() -> None:
 
         ui.button("Add custom recognizer", on_click=add_recognizer).props("outline")
 
+        def check_for_new() -> None:
+            added = config_mod.merge_new_recognizers(cfg)
+            recognizers_column.clear()
+            _render_recognizers(recognizers_column, cfg)
+            if added:
+                ui.notify(f"Added {added} new recognizer(s)/entity default(s) from shipped defaults.", type="positive")
+            else:
+                ui.notify("Already up to date -- nothing new to add.", type="info")
+
+        ui.button("Check for new recognizers", on_click=check_for_new).props("outline")
+
     def save() -> None:
         cfg["allow_list"] = [line.strip() for line in allow_area.value.splitlines() if line.strip()]
         cfg["deny_list"] = [line.strip() for line in deny_area.value.splitlines() if line.strip()]

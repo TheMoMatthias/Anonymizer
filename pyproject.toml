@@ -16,6 +16,7 @@ dependencies = [
   "keyring>=25.0",
   "lxml>=5.0",
   "pywin32>=306; platform_system == 'Windows'",
+  "pywebview>=5.0",
 ]
 
 [project.optional-dependencies]

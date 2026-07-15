@@ -124,7 +124,7 @@ def main_page() -> None:
         if picked:
             path_input.value = picked
 
-    def do_scan() -> None:
+    async def do_scan() -> None:
         result_label.text = ""
         raw_path = path_input.value.strip().strip('"')
         if not raw_path:
@@ -137,13 +137,22 @@ def main_page() -> None:
         if path.suffix.lower() not in SUPPORTED_EXTENSIONS:
             ui.notify(f"Unsupported file type: {path.suffix}", type="negative")
             return
-        analyzer, config = _ensure_analyzer()
-        ui.notify("Scanning...", type="info")
-        state.path = path
-        state.min_score = 0.0
-        score_filter.value = 0.0
-        state.grouped = scan_document(path, analyzer, config)
-        _render_review(review_container, state)
+
+        first_load = _analyzer is None
+        scan_button.disable()
+        if first_load:
+            ui.notify("Loading language models (first run only, ~10-20s)...", type="info", timeout=0)
+        else:
+            ui.notify("Scanning...", type="info")
+        try:
+            analyzer, config = await run.io_bound(_ensure_analyzer)
+            state.path = path
+            state.min_score = 0.0
+            score_filter.value = 0.0
+            state.grouped = await run.io_bound(scan_document, path, analyzer, config)
+            _render_review(review_container, state)
+        finally:
+            scan_button.enable()
 
     def on_filter_change(e) -> None:
         state.min_score = e.value
@@ -175,7 +184,7 @@ def settings_page_route() -> None:
 
 
 def main() -> None:
-    ui.run(title="Document Anonymizer", reload=False, show=True)
+    ui.run(title="Document Anonymizer", reload=False, native=True, window_size=(1300, 900))
 
 
 if __name__ in {"__main__", "__mp_main__"}:
