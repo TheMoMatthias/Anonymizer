@@ -5,4 +5,5 @@ if (-not (Get-Command uv -ErrorAction SilentlyContinue)) {
 uv sync
 uv run python -m spacy download de_core_news_md
 uv run python -m spacy download en_core_web_md
+uv run python "$PSScriptRoot\patch_nicegui_drop.py"
 Write-Host "Setup complete. Run scripts\run.ps1 to start the app."

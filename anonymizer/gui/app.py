@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import asyncio
 import tkinter as tk
-import time
 from pathlib import Path
 from tkinter import filedialog
 
@@ -21,84 +20,18 @@ ACTIONS = ["pseudonymize", "anonymize", "skip"]
 # Native mode has exactly one window, so a single set of refs to the
 # currently-rendered page's file-selection widgets is enough -- the native
 # 'drop' event is a window-level event (not tied to a specific page/client),
-# dispatched safely onto the main asyncio loop by NiceGUI itself.
+# dispatched safely onto the main asyncio loop by NiceGUI itself. The real
+# fix for getting a usable path out of the drop event lives in
+# scripts/patch_nicegui_drop.py (patches the installed nicegui package
+# in-place) -- a runtime monkeypatch here was verified NOT to reach the
+# separate process NiceGUI spawns for the native window.
 _active_refs: dict = {}
-
-
-def _patch_native_drop_binding() -> None:
-    """NiceGUI's own drop handler (nicegui.native.native_mode.bind_drop) reads
-    a `pywebviewFullPath` field that pywebview 6.2.1's Windows/WebView2
-    backend never actually sets on dropped-file objects -- so every drop
-    always yields empty paths there. The real path IS captured natively by
-    that backend (webview/platforms/edgechromium.py's FilesDropped handler),
-    just into a different place: `webview.dom._dnd_state['paths']`, as
-    (basename, full_path) pairs. This replaces NiceGUI's window-event
-    binding with an equivalent version that correlates the JS drop event's
-    filenames against that list instead. Runs in the spawned pywebview
-    process (this module is re-imported there), so it must be applied at
-    import time, not inside main()."""
-    try:
-        import webview
-        import webview.dom
-        from nicegui.native import native_mode as _native_mode
-        from webview.dom import _dnd_state
-    except ImportError:
-        return
-
-    def _fixed_bind_pywebview_events(window, event_sender) -> None:
-        def send(event_type: str, **kwargs) -> None:
-            try:
-                event_sender.send({"type": event_type, "args": kwargs})
-            except OSError:
-                pass
-
-        def bind_drop() -> None:
-            window.evaluate_js(
-                """
-                document.addEventListener("dragover", function(e) {
-                  if (e.dataTransfer && e.dataTransfer.types.indexOf("Files") >= 0) e.preventDefault();
-                });
-                """
-            )
-
-            def on_drop(e) -> None:
-                names = [f.get("name", "") for f in e.get("dataTransfer", {}).get("files", [])]
-                resolved = []
-                deadline = time.time() + 1.0
-                for name in names:
-                    path = ""
-                    while time.time() < deadline:
-                        match = next((full for base, full in _dnd_state["paths"] if base == name), None)
-                        if match is not None:
-                            path = match
-                            break
-                        time.sleep(0.02)
-                    resolved.append(path)
-                _dnd_state["paths"] = [(base, full) for base, full in _dnd_state["paths"] if base not in names]
-                send("drop", files=resolved)
-
-            window.dom.document.events.drop += webview.dom.DOMEventHandler(on_drop, True, False)
-
-        window.events.shown += lambda: send("shown")
-        window.events.loaded += lambda: send("loaded")
-        window.events.loaded += bind_drop
-        window.events.minimized += lambda: send("minimized")
-        window.events.maximized += lambda: send("maximized")
-        window.events.restored += lambda: send("restored")
-        window.events.resized += lambda width, height: send("resized", width=width, height=height)
-        window.events.moved += lambda x, y: send("moved", x=x, y=y)
-        window.events.closed += lambda: send("closed")
-
-    _native_mode._bind_pywebview_events = _fixed_bind_pywebview_events
-
-
-_patch_native_drop_binding()
 
 
 def _handle_native_drop(e) -> None:
     paths = [p for p in e.args.get("files", []) if p]
     if not paths:
-        ui.notify("Drop received but no path could be resolved -- see console for details.", type="warning")
+        ui.notify("Drop received but no path could be resolved.", type="warning")
         return
     if len(paths) > 1:
         ui.notify("Only one file at a time is supported -- using the first one.", type="warning")

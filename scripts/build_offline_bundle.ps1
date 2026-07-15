@@ -35,6 +35,9 @@ if ($LASTEXITCODE -ne 0) { throw "spacy download de_core_news_md failed" }
 & $pythonExe -m spacy download en_core_web_md
 if ($LASTEXITCODE -ne 0) { throw "spacy download en_core_web_md failed" }
 
+Write-Host "Patching nicegui for working native drag-and-drop..."
+& $pythonExe "$PSScriptRoot\patch_nicegui_drop.py"
+
 Write-Host "Copying launcher, installer, and FAQ..."
 Copy-Item (Join-Path $PSScriptRoot "bundle_templates\launch.bat") $bundleDir
 Copy-Item (Join-Path $PSScriptRoot "bundle_templates\install.ps1") $bundleDir
