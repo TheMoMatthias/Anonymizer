@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import asyncio
 import threading
 import tkinter as tk
 from pathlib import Path
@@ -23,9 +22,49 @@ _analyzer = None
 _config = None
 _analyzer_lock = threading.Lock()
 
-# Native mode has one window; the drop event is window-level, so a single set of
-# refs to the active page's drop handler is enough.
-_active_refs: dict = {}
+# Native drop plumbing. The native 'drop' event fires OUTSIDE any client/UI
+# context, so touching UI there (notify, adding rows) silently fails to reach
+# the window -- the likely cause of "drag-drop does nothing". Instead the event
+# just parks paths in a thread-safe buffer, and a ui.timer running INSIDE the
+# page's client context drains it and updates the UI reliably.
+_drop_lock = threading.Lock()
+_pending_drops: list[str] = []
+_drop_stats = {"events": 0, "empty_events": 0, "last_seen_empty": 0}
+
+
+def _handle_native_drop(e) -> None:
+    paths = [p for p in (e.args.get("files", []) if hasattr(e, "args") else []) if p]
+    with _drop_lock:
+        _drop_stats["events"] += 1
+        if paths:
+            _pending_drops.extend(paths)
+        else:
+            _drop_stats["empty_events"] += 1
+
+
+app.native.on("drop", _handle_native_drop)
+
+
+def _take_pending_drops() -> tuple[list[str], bool]:
+    """Returns (new paths since last poll, whether an empty-path drop occurred)."""
+    with _drop_lock:
+        paths = _pending_drops[:]
+        _pending_drops.clear()
+        empty = _drop_stats["empty_events"] > _drop_stats["last_seen_empty"]
+        _drop_stats["last_seen_empty"] = _drop_stats["empty_events"]
+    return paths, empty
+
+
+def drop_patch_status() -> bool:
+    """True if the nicegui native-drop patch (which delivers real file paths) is
+    applied. When False, native drag-drop cannot yield a path and the UI should
+    say so and steer to Browse."""
+    try:
+        import nicegui.native.native_mode as native_mode
+
+        return "_poll_dnd_state" in Path(native_mode.__file__).read_text(encoding="utf-8")
+    except Exception:  # noqa: BLE001
+        return False
 
 
 def _ensure_analyzer():
@@ -41,18 +80,6 @@ def warm_start() -> None:
     """Loads the models in the background at launch so the first scan doesn't
     stall (~10-20s of spaCy load happens while the user reads the UI)."""
     threading.Thread(target=_ensure_analyzer, daemon=True).start()
-
-
-def _handle_native_drop(e) -> None:
-    paths = [p for p in e.args.get("files", []) if p]
-    handler = _active_refs.get("on_files_dropped")
-    if handler and paths:
-        asyncio.create_task(handler(paths))
-    elif not paths:
-        ui.notify("Drop received but no file path could be resolved.", type="warning")
-
-
-app.native.on("drop", _handle_native_drop)
 
 
 def _pick_files() -> list[str]:
@@ -116,6 +143,18 @@ def main_page() -> None:
                     "flat dense"
                 )
 
+    if not drop_patch_status():
+        with ui.row().classes("w-full max-w-7xl mx-auto px-4 pt-3 -mb-1"):
+            with ui.element("div").classes("az-card w-full").style(
+                f"border-left:3px solid {theme.WARNING}; padding:12px 16px;"
+            ):
+                with ui.row().classes("items-center gap-2"):
+                    ui.icon("info", size="1.2rem").style(f"color:{theme.WARNING}")
+                    ui.label(
+                        "Drag-and-drop isn't active on this install (the NiceGUI drop patch isn't applied). "
+                        "Use 'click to browse' to select files. Re-run setup to enable drag-and-drop."
+                    ).classes("text-sm")
+
     with ui.row().classes("w-full max-w-7xl mx-auto gap-4 p-4 items-start flex-nowrap"):
         # -- Left: intake + queue -------------------------------------------
         with ui.column().classes("gap-4").style("flex: 0 0 340px; max-width: 340px;"):
@@ -159,14 +198,25 @@ def main_page() -> None:
         failed = sum(1 for j in state.jobs if j.status == "failed")
         ui.notify(f"Save all finished: {done} saved, {failed} failed.", type="positive" if not failed else "warning")
 
-    _active_refs["on_files_dropped"] = add_files
-    _active_refs["add_files"] = add_files
-    _active_refs["refresh"] = refresh_queue
-
     # store on state so intake buttons can reach them
     state.add_files = add_files  # type: ignore[attr-defined]
     state.refresh = refresh_queue  # type: ignore[attr-defined]
     state.save_all = save_all  # type: ignore[attr-defined]
+
+    async def drain_drops() -> None:
+        paths, empty = _take_pending_drops()
+        if empty and not paths:
+            ui.notify(
+                "A file was dropped but Windows didn't hand over its path. Use 'click to browse' instead.",
+                type="warning",
+                timeout=6000,
+            )
+        if paths:
+            await add_files(paths)
+
+    # Native drop events land outside any client context; this timer runs INSIDE
+    # the client, so draining here is what makes dropped files actually appear.
+    ui.timer(0.3, drain_drops)
 
     refresh_queue()
 
