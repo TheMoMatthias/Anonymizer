@@ -52,6 +52,56 @@ def test_kundennummer_detected_with_context(analyzer, base_config):
     assert any(et == "DE_KUNDENNUMMER" and "4830123" in v for et, v in typed)
 
 
+def test_anchored_name_detected_without_sentence_context(analyzer, base_config):
+    """de_core_news_lg is WikiNER-trained, so it misses a name with no sentence
+    context -- including the most common line in a German bank letter. The
+    structural anchors must catch these, and must NOT swallow the honorific."""
+    for text in ("Sehr geehrter Herr Müller,", "Name: Müller", "Kunde: Müller"):
+        typed = _types(analyzer, base_config, text)
+        assert ("PERSON", "Müller") in typed, f"missed the name in {text!r}: {typed}"
+
+
+def test_honorific_is_not_part_of_the_name(analyzer, base_config):
+    """'Herr Müller' and a bare 'Müller' must be ONE person, not two tokens."""
+    typed = _types(analyzer, base_config, "Herr Müller hat das Konto eröffnet.")
+    assert ("PERSON", "Müller") in typed
+
+
+def test_misc_entities_surface_instead_of_being_dropped(analyzer, base_config):
+    """Regression: spaCy tags 'Frau Bauer' as MISC; Presidio's mapping had no
+    MISC key so the span was silently DISCARDED and the name leaked."""
+    typed = _types(analyzer, base_config, "Frau Bauer zahlt.")
+    assert any("Bauer" in v for _et, v in typed), f"MISC entity dropped: {typed}"
+
+
+def test_lowercase_word_never_matches_case_sensitive_pattern(analyzer, base_config):
+    """Regression: Presidio defaults to IGNORECASE, so the [A-Z] BIC pattern
+    matched ordinary German words. At sensitivity 0.15 that redacted them."""
+    cfg = {**base_config, "languages": ["de"], "sensitivity": 0.15}
+    findings = detect_unit(analyzer, TextUnit("u1", "Sehr geehrter Herr, wie ausgefuehrt."), cfg)
+    assert not any(f.entity_type == "BIC_CODE" for f in findings)
+
+
+def test_name_propagates_across_the_document(tmp_path, analyzer, base_config):
+    """The anchored salutation seeds the name; propagation must then catch the
+    bare occurrences NER cannot see."""
+    from docx import Document
+
+    from anonymizer.pipeline import scan_document
+
+    doc = Document()
+    doc.add_paragraph("Sehr geehrter Herr Müller,")
+    doc.add_paragraph("Die Unterlagen wurden von Müller geprüft.")
+    doc.add_paragraph("Müller")
+    path = tmp_path / "letter.docx"
+    doc.save(path)
+
+    persons = [g for g in scan_document(path, analyzer, base_config).all_actionable() if g.entity_type == "PERSON"]
+    match = [g for g in persons if g.value == "Müller"]
+    assert match, f"name not detected at all: {[(g.entity_type, g.value) for g in persons]}"
+    assert match[0].count >= 3, f"propagation missed bare occurrences (count={match[0].count})"
+
+
 def test_bic_valid_country_gate():
     assert bic_valid("COBADEFFXXX")  # Commerzbank Frankfurt, DE
     assert bic_valid("DEUTDEFF")  # 8-char BIC, DE

@@ -85,6 +85,43 @@ def _narrow_language(config: dict, units: list) -> dict:
     return narrowed
 
 
+# Entity types worth propagating document-wide. Only free-text NER types: a
+# structured ID either matches its pattern everywhere or nowhere, so it has
+# nothing to gain and would only add false positives.
+_PROPAGATABLE = ("PERSON",)
+_MIN_PROPAGATE_LEN = 4
+_HONORIFIC_PREFIX = re.compile(r"^(?:Herr|Frau|Hr\.|Fr\.|Dr\.|Prof\.)\s+")
+
+
+def _with_propagation(config: dict, units: list, analyzer) -> dict:
+    """Pass 1: find the entity values this document confirms anywhere. Pass 2
+    (in detect_unit) matches those values literally in EVERY unit, catching the
+    occurrences NER dropped for lack of sentence context.
+
+    Deterministic and parity-safe: scan and apply both call this with the same
+    units and analyzer, so both derive the identical value set. Pass 1 runs on
+    the config WITHOUT `propagate`, so it can never feed on itself."""
+    if not config.get("propagate_enabled", True):
+        return config
+    values: set[tuple[str, str]] = set()
+    for unit in units:
+        for f in core.detect_unit(analyzer, unit, config):
+            if f.entity_type not in _PROPAGATABLE:
+                continue
+            value = _HONORIFIC_PREFIX.sub("", f.value).strip()
+            if len(value) >= _MIN_PROPAGATE_LEN:
+                values.add((f.entity_type, value))
+            # Also seed the surname alone: NER reliably catches "Björn Müller"
+            # in prose but misses a bare "Müller" in a cell -- and the bare form
+            # is precisely the measured gap.
+            parts = [p for p in value.split() if len(p) >= _MIN_PROPAGATE_LEN]
+            if len(parts) > 1:
+                values.add((f.entity_type, parts[-1]))
+    if not values:
+        return config
+    return {**config, "propagate": sorted(values)}
+
+
 def sniff_language(path: Path, config: dict) -> tuple[str, bool]:
     """(language, confident) for the GUI's 'ask the user if unsure' flow.
     Best-effort and never raises -- an unreadable file returns an unconfident
@@ -115,6 +152,7 @@ def scan_document(path: Path, analyzer, config: dict) -> ScanResult:
             units = handler.extract_text_units(resolved)
             _guard_extractable(resolved, units)
             cfg = _narrow_language(config, units)
+            cfg = _with_propagation(cfg, units, analyzer)
             findings = handler.scan(resolved, analyzer, cfg)
     except ProcessingError:
         raise
@@ -255,6 +293,9 @@ def apply_document(
             handler = _handler_for(resolved)
             units = handler.extract_text_units(resolved)
             cfg = _narrow_language(config, units)
+            # Same derivation as scan_document, from the same units + analyzer,
+            # so apply redacts exactly the set the reviewer approved.
+            cfg = _with_propagation(cfg, units, analyzer)
             # The mapping is persisted ONLY after the verified output is
             # committed (os.replace). Otherwise a verify failure -- no file
             # written -- would still leave orphan pseudonym entries and advance

@@ -36,8 +36,13 @@ FINANCIAL_IDS = DataClass("financial_ids", "Financial IDs", "high", 2)
 CONTACT = DataClass("contact", "Contact details", "medium", 3)
 BANK_INTERNAL = DataClass("bank_internal", "Bank-internal refs", "medium", 4)
 ORG_PLACES = DataClass("org_places", "Organizations & places", "medium", 5)
-DATES_OTHER = DataClass("dates_other", "Dates & other", "low", 6)
-UNMATCHED = DataClass("unmatched", "Possible misses (unmatched)", "low", 7)
+# spaCy's German model tags entities it cannot classify as MISC -- and real
+# names land there. They are not confidently people, so they get their own
+# review bucket rather than being forced into People (wrong) or dropped (a
+# silent leak, which is what happened before).
+OTHER_ENTITIES = DataClass("other_entities", "Other named entities", "medium", 6)
+DATES_OTHER = DataClass("dates_other", "Dates & other", "low", 7)
+UNMATCHED = DataClass("unmatched", "Possible misses (unmatched)", "low", 8)
 
 DATA_CLASSES = [
     PEOPLE,
@@ -46,6 +51,7 @@ DATA_CLASSES = [
     CONTACT,
     BANK_INTERNAL,
     ORG_PLACES,
+    OTHER_ENTITIES,
     DATES_OTHER,
     UNMATCHED,
 ]
@@ -73,6 +79,7 @@ _ENTITY_TO_CLASS: dict[str, DataClass] = {
     "ORG": ORG_PLACES,
     "LOCATION": ORG_PLACES,
     "GPE": ORG_PLACES,
+    "NER_MISC": OTHER_ENTITIES,
     "DATE_TIME": DATES_OTHER,
     "NRP": DATES_OTHER,
     POSSIBLE_MISS: UNMATCHED,

@@ -337,3 +337,105 @@ User authorized ALL FOUR critical clusters. Progress:
   "apply to everything" still full-re-renders (loses scroll/expansion); pptx
   grouped-shape / chart text; nested-scroll model (.az-scroll 58vh vs page);
   audit.log fails open; allow/deny list stored as plaintext at rest.
+
+## Phase 5 — Name-recall research + Tier 1 (2026-07-16)
+
+3 research agents (models / Presidio techniques / codebase). User authorized ALL
+four workstreams; DISTRIBUTION ANSWER: **internal only, never distributed** (so
+copyleft obligations don't trigger — but still prefer CC0/CC-BY, and NEVER use
+`names-dataset`: it is derived from the Facebook 533M breach = GDPR problem).
+
+MEASURED GROUND TRUTH (adjudicated myself; the two agents contradicted — probe:
+scratchpad/adjudicate.py). de_core_news_lg on "Müller":
+  - "Herr Müller hat das Konto eröffnet."  -> PER  (CAUGHT)
+  - "Sehr geehrter Herr Müller,"           -> MISS (the standard salutation!)
+  - bare / "Name: Müller" / "Kunde: Müller"-> MISS
+  - "Die Unterlagen wurden von Müller geprüft." -> MISS
+  - "Björn Müller wohnt in Köln."          -> PER  (first name rescues it)
+  - "Herr Öztürk ..."                      -> PER  (foreign surname = easy)
+=> Failure is COMMON-NOUN COLLISION, not foreignness. Top-20 German surnames:
+   40% recall; foreign surnames 94%. 19 of the top 20 are ordinary German words.
+=> de_core_news_lg's published 84.9 F1 is WikiNER in-domain; the only rigorous
+   OOD German study (NER4all) puts PER recall at 0.76 -> ~1 name in 4 leaks.
+
+- [x] TIER 1 DONE (74 tests green)
+  - [x] MISC LEAK (live bug): spaCy tags "Frau Bauer" as MISC; Presidio's
+        MODEL_TO_PRESIDIO_ENTITY_MAPPING has NO MISC key -> span silently
+        DISCARDED -> name leaked. Fixed: engine._ENTITY_MAPPING maps MISC ->
+        NER_MISC; new taxonomy DataClass OTHER_ENTITIES ("Other named
+        entities", medium, order 6; DATES_OTHER->7, UNMATCHED->8); TOKEN_LABELS
+        NER_MISC->ENTITY; entities.NER_MISC in YAML. Surfaces for review, never
+        auto-accepted (not confidently a person).
+  - [x] IGNORECASE (live bug I shipped): PatternRecognizer defaults to
+        regex.I|M|S, so [A-Z] BIC pattern matched "geehrter"/"ausgefuehrt".
+        Invisible at default but the sensitivity slider SUBTRACTS from the
+        threshold -> "Maximize recall" (0.15) => eff. 0.35 < 0.4 base => every
+        8-letter German word became a BIC. Fixed: `case_sensitive: true` per
+        recognizer in YAML -> engine passes global_regex_flags=M|S (no I). Set
+        on BIC_CODE, DE_ADDRESS, DE_SV_NUMMER, BANK_INTERNAL_REF.
+  - [x] Anchored-name recognizer (engine._ANCHORED_NAME_PATTERNS): honorific
+        (Herr|Frau|Hr.|Fr.|Dr.|Prof.) + labelled fields (Name|Kunde|Kontoinhaber
+        |Sachbearbeiter|...). MUST be code not YAML, and MUST use variable-width
+        LOOKBEHIND — Presidio returns the FULL match span, not group(1). Emits
+        PERSON @0.75 (below the 0.9 auto-accept bar => stays under human eyes).
+  - [x] Honorific trim in core.detect_unit: spaCy returns "Herr Müller" as the
+        span; trimming to "Müller" makes it ONE token across the document
+        (otherwise "Herr Müller" and bare "Müller" = two pseudonyms) AND gives
+        propagation the right seed.
+  - [x] Document-wide propagation: pipeline._with_propagation runs pass 1 over
+        all units, collects PERSON values (honorific-stripped, len>=4, plus the
+        surname of multi-token names), returns cfg+{"propagate": sorted set};
+        core.detect_unit matches those literals with (?<!\w)...(?!\w) @0.85.
+        Called from BOTH scan_document and apply_document from the same units +
+        analyzer => parity + determinism by construction. Pass 1 runs on the
+        config WITHOUT `propagate` so it cannot feed on itself.
+  - [x] Dead context words removed: Presidio matches a context word as a
+        SUBSTRING of a token lemma, so any entry with a space ("konto nr",
+        "bank identifier") could NEVER match. Short stems do all the work
+        ("konto" already matches kontonummer/kontoinhaber). German compounding
+        is therefore ALREADY solved — no decompounder needed.
+
+- [ ] NEXT (in this order — the harness FIRST, it is how we judge the other two)
+  - [ ] RECALL HARNESS: synthetic injection at the FORMAT layer into realistic
+        German bank docs; per-stratum recall (German-common-noun surnames vs
+        foreign; prose vs table vs form field); report as an UPPER BOUND.
+        ~280 entities / ~30 docs for ±5% CI (clustering DEFF≈2.8). Do NOT use
+        Faker de_DE names (mis-ranks the failure modes given the 40/94 split).
+        Also cheap+now: reviewer counters accepted/(accepted+added), zero PII.
+        NB presidio-evaluator API changed: predict_dataset -> CanonicalMapper ->
+        calculate_score_on_df (evaluate_all/calculate_score now raise).
+  - [ ] SURNAME GAZETTEER: no clean open German surname list exists to download.
+        BUILD top-5-10k from Wikidata SPARQL (Q101352, CC0); surnames are
+        head-heavy so this covers the measured failure. Demote the intersection
+        with the Leipzig top-30k frequency list (CC-BY-4.0, ~1MB) to
+        context-required (deny_list_score below threshold, let the context
+        enhancer lift) so Koch/Bauer need context but Öztürk scores full.
+        Given names: Berlin Vornamen (CC BY 3.0 DE) — real diverse registrations.
+        DO NOT build the negative "capitalized but not a known noun" gazetteer:
+        blind to the top-20 (they ARE dictionary words) and a decompounder
+        backfires (Rosenberg/Neumann split into valid nouns => suppresses names).
+        UNUSABLE: hunspell de_DE (GPL — the tri-licence covers the LIBRARY not
+        Jacke's DATA), names-dataset (Facebook breach), DeReWo (CC BY-NC), GfdS
+        (commercial), germandict (no licence grant), DWDS (CC BY-ND).
+  - [ ] ONNX NER UNION: torch is BUILD-time only — export/download the int8
+        .onnx (279MB, < the 610MB spaCy model already shipped) + tokenizer.json,
+        ship them, run via onnxruntime (13.4MB MIT wheel, no admin; VC++2019
+        already satisfied by CPython) + tokenizers, as a SECOND Presidio
+        recognizer UNIONed with spaCy (recall only rises). ~100 lines of
+        encode/infer/BIO-decode; skip optimum/transformers. Candidate:
+        onnx-community/multilang-pii-ner-ONNX (MIT, ai4privacy-trained =
+        form/letter-shaped) — but its 0.954 F1 is self-reported on synthetic
+        data; JUDGE IT ON OUR HARNESS, not the model card.
+        REJECTED: de_dep_news_trf (HAS NO NER COMPONENT at all); GLiNER (hard
+        torch dep + weak German, 38.9 F1); gliner2-onnx (experimental v0.1.1).
+        Optional: drop de_core_news_md + en_core_web_md (=114MB back).
+  - [ ] Presidio has NO score fusion (remove_duplicates: highest score wins,
+        never sums, recognizers never vote) — union/fusion must build on
+        core._resolve_overlaps.
+  - [ ] context_suffix_count=0 by default => "Müller, Sachbearbeiter" gets no
+        boost. Consider raising.
+  - [ ] HITL: build the ALLOW-list direction first ("Sparkasse is not a
+        person"). Salted-hash name storage is STRICTLY DOMINATED (still personal
+        data per EDPB 01/2025, brute-forceable at ~10^6 name space, and breaks
+        match variants). deny_list compiles to literal alternation: matches
+        Müller/MÜLLER/müller but NOT "Müllers"/"Mueller" — use regex patterns.

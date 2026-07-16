@@ -21,7 +21,7 @@ CONTEXT_SNIPPET_RADIUS = 40
 # Generic free-text NER labels (spaCy). On an exact span+score tie during
 # overlap resolution, a specific pattern/checksum recognizer is preferred over
 # these, so e.g. a full DE_ADDRESS wins over a bare LOCATION on the same span.
-_NER_ENTITIES = frozenset({"PERSON", "LOCATION", "ORGANIZATION", "GPE", "NRP", "MISC"})
+_NER_ENTITIES = frozenset({"PERSON", "LOCATION", "ORGANIZATION", "GPE", "NRP", "NER_MISC"})
 
 # How many distinct possible-misses to surface before truncating (informational
 # bucket -- a full list of every digit-run in a 200-page doc helps no one).
@@ -37,6 +37,17 @@ MAX_POSSIBLE_MISSES = 300
 # so nothing is silently lost.
 _VALIDATED_SCORE = 0.98
 _INVALID_SCORE = 0.4
+
+# Confidence given to a value propagated from elsewhere in the same document.
+# Matches spaCy's flat PERSON score, so it lands in the review tier rather than
+# auto-accept -- propagated hits are inference, not observation.
+_PROPAGATED_SCORE = 0.85
+
+# spaCy returns the honorific INSIDE the person span ("Herr Müller"). Trimming
+# it keys the pseudonym on the name itself, so "Herr Müller" here and a bare
+# "Müller" in a table cell become the SAME token rather than two people -- and
+# it gives document-wide propagation the right seed to match on.
+_HONORIFIC_PREFIX = re.compile(r"^(?:Herr|Frau|Hr\.|Fr\.|Dr\.|Prof\.)\s+")
 
 
 def _snippet(text: str, start: int, end: int) -> str:
@@ -126,20 +137,49 @@ def detect_unit(analyzer, unit: TextUnit, config: dict) -> list[Finding]:
     for lang in languages:
         results = analyzer.analyze(text=unit.text, language=lang, entities=wanted_entities, allow_list=allow_list)
         for r in results:
+            start, end = r.start, r.end
+            value = unit.text[start:end]
+            if r.entity_type == "PERSON":
+                trimmed = _HONORIFIC_PREFIX.match(value)
+                if trimmed:
+                    start += trimmed.end()
+                    value = value[trimmed.end() :]
             finding = Finding(
                 entity_type=r.entity_type,
-                value=unit.text[r.start : r.end],
+                value=value,
                 score=r.score,
-                context=_snippet(unit.text, r.start, r.end),
+                context=_snippet(unit.text, start, end),
                 unit_id=unit.id,
-                start=r.start,
-                end=r.end,
+                start=start,
+                end=end,
             )
             _refine(finding)
             threshold = entities_cfg.get(r.entity_type, {}).get("confidence_threshold", 0.5)
             if finding.score < max(0.0, threshold - sensitivity):
                 continue
             candidates.append(finding)
+
+    # Document-wide propagation. A value confirmed as an entity ANYWHERE in this
+    # document is very likely the same entity here too -- even in the units where
+    # NER missed it, which is the measured failure: de_core_news_lg finds
+    # "Müller" in "Herr Müller hat das Konto eröffnet." but not in a bare table
+    # cell, a labelled field, or an oblique clause. The caller derives this list
+    # from the same units in BOTH scan and apply, so it stays deterministic and
+    # in parity. (Published technique: Dehghan et al., i2b2 2014 -- +9.2% recall
+    # AND +5.1% precision, precision rising because only filtered values spread.)
+    for entity_type, value in config.get("propagate", []):
+        for m in re.finditer(rf"(?<!\w){re.escape(value)}(?!\w)", unit.text):
+            candidates.append(
+                Finding(
+                    entity_type=entity_type,
+                    value=m.group(),
+                    score=_PROPAGATED_SCORE,
+                    context=_snippet(unit.text, m.start(), m.end()),
+                    unit_id=unit.id,
+                    start=m.start(),
+                    end=m.end(),
+                )
+            )
 
     # Deny-list terms are explicit user intent -> score 1.0 so they win any span
     # contest during overlap resolution.
