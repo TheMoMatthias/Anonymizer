@@ -60,7 +60,11 @@ _CASE_SENSITIVE_FLAGS = regex.MULTILINE | regex.DOTALL
 #    variable-width), otherwise the token would be "Herr Müller" and the
 #    pseudonym would read [PERSON_1] for "Herr Müller".
 #  * These must be case-sensitive, hence _CASE_SENSITIVE_FLAGS.
-_NAME = r"[A-ZÄÖÜ][a-zäöüß]+(?:[-\s][A-ZÄÖÜ][a-zäöüß]+){0,2}"
+# Unicode properties, NOT [A-ZÄÖÜ][a-zäöüß]: an ASCII+umlaut class silently
+# fails on the international names a German bank actually holds -- measured, it
+# missed "Yılmaz" (Turkish dotless ı). \p{Lu}\p{L}+ covers Turkish, Polish,
+# Romanian, Vietnamese and ALL-CAPS forms. (The `regex` module supports \p{}.)
+_NAME = r"\p{Lu}\p{L}+(?:[-\s]\p{Lu}\p{L}+){0,2}"
 _HONORIFICS = r"(?:Herr|Frau|Hr\.|Fr\.|Dr\.|Prof\.)"
 _NAME_LABELS = (
     r"(?:Name|Kunde|Kundin|Kontoinhaber|Sachbearbeiter|Ansprechpartner|Empfänger|"
