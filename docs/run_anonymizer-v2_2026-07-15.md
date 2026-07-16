@@ -395,8 +395,54 @@ scratchpad/adjudicate.py). de_core_news_lg on "Müller":
         ("konto" already matches kontonummer/kontoinhaber). German compounding
         is therefore ALREADY solved — no decompounder needed.
 
-- [ ] NEXT (in this order — the harness FIRST, it is how we judge the other two)
-  - [ ] RECALL HARNESS: synthetic injection at the FORMAT layer into realistic
+### MEASURED RESULT (2026-07-16) — `uv run python scripts/measure_recall.py`
+
+    structured identifiers (IBAN/Steuer-ID/email/phone/address/PLZ/BIC/DOB) 100%  n=8
+    full realistic letter, ALL strata                                      100%  n=190
+    isolated cold read, overall                                             86%  n=228
+      german_common_noun / salutation .......... 100%   (anchor works)
+      german_common_noun / labelled_field ...... 100%   (anchor works)
+      german_common_noun / signature ........... 100%
+      german_common_noun / prose_full_name ...... 90%
+      german_common_noun / prose_oblique ......... 25%  <-- LEAKS
+      german_common_noun / bare_cell ............. 35%  <-- LEAKS (xlsx: now fixed)
+      german_rare / * .......................... ~100%
+      foreign / * ............................... 100%
+
+READ: in a REAL letter the anchors seed the name and propagation catches every
+occurrence -> 100%. What leaks is a common-noun surname appearing ONLY bare or
+oblique with NO anchor anywhere in the document.
+
+- [x] RECALL HARNESS DONE — anonymizer/evaluation.py + scripts/measure_recall.py.
+      Isolated (cold read) + full-letter (anchors+propagation) + structured.
+      Per-stratum, never one aggregate (an aggregate hides the only case that
+      matters). Reported as an UPPER BOUND. It immediately earned its keep:
+      caught that the anchor regex used [A-ZÄÖÜ][a-zäöüß] and silently missed
+      "Yılmaz" (Turkish dotless ı) -> now \p{Lu}\p{L}+ (foreign salutation
+      90%->100%).
+- [x] NAME-COLUMN OVERRIDE DONE (xlsx_handler): a column headed Name/Kunde/
+      Inhaber/... marks its cells PERSON @0.8 (review tier), yielding to any
+      finding that already claims the whole cell. NB Presidio's context boost
+      does NOT help here — it only lifts PATTERN recognizers, spaCy NER gets
+      nothing from it, which is why passing the header as context still missed.
+- [~] SURNAME GAZETTEER — **DECIDED AGAINST on the harness evidence** (user had
+      approved it; overruled by measurement, flag if you disagree). Reasons:
+      (1) full-letter recall is ALREADY 100%, so marginal gain is small;
+      (2) German capitalises nouns, so any list aggressive enough to catch a
+      bare "Müller" equally flags "Berg"(mountain)/"Koch"(cook) — a capitalised
+      bare noun is ambiguous even to a human. That shotgun IS the 643-findings
+      over-flagging. The precise fix for the real bare-surname case (a
+      spreadsheet name column) is the header override above, now shipped.
+      Revisit ONLY if the harness shows a real-document stratum it would fix.
+- [ ] ONNX NER UNION — NOT STARTED. Now judgeable: run measure_recall.py before
+      and after; adopt only if the isolated common_noun/prose_oblique + bare_cell
+      strata actually improve. Plan unchanged (see below).
+- KNOWN PRECISION COST of the MISC fix: bare capitalised German nouns can surface
+      (measured: bare "Sparen" -> PERSON 0.85 from spaCy itself, pre-existing).
+      Review-tier, never auto-redacted. Grow allow_list from real pilot docs.
+
+- [ ] REMAINING (in this order)
+  - [x] RECALL HARNESS: synthetic injection at the FORMAT layer into realistic
         German bank docs; per-stratum recall (German-common-noun surnames vs
         foreign; prose vs table vs form field); report as an UPPER BOUND.
         ~280 entities / ~30 docs for ±5% CI (clustering DEFF≈2.8). Do NOT use
