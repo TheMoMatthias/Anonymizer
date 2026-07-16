@@ -18,6 +18,23 @@ from . import theme
 
 ACTIONS = ["pseudonymize", "anonymize", "skip"]
 
+# Compact labels + the Quasar brand colour each action lights up in. A segmented
+# toggle (not a dropdown) keeps every row's decision visible at a glance and one
+# click to change -- with a column of dropdowns you cannot scan what will happen
+# to each value without opening them one by one.
+_ACTION_LABELS = {"pseudonymize": "Pseudonym", "anonymize": "Anonymize", "skip": "Skip"}
+_ACTION_QCOLOR = {"pseudonymize": "primary", "anonymize": "negative", "skip": "grey-7"}
+
+
+def _action_toggle(initial: str):
+    tog = ui.toggle(_ACTION_LABELS, value=initial).props("dense unelevated no-caps")
+
+    def paint() -> None:
+        tog.props(f"toggle-color={_ACTION_QCOLOR.get(tog.value, 'primary')}")
+
+    paint()
+    return tog, paint
+
 
 def _class_card(dcg, on_change: Callable) -> None:
     review_items = dcg.review_items
@@ -35,15 +52,23 @@ def _class_card(dcg, on_change: Callable) -> None:
                 if auto_items:
                     caption += f" · {len(auto_items)} auto-accepted"
                 ui.label(caption).classes("az-muted text-xs")
-            ui.label("Set whole category:").classes("az-muted text-xs")
-            bulk = ui.select(ACTIONS, value=_dominant_action(dcg.items)).props("dense outlined").classes("w-40")
+            # Say exactly how many rows the bulk control touches: it also
+            # rewrites the auto-accepted items tucked inside the collapsed
+            # strip, and silently changing decisions the reviewer cannot see
+            # would break the mental model.
+            ui.label(f"Set all {len(dcg.items)}:").classes("az-muted text-xs").tooltip(
+                "Applies to every value in this category, including the auto-accepted ones."
+            )
+            bulk, bulk_paint = _action_toggle(_dominant_action(dcg.items))
 
         selects: list = []
 
         def bulk_apply() -> None:
-            for g, sel in selects:
+            bulk_paint()
+            for g, tog, paint in selects:
                 g.action = bulk.value
-                sel.set_value(bulk.value)
+                tog.set_value(bulk.value)
+                paint()
             on_change()
 
         bulk.on_value_change(bulk_apply)
@@ -64,23 +89,33 @@ def _class_card(dcg, on_change: Callable) -> None:
 
 
 def _capture_row(g: GroupedFinding, on_change: Callable) -> list:
-    """Renders a value row and returns [(g, select)] so bulk actions can update
-    the visible per-value selects."""
+    """Renders a value row and returns [(g, toggle)] so bulk actions can update
+    the visible per-value toggles."""
     captured: list = []
     with ui.row().classes("az-row items-center gap-3 w-full py-1 px-1"):
         with ui.column().classes("gap-0 flex-grow min-w-0"):
-            ui.label(g.value[:80]).classes("az-mono text-sm truncate")
-            ui.label(g.context).classes("az-muted text-xs truncate")
+            # Full value + context on hover: a redaction decision rests on the
+            # exact string and its surroundings, so the truncated row must never
+            # be the only thing the reviewer can see.
+            ui.label(g.value[:80]).classes("az-mono text-sm truncate").tooltip(g.value)
+            ui.label(g.context).classes("az-muted text-xs truncate").tooltip(g.context)
         if g.validated is True:
             theme.chip("✓ valid", theme.TIER_COLORS["high"])
         elif g.validated is False:
-            theme.chip("⚠ unverified", theme.SENSITIVITY_COLORS["medium"])
+            theme.chip("unverified", theme.SENSITIVITY_COLORS["low"])
         ui.label(f"×{g.count}").classes("az-muted text-xs w-8 text-right")
-        ui.label(f"{g.max_score:.2f}").classes("az-muted text-xs w-10 text-right")
-        sel = ui.select(ACTIONS, value=g.action).props("dense outlined").classes("w-36")
-        sel.bind_value(g, "action")
-        sel.on_value_change(lambda: on_change())
-        captured.append((g, sel))
+        ui.label(f"{g.max_score:.2f}").classes("az-muted text-xs w-10 text-right").tooltip(
+            "Detection confidence (1.00 = certain)"
+        )
+        tog, paint = _action_toggle(g.action)
+
+        def changed(_e=None, g=g, tog=tog, paint=paint) -> None:
+            g.action = tog.value
+            paint()
+            on_change()
+
+        tog.on_value_change(changed)
+        captured.append((g, tog, paint))
     return captured
 
 
@@ -124,16 +159,18 @@ def _set_all(result: ScanResult, action: str, container, on_change: Callable) ->
 
 
 def _stat_bar(result: ScanResult) -> None:
+    """"To review" is the reviewer's actual workload, so it is the hero; the
+    other three are context and are demoted."""
     s = result.stats
     with ui.row().classes("az-card w-full items-center justify-around gap-4"):
-        _stat(s.get("distinct_findings", 0), "distinct findings")
-        _stat(s.get("needs_review", 0), "to review", theme.WARNING)
+        _stat(s.get("needs_review", 0), "to review", theme.WARNING, hero=True)
         _stat(s.get("auto_accept", 0), "auto-accepted", theme.PRIMARY)
+        _stat(s.get("distinct_findings", 0), "distinct findings")
         _stat(s.get("possible_misses", 0), "possible misses", theme.SECONDARY)
 
 
-def _stat(n: int, label: str, color: str | None = None) -> None:
-    with ui.element("div").classes("az-stat"):
+def _stat(n: int, label: str, color: str | None = None, *, hero: bool = False) -> None:
+    with ui.element("div").classes("az-stat" + (" az-stat-hero" if hero else "")):
         ui.label(str(n)).classes("n").style(f"color:{color}" if color else "")
         ui.label(label).classes("l")
 

@@ -41,9 +41,14 @@ def detect_dominant(text: str) -> tuple[str, bool]:
     words = [w.lower() for w in _WORD_RE.findall(text)]
     de = sum(1 for w in words if w in _DE)
     en = sum(1 for w in words if w in _EN)
-    # German-specific characters are a strong signal on their own.
-    umlauts = len(_UMLAUT_RE.findall(text))
-    de_score = de + umlauts * 2
+    # Umlaut-bearing WORDS are a German hint, but only a secondary one: a couple
+    # of umlaut *names* in English prose ("Björn Müller, Düsseldorf") must not
+    # flip the whole document to German. So we count words-with-an-umlaut (not
+    # raw umlaut characters) and CAP their contribution below _MIN_SIGNAL -- this
+    # guarantees umlauts alone can never reach "confident", so such a document
+    # falls through to the ask-the-user path instead of being mis-routed.
+    umlaut_words = sum(1 for w in words if _UMLAUT_RE.search(w))
+    de_score = de + min(umlaut_words, _MIN_SIGNAL - 1)
 
     if de_score == 0 and en == 0:
         return "de", False  # no signal -> default German, but unconfident

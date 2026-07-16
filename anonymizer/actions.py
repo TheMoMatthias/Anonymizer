@@ -31,13 +31,20 @@ TOKEN_LABELS = {
     "DE_SV_NUMMER": "SV_NUMMER",
     "DE_KONTONUMMER": "KONTO",
     "DE_DEPOTNUMMER": "DEPOT",
+    "BIC_CODE": "BIC",
+    "DE_ADDRESS": "ADDRESS",
+    "DE_KUNDENNUMMER": "KUNDENNR",
     "BANK_INTERNAL_REF": "REF",
     "DATE_TIME": "DATE",
     "DENY_LIST": "REDACTED",
 }
 
 # Matches a rendered token like [PERSON_1] or [IBAN] for re-identification.
-TOKEN_RE = re.compile(r"\[([A-Z_]+?)(?:_(\d+))?\]")
+# Digits are allowed in the label: a custom entity type with a digit in its name
+# (e.g. a second BIC recognizer, DE_BIC2) renders [DE_BIC2_1], which a
+# digit-less label class would silently fail to match -- leaving the placeholder
+# unrestored with no error.
+TOKEN_RE = re.compile(r"\[([A-Z0-9_]+?)(?:_(\d+))?\]")
 
 
 def token_label(entity_type: str) -> str:

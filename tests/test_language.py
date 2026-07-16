@@ -35,3 +35,19 @@ def test_german_common_words_not_flagged_as_people(analyzer, base_config):
     for noise in ("anwendung", "antworten", "sie", "anfragen", "vereinbarungen"):
         assert noise not in flagged
     assert not any(f.entity_type == "PERSON" for f in findings)
+
+
+def test_umlaut_names_in_english_are_not_confidently_german():
+    """Regression: umlaut CHARACTERS alone used to flip English prose to a
+    confident German verdict (de + umlauts*2), which then ran the German NER
+    model over English text -- the original over-flagging bug in reverse. A few
+    umlaut names must not do that; the doc should fall through to ask-the-user."""
+    _lang, confident = detect_dominant("Account holder: Björn Müller, Düsseldorf")
+    assert confident is False
+
+
+def test_umlaut_names_do_not_beat_real_english_function_words():
+    lang, confident = detect_dominant(
+        "Please transfer to Björn Müller in Düsseldorf for the account review today"
+    )
+    assert lang == "en" and confident is True

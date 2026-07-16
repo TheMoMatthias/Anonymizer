@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import shutil
+import tempfile
 from pathlib import Path
 
 import yaml
@@ -56,9 +57,22 @@ def _ensure_defaults(cfg: dict) -> bool:
 
 
 def save_config(config: dict) -> None:
+    """Atomic: serialize to a sibling temp then os.replace, so a crash or a
+    second instance can never leave a half-written config.yaml that
+    yaml.safe_load then chokes on (or silently reads short)."""
     path = user_config_path()
-    with open(path, "w", encoding="utf-8") as f:
-        yaml.safe_dump(config, f, allow_unicode=True, sort_keys=False)
+    blob = yaml.safe_dump(config, allow_unicode=True, sort_keys=False)
+    fd, tmp = tempfile.mkstemp(dir=str(path.parent), suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.write(blob)
+        os.replace(tmp, path)
+    except BaseException:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
 
 
 def merge_new_recognizers(cfg: dict) -> int:

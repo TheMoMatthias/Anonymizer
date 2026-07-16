@@ -1,12 +1,17 @@
 from __future__ import annotations
 
 import os
+import re
 import tempfile
+import zipfile
 from pathlib import Path
+
+from lxml import etree
 
 from . import core
 from . import language
 from . import ocr as ocr_mod
+from .engine import DEFAULT_LANGUAGES
 from .actions import decisions_lookup
 from .formats import docx_handler, legacy, pdf_handler, pptx_handler, xlsx_handler
 from .mapping import MappingStore
@@ -69,7 +74,7 @@ def _narrow_language(config: dict, units: list) -> dict:
     ordinary German words. Deterministic on the text, so scan and apply pick the
     same language and stay in parity. A config already pinned to one language
     (e.g. chosen in the GUI) is returned unchanged."""
-    langs = config.get("languages") or ["de"]
+    langs = config.get("languages") or list(DEFAULT_LANGUAGES)
     if len(langs) <= 1:
         return config
     sample = " ".join(u.text for u in units[:80])
@@ -129,6 +134,102 @@ def verify_output(out_path: Path, decisions: dict, analyzer, config: dict) -> li
     return residual
 
 
+_OOXML_EXTS = (".docx", ".xlsx", ".xlsm", ".pptx")
+_OOXML_META_PARTS = ("docProps/core.xml", "docProps/app.xml")
+# Identifying metadata fields (OOXML local tag names) the body-text redaction
+# never touches -- author / last editor / manager / company routinely carry the
+# real advisor or author name.
+_META_CLEAR_TAGS = frozenset({"creator", "lastModifiedBy", "manager", "company", "lastPrinted"})
+
+
+def _scrub_metadata(out_path: Path) -> None:
+    """Blanks identifying document metadata so a real name in docProps/PDF-info
+    can't ride along in a file marked 'verified' (the body-text redaction and
+    the recognizer re-scan both read body text only)."""
+    suffix = out_path.suffix.lower()
+    if suffix == ".pdf":
+        import fitz
+
+        with fitz.open(out_path) as doc:
+            doc.set_metadata({})  # clears author/title/subject/keywords/creator/producer
+            doc.saveIncr()
+        return
+    if suffix not in _OOXML_EXTS:
+        return
+    with zipfile.ZipFile(out_path) as zf:
+        names = zf.namelist()
+        contents = {n: zf.read(n) for n in names}
+    changed = False
+    for part in _OOXML_META_PARTS:
+        if part not in contents:
+            continue
+        try:
+            tree = etree.fromstring(contents[part])
+        except etree.XMLSyntaxError:
+            continue
+        part_changed = False
+        for el in tree.iter():
+            if etree.QName(el).localname in _META_CLEAR_TAGS and (el.text or ""):
+                el.text = ""
+                part_changed = True
+        if part_changed:
+            contents[part] = etree.tostring(tree, xml_declaration=True, encoding="UTF-8", standalone=True)
+            changed = True
+    if changed:
+        with zipfile.ZipFile(out_path, "w", zipfile.ZIP_DEFLATED) as zf:
+            for n in names:
+                zf.writestr(n, contents[n])
+
+
+def _output_text_blob(out_path: Path) -> str:
+    """Every readable string in the output, INCLUDING parts the format handlers
+    don't normally touch (OOXML metadata, text boxes, numeric cells, every XML
+    part; every PDF page). Text nodes are concatenated so a value split across
+    runs still appears contiguous -- for the recognizer-independent residual
+    check."""
+    suffix = out_path.suffix.lower()
+    if suffix == ".pdf":
+        import fitz
+
+        with fitz.open(out_path) as doc:
+            return "\n".join(page.get_text() for page in doc)
+    if suffix in _OOXML_EXTS:
+        parts = []
+        with zipfile.ZipFile(out_path) as zf:
+            for name in zf.namelist():
+                if not (name.endswith(".xml") or name.endswith(".rels")):
+                    continue
+                try:
+                    tree = etree.fromstring(zf.read(name))
+                except etree.XMLSyntaxError:
+                    continue
+                parts.append("".join(tree.itertext()))
+        return "\n".join(parts)
+    return out_path.read_text(encoding="utf-8", errors="ignore")
+
+
+def _literal_residual(out_path: Path, removed_values: list[str]) -> list[str]:
+    """Recognizer-INDEPENDENT backstop: for every value the reviewer chose to
+    remove, confirm its literal text is truly gone from the WHOLE output, not
+    just the body the extractor reads. Catches leaks the re-scan cannot -- a
+    name still in docProps, a number still in a cell the extractor skipped.
+    Case-insensitive, and also checks a whitespace-stripped form for IDs/IBANs
+    that may be reformatted. Values under 4 chars are skipped to avoid false
+    hits on common substrings."""
+    blob = _output_text_blob(out_path)
+    low = blob.lower()
+    low_ns = re.sub(r"\s+", "", low)
+    residual: list[str] = []
+    for value in removed_values:
+        v = value.strip().lower()
+        if len(v) < 4:
+            continue
+        v_ns = re.sub(r"\s+", "", v)
+        if v in low or (len(v_ns) >= 4 and v_ns in low_ns):
+            residual.append(value)
+    return residual
+
+
 def apply_document(
     path: Path,
     grouped: list[GroupedFinding],
@@ -154,16 +255,31 @@ def apply_document(
             handler = _handler_for(resolved)
             units = handler.extract_text_units(resolved)
             cfg = _narrow_language(config, units)
-            with MappingStore(mapping_db_path) as mapping_store:
+            # The mapping is persisted ONLY after the verified output is
+            # committed (os.replace). Otherwise a verify failure -- no file
+            # written -- would still leave orphan pseudonym entries and advance
+            # placeholder numbers for a document that never existed.
+            mapping_store = MappingStore(mapping_db_path)
+            try:
                 handler.apply(resolved, work_path, decisions, analyzer, cfg, mapping_store)
-            residual = verify_output(work_path, decisions, analyzer, cfg)
-            if residual:
-                sample = ", ".join(sorted({f.entity_type for f in residual}))[:200]
-                raise ProcessingError(
-                    f"Verification failed: {len(residual)} sensitive value(s) still present in the "
-                    f"output ({sample}). No file was written."
-                )
-        os.replace(work_path, out_path)
+                # Scrub identifying metadata BEFORE verifying so a name left in
+                # docProps is both removed and re-checked.
+                _scrub_metadata(work_path)
+                residual = verify_output(work_path, decisions, analyzer, cfg)
+                removed_values = [g.value for g in grouped if g.action in _REMOVING_ACTIONS]
+                literal = _literal_residual(work_path, removed_values)
+                if residual or literal:
+                    parts = []
+                    if residual:
+                        sample = ", ".join(sorted({f.entity_type for f in residual}))[:200]
+                        parts.append(f"{len(residual)} value(s) re-detected ({sample})")
+                    if literal:
+                        parts.append(f"{len(literal)} removed value(s) still present verbatim in the output")
+                    raise ProcessingError(f"Verification failed: {'; '.join(parts)}. No file was written.")
+                os.replace(work_path, out_path)
+                mapping_store.save()  # commit pseudonyms only now that the file exists
+            finally:
+                mapping_store.close(save=False)
     except ProcessingError:
         _cleanup(work_path)
         raise

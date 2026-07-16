@@ -13,20 +13,30 @@ import re
 
 from . import taxonomy, validators
 from .actions import token_label
+from .engine import DEFAULT_LANGUAGES
 from .models import DataClassGroup, Finding, GroupedFinding, PreviewGroup, PreviewRow, ScanResult, TextUnit
 
 CONTEXT_SNIPPET_RADIUS = 40
+
+# Generic free-text NER labels (spaCy). On an exact span+score tie during
+# overlap resolution, a specific pattern/checksum recognizer is preferred over
+# these, so e.g. a full DE_ADDRESS wins over a bare LOCATION on the same span.
+_NER_ENTITIES = frozenset({"PERSON", "LOCATION", "ORGANIZATION", "GPE", "NRP", "MISC"})
 
 # How many distinct possible-misses to surface before truncating (informational
 # bucket -- a full list of every digit-run in a 200-page doc helps no one).
 MAX_POSSIBLE_MISSES = 300
 
 # Confidence assigned to a checksum-validated ID (forces the high/auto-accept
-# tier) and to one whose checksum FAILED (0.0 -> filtered out of the actionable
-# set; it re-surfaces via the completeness scan as a possible-miss, so it is
-# never silently lost).
+# tier) and to one whose checksum FAILED. A failing checksum no longer zeroes
+# the finding: a typo'd / OCR'd IBAN or card number is still an identifying
+# string that must not leak, so it is DEMOTED to a review-tier score (kept, and
+# flagged with the "unverified" chip) instead of dropped -- the reviewer
+# decides. IDs whose threshold sits above this score (e.g. Steuer-ID at 0.6)
+# still fall out of the actionable set and re-surface via the completeness scan,
+# so nothing is silently lost.
 _VALIDATED_SCORE = 0.98
-_INVALID_SCORE = 0.0
+_INVALID_SCORE = 0.4
 
 
 def _snippet(text: str, start: int, end: int) -> str:
@@ -56,14 +66,53 @@ def _refine(finding: Finding) -> Finding:
     if verdict is True:
         finding.score = max(finding.score, _VALIDATED_SCORE)
     elif verdict is False:
-        finding.score = _INVALID_SCORE
+        # Demote, don't drop -- a checksum-failing IBAN/card is still identifying.
+        finding.score = min(finding.score, _INVALID_SCORE)
     return finding
 
 
+def _resolve_overlaps(findings: list[Finding]) -> list[Finding]:
+    """Keeps a non-overlapping set. Apply replaces spans by splicing text and
+    ASSUMES they never overlap (see the format handlers' run/cell replacement);
+    two recognizers claiming overlapping-but-not-identical spans for the same
+    text (e.g. the built-in PHONE_NUMBER and the custom DE_PHONE on one number,
+    or spaCy's city-only LOCATION inside a full DE_ADDRESS) would otherwise
+    corrupt the output or silently drop a redaction.
+
+    We keep the LONGER span first, then the higher score: for a redaction tool,
+    covering MORE of a value is always safer than covering less, so the full
+    address wins over the bare city and the complete phone wins over a fragment.
+    A kept superset also covers any contained finding's PII. On an exact tie
+    (same span and score, e.g. DE_ADDRESS vs spaCy LOCATION on one PLZ+city) we
+    prefer the specific pattern recognizer over the generic NER label and then
+    break ties by entity type, so the result is deterministic. Touching spans
+    (end == next start) do not overlap.
+    """
+    ordered = sorted(
+        findings,
+        key=lambda f: (
+            -(f.end - f.start),
+            -f.score,
+            f.entity_type in _NER_ENTITIES,  # specific pattern recognizers win ties
+            f.entity_type,
+            f.start,
+        ),
+    )
+    kept: list[Finding] = []
+    for f in ordered:
+        if any(f.start < k.end and k.start < f.end for k in kept):
+            continue
+        kept.append(f)
+    return sorted(kept, key=lambda f: f.start)
+
+
 def detect_unit(analyzer, unit: TextUnit, config: dict) -> list[Finding]:
-    """THE detection primitive -- one span-deduped list of findings for a unit.
-    Used identically by scan and apply."""
-    languages = config.get("languages", ["en"])
+    """THE detection primitive -- one overlap-resolved list of findings for a
+    unit. Used identically by scan and apply."""
+    # A narrowed config always pins exactly one language; the fallback stays
+    # SINGLE-language on purpose (running every model over one document is the
+    # cross-language noise this design exists to prevent).
+    languages = config.get("languages") or [DEFAULT_LANGUAGES[0]]
     allow_list = config.get("allow_list", [])
     deny_list = config.get("deny_list", [])
     entities_cfg = config.get("entities", {})
@@ -72,7 +121,7 @@ def detect_unit(analyzer, unit: TextUnit, config: dict) -> list[Finding]:
     sensitivity = float(config.get("sensitivity", 0.0))
     wanted_entities = list(entities_cfg.keys())
 
-    seen_spans: dict[tuple[int, int], Finding] = {}
+    candidates: list[Finding] = []
 
     for lang in languages:
         results = analyzer.analyze(text=unit.text, language=lang, entities=wanted_entities, allow_list=allow_list)
@@ -90,15 +139,13 @@ def detect_unit(analyzer, unit: TextUnit, config: dict) -> list[Finding]:
             threshold = entities_cfg.get(r.entity_type, {}).get("confidence_threshold", 0.5)
             if finding.score < max(0.0, threshold - sensitivity):
                 continue
-            span = (r.start, r.end)
-            existing = seen_spans.get(span)
-            if existing is None or finding.score > existing.score:
-                seen_spans[span] = finding
+            candidates.append(finding)
 
+    # Deny-list terms are explicit user intent -> score 1.0 so they win any span
+    # contest during overlap resolution.
     for start, end, entity_type in _deny_list_findings(unit.text, deny_list):
-        span = (start, end)
-        if span not in seen_spans:
-            seen_spans[span] = Finding(
+        candidates.append(
+            Finding(
                 entity_type=entity_type,
                 value=unit.text[start:end],
                 score=1.0,
@@ -107,15 +154,9 @@ def detect_unit(analyzer, unit: TextUnit, config: dict) -> list[Finding]:
                 start=start,
                 end=end,
             )
+        )
 
-    return list(seen_spans.values())
-
-
-def detect_all(analyzer, units: list[TextUnit], config: dict) -> list[Finding]:
-    findings: list[Finding] = []
-    for unit in units:
-        findings.extend(detect_unit(analyzer, unit, config))
-    return findings
+    return _resolve_overlaps(candidates)
 
 
 # --- completeness / unmatched-risk scan -------------------------------------
@@ -124,6 +165,7 @@ _MISS_PATTERNS = [
     re.compile(r"[A-Z]{2}\d{2}[A-Z0-9]{10,30}"),  # IBAN-shaped
     re.compile(r"[\w.+-]+@[\w-]+\.[\w.-]+"),  # email-shaped
     re.compile(r"\d[\d ./-]{3,}\d"),  # 5+ char digit-ish runs (phones, ids, ...)
+    re.compile(r"\b[A-Z]{4}[A-Z]{2}[A-Z0-9]{2}(?:[A-Z0-9]{3})?\b"),  # BIC/SWIFT-shaped
 ]
 
 
@@ -146,8 +188,12 @@ def completeness_scan(units: list[TextUnit], kept: list[Finding]) -> list[Groupe
             for m in pattern.finditer(unit.text):
                 start, end = m.start(), m.end()
                 value = m.group().strip()
-                if sum(c.isdigit() for c in value) < 4 and "@" not in value:
-                    continue  # too few digits and not an email -> not risky enough
+                if (
+                    sum(c.isdigit() for c in value) < 4
+                    and "@" not in value
+                    and not validators.bic_valid(value)
+                ):
+                    continue  # too few digits, not an email, not a BIC -> not risky enough
                 if any(cs < end and ce > start for cs, ce in unit_covered):
                     continue  # overlaps a real finding -> already handled
                 key = value.lower()

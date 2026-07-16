@@ -6,6 +6,7 @@ from presidio_analyzer.predefined_recognizers import (
     CreditCardRecognizer,
     EmailRecognizer,
     IbanRecognizer,
+    PhoneRecognizer,
 )
 
 SPACY_MODELS = {
@@ -13,13 +14,21 @@ SPACY_MODELS = {
     "en": "en_core_web_md",
 }
 
+# The single source of truth for "which languages does this tool support".
+# Order matters: the first entry is the fallback when a document's language
+# cannot be determined (German, this being a German bank).
+DEFAULT_LANGUAGES = ("de", "en")
+
 # Built-in pattern recognizers we want available regardless of the scan
 # language. Presidio registers these for English only by default; because a
 # document is now scanned in a SINGLE detected language (to avoid cross-language
-# NER noise), a German scan would otherwise miss IBANs/emails/cards. So we add a
-# copy for every supported language. These are pure regex/checksum -- language
-# only affects context boosting -- so cross-registering is safe.
-_PORTABLE_PATTERN_RECOGNIZERS = (IbanRecognizer, EmailRecognizer, CreditCardRecognizer)
+# NER noise), a German scan would otherwise miss IBANs/emails/cards/foreign
+# phones. So we add a copy for every supported language. These are pure
+# regex/checksum/library lookups -- language only affects context boosting -- so
+# cross-registering is safe. PhoneRecognizer (phonenumbers-backed) catches
+# international client numbers that the German-only DE_PHONE pattern rejects;
+# overlap resolution in core.detect_unit dedupes it against DE_PHONE.
+_PORTABLE_PATTERN_RECOGNIZERS = (IbanRecognizer, EmailRecognizer, CreditCardRecognizer, PhoneRecognizer)
 
 
 def build_analyzer(config: dict) -> AnalyzerEngine:
@@ -27,7 +36,7 @@ def build_analyzer(config: dict) -> AnalyzerEngine:
     logic itself lives in `core`; language *selection* per document lives in
     `pipeline`/`language`. This just assembles an engine that can run either
     supported language on demand."""
-    languages = config.get("languages", ["de", "en"])
+    languages = config.get("languages") or list(DEFAULT_LANGUAGES)
     nlp_config = {
         "nlp_engine_name": "spacy",
         "models": [{"lang_code": lang, "model_name": SPACY_MODELS[lang]} for lang in languages],

@@ -1,7 +1,7 @@
 import fitz
 import pytest
 
-from anonymizer.core import completeness_scan, detect_unit
+from anonymizer.core import _resolve_overlaps, completeness_scan, detect_unit
 from anonymizer.models import Finding, TextUnit
 from anonymizer.pipeline import ProcessingError, apply_document, scan_document, verify_output
 
@@ -67,3 +67,39 @@ def test_stats_report_tiers(sample_docx, analyzer, base_config):
     assert result.stats["units_scanned"] > 0
     assert result.stats["distinct_findings"] == len(result.all_actionable())
     assert "auto_accept" in result.stats and "needs_review" in result.stats
+
+
+def test_resolve_overlaps_keeps_one_longer_span():
+    """Regression: two recognizers claiming overlapping-but-different spans for
+    one phone number used to both survive (exact-tuple dedup), and apply then
+    spliced them and mangled the text ('...danke' -> '...ke'). Overlap
+    resolution must keep exactly one -- the longer (more complete) span."""
+    a = Finding("PHONE_NUMBER", "030 12345678", 0.85, "", "u1", 5, 17)
+    b = Finding("DE_PHONE", "030 12345678x", 0.60, "", "u1", 5, 18)  # overlaps, longer
+    kept = _resolve_overlaps([a, b])
+    assert len(kept) == 1
+    assert kept[0].entity_type == "DE_PHONE"  # longer span wins -> more coverage
+
+
+def test_resolve_overlaps_full_address_beats_contained_city():
+    """A full DE_ADDRESS must win over spaCy's city-only LOCATION inside it, so
+    the house number is redacted too -- even though LOCATION scores higher."""
+    city = Finding("LOCATION", "Königsallee", 0.85, "", "u1", 10, 21)
+    addr = Finding("DE_ADDRESS", "Königsallee 3", 0.60, "", "u1", 10, 23)
+    kept = _resolve_overlaps([city, addr])
+    assert len(kept) == 1 and kept[0].entity_type == "DE_ADDRESS"
+
+
+def test_resolve_overlaps_keeps_touching_and_disjoint():
+    a = Finding("PERSON", "Anna", 0.9, "", "u1", 0, 4)
+    b = Finding("PERSON", "Berlin", 0.9, "", "u1", 5, 11)
+    c = Finding("IBAN_CODE", "DE00", 0.98, "", "u1", 11, 15)  # touches b at 11
+    kept = _resolve_overlaps([a, b, c])
+    assert [k.start for k in kept] == [0, 5, 11]  # none overlap; sorted by start
+
+
+def test_resolve_overlaps_denylist_wins():
+    real = Finding("PERSON", "Musterbank", 0.85, "", "u1", 0, 10)
+    deny = Finding("DENY_LIST", "Musterbank", 1.0, "", "u1", 0, 10)
+    kept = _resolve_overlaps([real, deny])
+    assert len(kept) == 1 and kept[0].entity_type == "DENY_LIST"

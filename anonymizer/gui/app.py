@@ -144,7 +144,7 @@ def main_page() -> None:
                 )
 
     if not drop_patch_status():
-        with ui.row().classes("w-full max-w-7xl mx-auto px-4 pt-3 -mb-1"):
+        with ui.row().classes("w-full max-w-7xl mx-auto px-6 pt-3 -mb-1"):
             with ui.element("div").classes("az-card w-full").style(
                 f"border-left:3px solid {theme.WARNING}; padding:12px 16px;"
             ):
@@ -155,9 +155,9 @@ def main_page() -> None:
                         "Use 'click to browse' to select files. Re-run setup to enable drag-and-drop."
                     ).classes("text-sm")
 
-    with ui.row().classes("w-full max-w-7xl mx-auto gap-4 p-4 items-start flex-nowrap"):
+    with ui.row().classes("az-main w-full max-w-7xl mx-auto gap-4 px-6 py-4 items-start flex-nowrap"):
         # -- Left: intake + queue -------------------------------------------
-        with ui.column().classes("gap-4").style("flex: 0 0 340px; max-width: 340px;"):
+        with ui.column().classes("az-rail gap-4").style("flex: 0 0 340px; max-width: 340px;"):
             _intake_panel(state)
             queue_container = ui.column().classes("w-full gap-2")
 
@@ -322,10 +322,17 @@ def _render_work(container, state: PageState) -> None:
             return
 
         if job.status in ("pending", "scanning"):
+            outstanding = sum(1 for j in state.jobs if j.status in ("pending", "scanning"))
             with ui.element("div").classes("az-card w-full"):
                 ui.label(job.name).classes("az-h2")
-                ui.label("Scanning…" if job.status == "scanning" else "Waiting to scan…").classes("az-muted text-sm")
+                msg = "Scanning…" if job.status == "scanning" else "Waiting to scan…"
+                if len(state.jobs) > 1:
+                    msg += f"  ({outstanding} of {len(state.jobs)} files still to scan)"
+                ui.label(msg).classes("az-muted text-sm")
                 ui.linear_progress().props("indeterminate")
+                ui.label("The first scan loads the language model — this can take 10–20 seconds.").classes(
+                    "az-muted text-xs mt-1"
+                )
             return
 
         if job.status == "failed":
@@ -337,6 +344,16 @@ def _render_work(container, state: PageState) -> None:
                 ui.label("No output was written — better no file than a falsely-clean one.").classes(
                     "az-muted text-xs mt-1"
                 )
+            return
+
+        if job.status == "saving":
+            with ui.element("div").classes("az-card w-full"):
+                with ui.row().classes("items-center gap-2"):
+                    ui.spinner(size="1.4rem")
+                    ui.label("Applying redactions & verifying…").classes("az-h2")
+                ui.label(
+                    "Re-scanning the output to guarantee no residual PII before the file is written."
+                ).classes("az-muted text-sm mt-1")
             return
 
         if job.status == "done":

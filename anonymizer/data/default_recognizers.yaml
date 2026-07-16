@@ -64,6 +64,15 @@ entities:
   BANK_INTERNAL_REF:
     default_action: pseudonymize
     confidence_threshold: 0.5
+  BIC_CODE:
+    default_action: pseudonymize
+    confidence_threshold: 0.5
+  DE_ADDRESS:
+    default_action: pseudonymize
+    confidence_threshold: 0.5
+  DE_KUNDENNUMMER:
+    default_action: pseudonymize
+    confidence_threshold: 0.6
 
 # Structural/banking words the German NER model routinely mislabels as
 # people/orgs/places. They are never PII, so suppressing them is pure precision
@@ -108,13 +117,13 @@ custom_recognizers:
     patterns:
       - regex: '\b\d{6,10}\b'
         score: 0.3
-    context: ["kontonummer", "konto-nr", "konto nr"]
+    context: ["kontonummer", "konto-nr", "konto nr", "konto", "kto", "kto."]
   - name: DE_DEPOTNUMMER
     language: de
     patterns:
       - regex: '\b\d{6,12}\b'
         score: 0.3
-    context: ["depotnummer", "depot-nr", "depot nr"]
+    context: ["depotnummer", "depot-nr", "depot nr", "depot"]
   - name: BANK_INTERNAL_REF
     language: de
     patterns:
@@ -131,3 +140,42 @@ custom_recognizers:
       - regex: '(?<![\dA-Za-z])(?:(?:\+|00)49[\s\-/().]*|0)\d(?:[\s\-/().]*\d){5,}(?!\d)'
         score: 0.6
     context: ["telefon", "tel", "tel.", "mobil", "handy", "fax", "durchwahl", "phone", "rufnummer"]
+  # BIC / SWIFT. Base score kept low so it only clears threshold with a
+  # bic/swift context word nearby -- this keeps ordinary 8-letter uppercase
+  # words from being flagged; an unlabeled BIC still surfaces via the
+  # completeness scan's country-code-gated backstop.
+  - name: BIC_CODE
+    language: de
+    patterns:
+      - regex: '\b[A-Z]{4}[A-Z]{2}[A-Z0-9]{2}(?:[A-Z0-9]{3})?\b'
+        score: 0.4
+    context: ["bic", "swift", "swift-code", "bic/swift", "bank identifier"]
+  # German postal address: a street+house-number, or a PLZ paired with a city.
+  # Pairing (5-digit PLZ + capitalized word) keeps a bare 5-digit number from
+  # matching. de_core_news_lg NER catches city NAMES only, not full addresses.
+  - name: DE_ADDRESS
+    language: de
+    patterns:
+      - regex: '\b[A-ZÄÖÜ][\wäöüß.\-]*(?:stra(?:ße|sse)|str\.|weg|allee|platz|gasse|ring|damm|ufer)\s+\d{1,4}\s?[a-z]?\b'
+        score: 0.6
+      - regex: '\b\d{5}\s+[A-ZÄÖÜ][a-zäöüß.\-]+\b'
+        score: 0.5
+    context: ["adresse", "anschrift", "wohnhaft", "straße", "plz", "postleitzahl", "wohnort"]
+  # Bare numeric customer number (Kundennummer 4830123). Context-gated like the
+  # account/depot recognizers so it doesn't flag every 5-12 digit run.
+  - name: DE_KUNDENNUMMER
+    language: de
+    patterns:
+      - regex: '\b\d{5,12}\b'
+        score: 0.3
+    context: ["kundennummer", "kunden-nr", "kunden nr", "kunde nr", "kd-nr", "kdnr"]
+  # German date (dd.mm.yyyy). The German spaCy model emits NO DATE entity, so
+  # without this a Geburtsdatum is never detected on German-routed documents.
+  # Surfaced for review (low-sensitivity "Dates & other" class); profiles decide
+  # whether dates are redacted or skipped.
+  - name: DATE_TIME
+    language: de
+    patterns:
+      - regex: '\b(0?[1-9]|[12]\d|3[01])\.(0?[1-9]|1[0-2])\.(19|20)\d{2}\b'
+        score: 0.5
+    context: ["geboren", "geburtsdatum", "geb", "geb.", "datum", "vom", "stand"]

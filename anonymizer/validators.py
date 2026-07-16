@@ -53,6 +53,30 @@ def iban_valid(value: str) -> bool:
         return False
 
 
+_ISO_3166_ALPHA2 = frozenset(
+    "AD AE AF AG AI AL AM AO AQ AR AS AT AU AW AX AZ BA BB BD BE BF BG BH BI BJ BL BM BN BO BQ BR BS "
+    "BT BV BW BY BZ CA CC CD CF CG CH CI CK CL CM CN CO CR CU CV CW CX CY CZ DE DJ DK DM DO DZ EC EE "
+    "EG EH ER ES ET FI FJ FK FM FO FR GA GB GD GE GF GG GH GI GL GM GN GP GQ GR GS GT GU GW GY HK HM "
+    "HN HR HT HU ID IE IL IM IN IO IQ IR IS IT JE JM JO JP KE KG KH KI KM KN KP KR KW KY KZ LA LB LC "
+    "LI LK LR LS LT LU LV LY MA MC MD ME MF MG MH MK ML MM MN MO MP MQ MR MS MT MU MV MW MX MY MZ NA "
+    "NC NE NF NG NI NL NO NP NR NU NZ OM PA PE PF PG PH PK PL PM PN PR PS PT PW PY QA RE RO RS RU RW "
+    "SA SB SC SD SE SG SH SI SJ SK SL SM SN SO SR SS ST SV SX SY SZ TC TD TF TG TH TJ TK TL TM TN TO "
+    "TR TT TV TW TZ UA UG UM US UY UZ VA VC VE VG VI VN VU WF WS YE YT ZA ZM ZW".split()
+)
+_BIC_RE = re.compile(r"[A-Z]{4}([A-Z]{2})[A-Z0-9]{2}(?:[A-Z0-9]{3})?")
+
+
+def bic_valid(value: str) -> bool:
+    """ISO 9362 BIC/SWIFT shape (8 or 11 chars) with a real ISO-3166 country
+    code in positions 5-6. The country-code gate is what separates a genuine BIC
+    from an 8-letter uppercase word, keeping the completeness backstop low-noise.
+    Not wired into VALIDATORS on purpose: a BIC-shaped English word could still
+    carry a valid country code, so BICs are surfaced for review, never auto-
+    accepted on shape alone."""
+    m = re.fullmatch(_BIC_RE, value.strip().upper())
+    return bool(m and m.group(1) in _ISO_3166_ALPHA2)
+
+
 def de_steuer_id_valid(value: str) -> bool:
     """German tax ID (steuerliche Identifikationsnummer) -- 11 digits with an
     ISO 7064 MOD 11,10 check digit. Also enforces the structural rule that the
@@ -79,7 +103,11 @@ def de_steuer_id_valid(value: str) -> bool:
     return check == int(digits[10])
 
 
-# entity_type -> validator callable.
+# entity_type -> validator callable. BIC_CODE is deliberately NOT here: putting
+# it in VALIDATORS would let _refine promote any BIC-shaped word with a valid
+# country-code substring (DOKUMENT -> "ME", Anfragen -> "AG") to auto-accept,
+# bypassing the context gate. BICs stay context-gated; bic_valid is used only by
+# the low-noise completeness backstop.
 VALIDATORS = {
     "IBAN_CODE": iban_valid,
     "CREDIT_CARD": luhn_valid,

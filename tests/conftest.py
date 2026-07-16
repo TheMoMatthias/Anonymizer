@@ -13,6 +13,17 @@ from anonymizer.config import DEFAULT_CONFIG_PATH
 from anonymizer.engine import build_analyzer
 
 
+@pytest.fixture(autouse=True)
+def _isolate_keyring(monkeypatch):
+    """Keep the test suite off the real Windows Credential Manager: MappingStore
+    stores/reads its Fernet key via keyring, and without this a test (esp. a key
+    rotation) would mutate the user's REAL mapping key. Each test gets a fresh
+    in-memory keyring."""
+    store: dict[tuple[str, str], str] = {}
+    monkeypatch.setattr("keyring.set_password", lambda service, name, value: store.__setitem__((service, name), value))
+    monkeypatch.setattr("keyring.get_password", lambda service, name: store.get((service, name)))
+
+
 @pytest.fixture(scope="session")
 def base_config() -> dict:
     """Loads the shipped default config without touching the real

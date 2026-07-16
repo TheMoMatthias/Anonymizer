@@ -20,6 +20,30 @@ def _column_headers(ws) -> dict[int, str]:
     return headers
 
 
+def _cell_scan_text(cell) -> str | None:
+    """The text to scan for a cell, or None to skip. String cells pass through;
+    NUMBERS are coerced to a plain string so account / tax / customer / phone
+    numbers STORED AS NUMBERS (very common in bank spreadsheets) are not
+    invisible to detection -- previously only string cells were scanned, so a
+    numeric account number sailed through into a "verified" file. Short numbers
+    (< 5 digits: counts, small amounts) and non-integer decimals (monetary
+    amounts) are skipped as not-identifiers; dates/booleans/formulas/errors are
+    left to structure."""
+    v = cell.value
+    if v is None:
+        return None
+    if cell.data_type == "s" and isinstance(v, str):
+        return v if v.strip() else None
+    if cell.data_type == "n" and isinstance(v, (int, float)) and not isinstance(v, bool):
+        if isinstance(v, float):
+            if not v.is_integer():
+                return None
+            v = int(v)
+        s = str(v)
+        return s if len(s) >= 5 else None
+    return None
+
+
 def _iter_cell_units(wb):
     """Yields (id, text, header) -- header is the column-1-row text for that
     column, given as context so recognizers relying on nearby German context
@@ -30,8 +54,9 @@ def _iter_cell_units(wb):
         for row in ws.iter_rows():
             for cell in row:
                 header = headers.get(cell.column) if cell.row != 1 else None
-                if cell.data_type == "s" and isinstance(cell.value, str) and cell.value.strip():
-                    yield f"cell|{ws.title}|{cell.coordinate}", cell.value, header
+                text = _cell_scan_text(cell)
+                if text is not None:
+                    yield f"cell|{ws.title}|{cell.coordinate}", text, header
                 if cell.comment is not None and cell.comment.text.strip():
                     yield f"comment|{ws.title}|{cell.coordinate}", cell.comment.text, header
 
@@ -98,9 +123,12 @@ def apply(path: Path, out_path: Path, decisions: dict, analyzer, config, mapping
         for row in ws.iter_rows():
             for cell in row:
                 header = headers.get(cell.column) if cell.row != 1 else None
-                if cell.data_type == "s" and isinstance(cell.value, str) and cell.value.strip():
-                    new_value = _apply_findings_to_text(cell.value, header, analyzer, config, decisions, mapping_store)
-                    if new_value != cell.value:
+                text = _cell_scan_text(cell)
+                if text is not None:
+                    new_value = _apply_findings_to_text(text, header, analyzer, config, decisions, mapping_store)
+                    if new_value != text:
+                        # A redacted numeric cell must become a string cell so
+                        # the token ("[KONTO_1]") can be stored at all.
                         cell.value = new_value
                 if cell.comment is not None and cell.comment.text.strip():
                     new_text = _apply_findings_to_text(

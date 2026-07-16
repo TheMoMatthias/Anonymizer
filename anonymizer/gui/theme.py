@@ -50,6 +50,10 @@ _CSS = """
 
 body, .q-page, .nicegui-content { background: var(--bg) !important; color: var(--text); font-family: var(--font-sans); }
 
+/* A visible keyboard-focus ring everywhere (there was none) -- required for a
+   tool operated without a mouse. */
+:focus-visible { outline: 2px solid __ACCENT__; outline-offset: 2px; border-radius: 4px; }
+
 /* NiceGUI wraps page content in a padded, gapped, centered column by default,
    which fights our own layout (mis-aligned header, odd spacing). Neutralize it
    and let our containers own all spacing/width. */
@@ -71,17 +75,18 @@ html, body { margin: 0; width: 100%; overflow-x: hidden; }
 .az-muted { color: var(--text-muted); }
 .az-mono { font-family: var(--font-mono); }
 .az-h1 { font-size: 1.25rem; font-weight: 700; letter-spacing: -.01em; color: var(--text); }
-.az-h2 { font-size: .95rem; font-weight: 650; color: var(--text); }
+.az-h2 { font-size: .95rem; font-weight: 600; color: var(--text); }
 .az-kicker { font-size: .68rem; font-weight: 700; letter-spacing: .12em; text-transform: uppercase; color: var(--text-muted); }
 
+/* No backdrop-filter here: the header surface is opaque, so it rendered nothing
+   and only implied a frosted effect that never existed. */
 .az-header {
   background: var(--surface); border-bottom: 1px solid var(--border);
-  backdrop-filter: saturate(1.2);
 }
 
 .az-chip {
   display: inline-flex; align-items: center; gap: 4px; padding: 1px 8px; border-radius: 999px;
-  font-size: .68rem; font-weight: 650; line-height: 1.5; border: 1px solid transparent; white-space: nowrap;
+  font-size: .68rem; font-weight: 600; line-height: 1.5; border: 1px solid transparent; white-space: nowrap;
 }
 
 .az-dropzone {
@@ -92,8 +97,17 @@ html, body { margin: 0; width: 100%; overflow-x: hidden; }
 .az-dropzone.az-drag { border-color: __ACCENT__; background: color-mix(in srgb, __ACCENT__ 8%, var(--surface)); }
 
 .az-stat { display:flex; flex-direction:column; gap:2px; }
-.az-stat .n { font-size: 1.4rem; font-weight: 700; line-height: 1; }
+.az-stat .n { font-size: 1.4rem; font-weight: 700; line-height: 1; font-variant-numeric: tabular-nums; }
 .az-stat .l { font-size: .7rem; color: var(--text-muted); text-transform: uppercase; letter-spacing:.06em; }
+/* The reviewer's workload leads; the rest is context. */
+.az-stat-hero .n { font-size: 1.9rem; }
+
+/* The native window is resizable: below this the two-column layout must stack
+   rather than cramp the dense review screen into an unusable rail. */
+@media (max-width: 860px) {
+  .az-main { flex-direction: column !important; flex-wrap: wrap !important; }
+  .az-rail { flex: 1 1 auto !important; max-width: none !important; width: 100%; }
+}
 
 .az-scroll { max-height: 58vh; overflow-y: auto; overflow-x: hidden; }
 .az-scroll::-webkit-scrollbar { width: 10px; }
@@ -120,11 +134,19 @@ def install() -> None:
 
 
 def chip(text: str, color: str, *, filled: bool = False) -> ui.html:
-    """A small pill. Outlined by default; `filled` for a solid emphasis chip."""
+    """A small pill. Outlined by default; `filled` for a solid emphasis chip.
+
+    The outlined text colour is lifted toward the theme's text colour via
+    color-mix so it clears WCAG AA on both the light and dark surfaces (the raw
+    hue as ~11px text failed AA on the default dark surface); the hue still owns
+    the border and tint so the semantic colour reads."""
     if filled:
         style = f"background:{color};color:#fff;border-color:{color};"
     else:
-        style = f"color:{color};border-color:{color}55;background:{color}12;"
+        style = (
+            f"color:color-mix(in srgb, {color} 62%, var(--text));"
+            f"border-color:{color}66;background:{color}1f;"
+        )
     return ui.html(f'<span class="az-chip" style="{style}">{text}</span>')
 
 

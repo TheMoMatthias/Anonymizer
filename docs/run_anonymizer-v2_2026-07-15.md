@@ -233,3 +233,107 @@ your review.
   - NOT done here (deferred per contract): pixel-level look + physical native
     drag-drop walkthrough on the real window; a "Save all" batch convenience;
     German phone recognizer + DATE_TIME-noise detection tuning.
+
+## Phase 4 — Deep audit + hardening (2026-07-16, /audit-loop-codebase)
+
+5 read-only audit agents (recall, edge-cases, security, code-quality, UI) +
+own independent read of the full critical surface. Posture (user-signed):
+auto-fix safe/caution; PAUSE on critical-tier; detection-weighted; build a
+static visual-preview artifact.
+
+VERDICT: precision disaster (643-findings / German-words-as-names) is GENUINELY
+FIXED. Confirmed-good & to KEEP: no runtime network (air-gap holds), scan/apply
+parity by construction, PII-free report/audit trail, validators (IBAN mod-97 /
+Luhn / Steuer-ID checksum+structural) brute-force-verified clean. NOT yet
+comprehensive: real recall gaps + false-clean leaks + 2 default-config bugs.
+
+User authorized ALL FOUR critical clusters. Progress:
+
+- [ ] Cluster 1 — detection-correctness bugs
+  - [ ] #1 detect_unit dedups exact (start,end) only -> overlapping spans (e.g.
+        PHONE_NUMBER + DE_PHONE) survive -> apply splices -> DOCX/XLSX/PPTX text
+        corruption + dropped redaction. Fix: interval-schedule overlap resolve
+        (keep highest score, drop overlappers) across per-lang + deny-list set.
+  - [ ] #2 language.detect_dominant: `de + umlauts*2` lets umlaut CHARS alone
+        flip to ('de', True) on English text -> German NER on English (reverse
+        of the original bug), and confident=True so GUI ask-fallback never fires.
+        Fix: count umlaut-bearing WORDS capped, require min word-signal.
+- [ ] Cluster 2 — recall recognizers (new default to REVIEW tier, not auto-redact)
+  - [ ] #6 add BIC_CODE, DE_STREET, DE_PLZ_CITY, DE_DATE (German NER emits NO
+        DATE), cross-register PhoneRecognizer to `de` (intl phones), DE_KUNDENNUMMER
+        (bare numeric), broaden Konto/Depot context lists.
+  - [ ] #7 completeness_scan textual backstop (BIC/alpha + capitalized-bigram);
+        honest UI relabel. #12 add SV-Nummer checksum. #9(recall) demote invalid
+        IBAN/card to ~0.45 review instead of zeroing.
+- [ ] Cluster 3 — fail-loud coverage (touches all format handlers + verifier)
+  - [ ] #3 scrub OOXML docProps + PDF /Author/XMP metadata on apply
+  - [ ] #4 xlsx scan numeric cells (coerce str) not just data_type=="s"
+  - [ ] #10 extract docx/pptx text boxes / drawing shapes (w:txbxContent)
+  - [ ] #5 verify_output: recognizer-INDEPENDENT literal-value residual scan
+        (decompress output zip / PDF streams, assert removed literals absent,
+        match by value across all entity types)
+  - [ ] #11 docx detect-text derived from same run concat used for replacement
+- [ ] Cluster 4 — mapping/crypto integrity (MIGRATION SPEC -> user sign-off FIRST)
+  - [ ] #8 monotonic never-reused placeholder counter (survives erase/reset)
+  - [ ] #9 key mapping rows on canonical label, not raw entity_type (PHONE alias)
+  - [ ] #13 atomic save (mkstemp+os.replace); rotate_key saves under new key
+        BEFORE keyring set; hold store open across verify, save after os.replace
+  - [ ] #14 concurrency guard (serialize DB access / disable save while saving)
+- [ ] SAFE auto-fixes (pre-authorized, non-critical): UI AA chip contrast,
+      focus-visible + keyboard roles, per-value segmented toggle, saving-state,
+      header/body alignment, layout wrap + scroll model, stat hierarchy, danger-
+      zone styling, tooltips on truncated values; dead detect_all, version drift
+      (0.1.0 vs 0.2.0), shared DEFAULT_LANGUAGES const, TOKEN_RE digit support,
+      invalid-score hard-skip, config atomic write, OCR config-path caching,
+      audit-write-failure surfaced.
+- [ ] Visual-preview artifact (dark graphite+teal; requested).
+- DONE-WHEN: all authorized clusters implemented + tests green + headless build
+  HTTP 200; artifact delivered. Crypto cluster gated on migration sign-off.
+
+### STATUS 2026-07-16 (end of session) — 66 tests green
+
+- [x] Cluster 1 DONE: _resolve_overlaps (longer-span-then-score, NER deprioritized
+      on ties) in core.detect_unit; language.detect_dominant umlaut reweight
+      (capped umlaut-WORD count < _MIN_SIGNAL). Tests: test_core (overlap x3),
+      test_language (umlaut x2).
+- [x] Cluster 2 DONE: BIC_CODE (context-gated, NOT auto-promoted — validator
+      promotion caused DOKUMENT/Anfragen false BICs, reverted), DE_ADDRESS
+      (street + PLZ-city), DATE_TIME German-date recognizer (German NER emits no
+      DATE), DE_KUNDENNUMMER, PhoneRecognizer cross-registered to de, broadened
+      Konto/Depot context; validators.bic_valid (ISO-3166 gate) backs the
+      completeness scan; invalid-checksum DEMOTE (0.4) not zero. Tests: test_recall.
+- [x] Cluster 3 (safety trio) DONE: #3 _scrub_metadata (OOXML docProps + PDF),
+      #4 xlsx numeric-cell scan (_cell_scan_text), #5 _literal_residual
+      recognizer-independent backstop wired into apply_document verify. Tests:
+      test_fail_loud.
+  - [x] #10 text boxes + #11 run coverage DONE: _textbox_paragraphs walks
+        w:txbxContent in body + every header/footer; _para_run_elements adds
+        hyperlink runs (p.runs skips them) and does NOT descend into text boxes
+        (would double-redact); detection and replacement now build text from the
+        SAME run list via paragraph_runs(), so offsets match by construction.
+        Tests: test_fail_loud (textbox, hyperlink) using an IBAN for determinism.
+- [x] Cluster 4 (core) DONE: #8 monotonic max+1 placeholder counter, #13 atomic
+      save (mkstemp+os.replace) + rotate saves-under-new-key-first + prev-key
+      recovery fallback, M2 mapping saved only after os.replace. conftest now
+      isolates keyring (in-memory). Tests: test_mapping.
+  - [x] #9 token-alias keying DONE: rows keyed on the canonical label (so
+        PHONE_NUMBER + DE_PHONE share one token for one value), with a legacy
+        raw-entity_type fallback so existing mappings keep their tokens. No
+        schema migration needed.
+  - [x] #14 concurrency — addressed via UI saving-state (Save hidden during save).
+- [x] SAFE UI: AA-safe chips (color-mix fg), :focus-visible ring, saving-state
+      branch, header/body px-6 alignment, segmented action toggle replacing the
+      per-row dropdowns, tooltips on truncated value/context/score, hero "to
+      review" stat, responsive stack breakpoint (az-main/az-rail), honest
+      "Set all N" bulk label, scan-progress copy, font-weight 650->600,
+      dead backdrop-filter removed.
+- [x] HYGIENE: version drift 0.1.0->0.2.0, shared engine.DEFAULT_LANGUAGES,
+      dead detect_all removed, TOKEN_RE accepts digits in labels, atomic
+      save_config.
+- [x] Visual-preview artifact delivered (dark/light graphite+teal review screen).
+- VERIFIED: 69 tests green; all routes HTTP 200 headless; review screen rendered
+  with a synthetic ScanResult (6 toggles + hero stat present).
+- REMAINING (small, non-critical): settings "danger zone" styling; global
+  "apply to everything" still full-re-renders (loses scroll/expansion); pptx
+  grouped-shape / chart text; nested-scroll model (.az-scroll 58vh vs page);
+  audit.log fails open; allow/deny list stored as plaintext at rest.
