@@ -102,6 +102,48 @@ def test_name_propagates_across_the_document(tmp_path, analyzer, base_config):
     assert match[0].count >= 3, f"propagation missed bare occurrences (count={match[0].count})"
 
 
+def test_name_column_header_catches_bare_surnames(tmp_path, analyzer, base_config):
+    """A spreadsheet column headed 'Name' is the one place a bare surname
+    legitimately appears with no prose. NER only finds ~35% of ordinary German
+    surnames there; the header is stronger evidence than the model."""
+    import openpyxl
+
+    from anonymizer.pipeline import scan_document
+
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws["A1"] = "Name"
+    for row, surname in enumerate(["Müller", "Weber", "Bauer", "Koch"], start=2):
+        ws[f"A{row}"] = surname
+    path = tmp_path / "kunden.xlsx"
+    wb.save(path)
+
+    found = {g.value for g in scan_document(path, analyzer, base_config).all_actionable()}
+    for surname in ("Müller", "Weber", "Bauer", "Koch"):
+        assert surname in found, f"{surname} leaked from a 'Name' column: {found}"
+
+
+def test_name_column_override_is_header_gated(tmp_path, analyzer, base_config):
+    """The override must key off the HEADER, not blanket-flag every column. Uses
+    a value spaCy ignores on its own ("Vorsorge"), so the header is the only
+    variable: flagged under 'Name', untouched under 'Produktgruppe'."""
+    import openpyxl
+
+    from anonymizer.pipeline import scan_document
+
+    def _scan(header: str) -> set[str]:
+        wb = openpyxl.Workbook()
+        ws = wb.active
+        ws["A1"] = header
+        ws["A2"] = "Vorsorge"
+        path = tmp_path / f"{header}.xlsx"
+        wb.save(path)
+        return {g.value for g in scan_document(path, analyzer, base_config).all_actionable()}
+
+    assert "Vorsorge" not in _scan("Produktgruppe"), "override fired without a name header"
+    assert "Vorsorge" in _scan("Name"), "override did not fire under a name header"
+
+
 def test_bic_valid_country_gate():
     assert bic_valid("COBADEFFXXX")  # Commerzbank Frankfurt, DE
     assert bic_valid("DEUTDEFF")  # 8-char BIC, DE

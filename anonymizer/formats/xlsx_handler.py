@@ -1,14 +1,34 @@
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
 import openpyxl
 
 from ..actions import decisions_lookup, resolve_replacement
 from ..core import detect_unit
-from ..models import TextUnit
+from ..models import Finding, TextUnit
 
 EXTENSIONS = (".xlsx", ".xlsm", ".xls")
+
+# A column header that declares its cells are people. This is the one place a
+# bare surname legitimately appears with no prose around it, and it is exactly
+# where NER collapses: measured, de_core_news_lg finds only ~35% of ordinary
+# German surnames (Müller, Weber, Bauer) in a bare cell, because its training
+# gives it nothing to lean on without a sentence.
+#
+# The header is stronger evidence than any model: the spreadsheet's own author
+# labelled the column. Note this does NOT work via Presidio's context boost --
+# that only lifts PATTERN recognizers, and spaCy NER gets no boost from it at
+# all, which is why "Kunde: Müller" in a cell still missed.
+_NAME_COLUMN_HEADER = re.compile(
+    r"(name|kunde|kundin|inhaber|empf(ä|ae)nger|sachbearbeiter|ansprechpartner|"
+    r"berater|mitarbeiter|antragsteller|vertragspartner|beg(ü|ue)nstigter)",
+    re.IGNORECASE,
+)
+# Cell contents that a name column can still hold but which are not names.
+_NOT_A_NAME = re.compile(r"^[\W\d_]*$|^(unbekannt|n/?a|keine?|leer|-{1,3}|divers)$", re.IGNORECASE)
+_NAME_COLUMN_SCORE = 0.8
 
 
 def _column_headers(ws) -> dict[int, str]:
@@ -87,6 +107,29 @@ def _analyze_cell_text(text: str, header: str | None, analyzer, config, unit_id:
         f.start -= offset
         f.end -= offset
         result.append(f)
+
+    # The column header declares this cell is a person. Trust it over the model,
+    # but only where nothing already claims the cell -- an IBAN or a name the NER
+    # did find keeps its own, better-typed finding.
+    value = text.strip()
+    if (
+        _NAME_COLUMN_HEADER.search(header or "")
+        and value
+        and not _NOT_A_NAME.match(value)
+        and not any(f.start == 0 and f.end >= len(value) for f in result)
+    ):
+        start = text.index(value)
+        result.append(
+            Finding(
+                entity_type="PERSON",
+                value=value,
+                score=_NAME_COLUMN_SCORE,
+                context=f"{header}: {value}",
+                unit_id=unit_id,
+                start=start,
+                end=start + len(value),
+            )
+        )
     return result
 
 
