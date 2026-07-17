@@ -29,9 +29,6 @@ Write-Host "Installing the app, its dependencies, and both spaCy models into the
 uv pip install --python $pythonExe --break-system-packages "$repoRoot"
 if ($LASTEXITCODE -ne 0) { throw "uv pip install failed" }
 
-Write-Host "Patching nicegui for working native drag-and-drop..."
-& $pythonExe "$PSScriptRoot\patch_nicegui_drop.py"
-
 Write-Host "Copying launcher, installer, and FAQ..."
 Copy-Item (Join-Path $PSScriptRoot "bundle_templates\launch.bat") $bundleDir
 Copy-Item (Join-Path $PSScriptRoot "bundle_templates\install.ps1") $bundleDir

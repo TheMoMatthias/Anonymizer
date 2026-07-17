@@ -9,7 +9,9 @@ if (-not (Get-Command uv -ErrorAction SilentlyContinue)) {
 uv sync
 if ($LASTEXITCODE -ne 0) { throw "uv sync failed" }
 
-uv run python "$PSScriptRoot\patch_nicegui_drop.py"
+# Note: drag-and-drop now uses NiceGUI's built-in ui.upload (an in-page dropzone),
+# so no dependency patching is required. The old patch_nicegui_drop.py step was
+# removed -- see docs/run_dragdrop-uiupload_2026-07-17.md.
 
 Write-Host ""
 Write-Host "Setup complete. Double-click Anonymizer.bat (or run scripts\run.ps1) to start the app."

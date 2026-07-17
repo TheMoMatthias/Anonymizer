@@ -49,9 +49,25 @@ def _handler_for(path: Path):
     return handler
 
 
-def output_path_for(path: Path) -> Path:
+def output_path_for(path: Path, out_dir: Path | None = None) -> Path:
+    """Where the anonymized copy is written. Default: next to the source as
+    `<stem>_psd<ext>` (idempotent — re-running overwrites the file's own output).
+
+    When `out_dir` is given (the GUI routes every save to a fixed
+    Documents\\Anonymized folder, because dropped/uploaded files have no origin
+    folder), the output goes there instead. Two different sources sharing a name
+    must NOT clobber each other, so the name is uniquified (`_psd(2)`, `_psd(3)`)
+    when the target already exists -- in a bank workflow, never losing a prior
+    anonymized document beats tidiness."""
     ext = _OUTPUT_EXT_OVERRIDE.get(path.suffix.lower(), path.suffix.lower())
-    return path.with_name(f"{path.stem}_psd{ext}")
+    if out_dir is None:
+        return path.with_name(f"{path.stem}_psd{ext}")
+    candidate = out_dir / f"{path.stem}_psd{ext}"
+    n = 2
+    while candidate.exists():
+        candidate = out_dir / f"{path.stem}_psd({n}){ext}"
+        n += 1
+    return candidate
 
 
 def _guard_extractable(resolved: Path, units: list) -> None:
@@ -274,9 +290,13 @@ def apply_document(
     analyzer,
     config: dict,
     mapping_db_path: Path | None = None,
+    out_dir: Path | None = None,
 ) -> tuple[Path, Path]:
     decisions = {(g.entity_type, g.value.strip().lower()): g.action for g in grouped}
-    out_path = output_path_for(path)
+    out_path = output_path_for(path, out_dir)
+    # The fixed output folder may not exist yet (first save) -- create it before
+    # the sibling-temp write. Harmless when out_dir is None (parent already exists).
+    out_path.parent.mkdir(parents=True, exist_ok=True)
     # Write to a sibling temp so the final file appears only once fully written
     # AND verified -- a failure never leaves a partial/unverified _psd behind,
     # and never clobbers a good prior output.

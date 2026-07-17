@@ -1,9 +1,10 @@
 from __future__ import annotations
 
+import os
+import shutil
+import tempfile
 import threading
-import tkinter as tk
 from pathlib import Path
-from tkinter import filedialog
 
 from nicegui import app, run, ui
 
@@ -22,49 +23,60 @@ _analyzer = None
 _config = None
 _analyzer_lock = threading.Lock()
 
-# Native drop plumbing. The native 'drop' event fires OUTSIDE any client/UI
-# context, so touching UI there (notify, adding rows) silently fails to reach
-# the window -- the likely cause of "drag-drop does nothing". Instead the event
-# just parks paths in a thread-safe buffer, and a ui.timer running INSIDE the
-# page's client context drains it and updates the UI reliably.
-_drop_lock = threading.Lock()
-_pending_drops: list[str] = []
-_drop_stats = {"events": 0, "empty_events": 0, "last_seen_empty": 0}
+# File intake uses NiceGUI's built-in ui.upload -- an in-page dropzone that
+# accepts BOTH drag-and-drop and click-to-browse, served over HTTP inside the
+# same webview. This replaced a fragile native-OS-drop scheme that monkeypatched
+# an installed dependency file (any `uv sync` silently reverted it) and relied on
+# a 4-hop WebView2->poller->subprocess->timer chain. See
+# docs/run_dragdrop-uiupload_2026-07-17.md.
+#
+# A browser security boundary means a dropped file's real path is never exposed
+# to the page, so upload delivers file BYTES. We write them to a managed temp
+# working copy under the file's ORIGINAL name (so tokens, the report, and the
+# output filename stay correct) and feed that path into the normal scan pipeline.
+_upload_dir: Path | None = None
 
 
-def _handle_native_drop(e) -> None:
-    paths = [p for p in (e.args.get("files", []) if hasattr(e, "args") else []) if p]
-    with _drop_lock:
-        _drop_stats["events"] += 1
-        if paths:
-            _pending_drops.extend(paths)
-        else:
-            _drop_stats["empty_events"] += 1
+def _work_dir() -> Path:
+    """Lazily-created temp dir holding working copies of uploaded files. Cleaned
+    on app shutdown (registered in main()); never leaks into the system temp."""
+    global _upload_dir
+    if _upload_dir is None or not _upload_dir.exists():
+        _upload_dir = Path(tempfile.mkdtemp(prefix="anonymizer_upload_"))
+    return _upload_dir
 
 
-app.native.on("drop", _handle_native_drop)
+def _cleanup_work_dir() -> None:
+    global _upload_dir
+    if _upload_dir is not None:
+        shutil.rmtree(_upload_dir, ignore_errors=True)
+        _upload_dir = None
 
 
-def _take_pending_drops() -> tuple[list[str], bool]:
-    """Returns (new paths since last poll, whether an empty-path drop occurred)."""
-    with _drop_lock:
-        paths = _pending_drops[:]
-        _pending_drops.clear()
-        empty = _drop_stats["empty_events"] > _drop_stats["last_seen_empty"]
-        _drop_stats["last_seen_empty"] = _drop_stats["empty_events"]
-    return paths, empty
+def _persist_upload(name: str, data: bytes) -> Path | None:
+    """Write uploaded bytes to a working copy under the ORIGINAL filename, or
+    return None if the extension is unsupported (nothing is written for junk).
+    Only the basename of `name` is used -- an uploaded name must never escape the
+    work dir via a path separator. Uniquifies to keep two same-named files dropped
+    in one session from overwriting each other before they are scanned."""
+    safe = Path(name.replace("\\", "/")).name
+    if not safe or Path(safe).suffix.lower() not in SUPPORTED_EXTENSIONS:
+        return None
+    stem, suffix = Path(safe).stem, Path(safe).suffix
+    target = _work_dir() / safe
+    n = 2
+    while target.exists():
+        target = _work_dir() / f"{stem} ({n}){suffix}"
+        n += 1
+    target.write_bytes(data)
+    return target
 
 
-def drop_patch_status() -> bool:
-    """True if the nicegui native-drop patch (which delivers real file paths) is
-    applied. When False, native drag-drop cannot yield a path and the UI should
-    say so and steer to Browse."""
-    try:
-        import nicegui.native.native_mode as native_mode
-
-        return "_poll_dnd_state" in Path(native_mode.__file__).read_text(encoding="utf-8")
-    except Exception:  # noqa: BLE001
-        return False
+def anonymized_dir() -> Path:
+    """The fixed folder every anonymized copy is written to. Dropped/uploaded
+    files have no origin folder, so a single predictable destination beats a copy
+    landing next to a temp working file the user can never find."""
+    return Path.home() / "Documents" / "Anonymized"
 
 
 def _ensure_analyzer():
@@ -80,21 +92,6 @@ def warm_start() -> None:
     """Loads the models in the background at launch so the first scan doesn't
     stall (~10-20s of spaCy load happens while the user reads the UI)."""
     threading.Thread(target=_ensure_analyzer, daemon=True).start()
-
-
-def _pick_files() -> list[str]:
-    root = tk.Tk()
-    root.withdraw()
-    root.attributes("-topmost", True)
-    paths = filedialog.askopenfilenames(
-        title="Select document(s)",
-        filetypes=[
-            ("Documents", "*.docx *.doc *.xlsx *.xlsm *.xls *.pptx *.ppt *.pdf"),
-            ("All files", "*.*"),
-        ],
-    )
-    root.destroy()
-    return list(paths)
 
 
 class PageState:
@@ -142,18 +139,6 @@ def main_page() -> None:
                 ui.button("Settings", icon="settings", on_click=lambda: ui.navigate.to("/settings")).props(
                     "flat dense"
                 )
-
-    if not drop_patch_status():
-        with ui.row().classes("w-full max-w-7xl mx-auto px-6 pt-3 -mb-1"):
-            with ui.element("div").classes("az-card w-full").style(
-                f"border-left:3px solid {theme.WARNING}; padding:12px 16px;"
-            ):
-                with ui.row().classes("items-center gap-2"):
-                    ui.icon("info", size="1.2rem").style(f"color:{theme.WARNING}")
-                    ui.label(
-                        "Drag-and-drop isn't active on this install (the NiceGUI drop patch isn't applied). "
-                        "Use 'click to browse' to select files. Re-run setup to enable drag-and-drop."
-                    ).classes("text-sm")
 
     with ui.row().classes("az-main w-full max-w-7xl mx-auto gap-4 px-6 py-4 items-start flex-nowrap"):
         # -- Left: intake + queue -------------------------------------------
@@ -203,21 +188,6 @@ def main_page() -> None:
     state.refresh = refresh_queue  # type: ignore[attr-defined]
     state.save_all = save_all  # type: ignore[attr-defined]
 
-    async def drain_drops() -> None:
-        paths, empty = _take_pending_drops()
-        if empty and not paths:
-            ui.notify(
-                "A file was dropped but Windows didn't hand over its path. Use 'click to browse' instead.",
-                type="warning",
-                timeout=6000,
-            )
-        if paths:
-            await add_files(paths)
-
-    # Native drop events land outside any client context; this timer runs INSIDE
-    # the client, so draining here is what makes dropped files actually appear.
-    ui.timer(0.3, drain_drops)
-
     refresh_queue()
 
 
@@ -225,11 +195,30 @@ def _intake_panel(state: PageState) -> None:
     with ui.element("div").classes("az-card w-full"):
         ui.label("Add documents").classes("az-h2 mb-1")
 
-        with ui.column().classes("az-dropzone w-full items-center justify-center gap-1 p-6") as dz:
-            ui.icon("cloud_upload", size="2rem").classes("az-muted")
-            ui.label("Drag files here").classes("text-sm font-medium")
-            ui.label("or click to browse").classes("az-muted text-xs")
-            ui.label(".docx .doc .xlsx .xlsm .xls .pptx .ppt .pdf").classes("az-muted text-xs mt-1")
+        async def handle_upload(e) -> None:
+            # ui.upload fires this once per file. `e.content` is a file-like of the
+            # uploaded bytes; we persist a working copy under the original name and
+            # feed its path into the normal scan pipeline.
+            data = e.content.read()
+            path = _persist_upload(e.name, data)
+            if path is None:
+                ui.notify(f"Skipped unsupported file: {e.name}", type="warning")
+                return
+            await state.add_files([str(path)])  # type: ignore[attr-defined]
+
+        upload = (
+            ui.upload(
+                on_upload=handle_upload,
+                multiple=True,
+                auto_upload=True,
+                max_file_size=100 * 1024 * 1024,  # 100 MB -- bank PDFs can be large
+                label="Drag documents here — or click to browse",
+            )
+            .props('flat accept=".docx,.doc,.xlsx,.xlsm,.xls,.pptx,.ppt,.pdf"')
+            .classes("az-dropzone w-full")
+        )
+        state.upload = upload  # type: ignore[attr-defined]
+        ui.label(".docx .doc .xlsx .xlsm .xls .pptx .ppt .pdf").classes("az-muted text-xs mt-1")
 
         with ui.row().classes("items-center gap-2 w-full mt-3"):
             ui.label("Profile").classes("az-muted text-xs w-16")
@@ -245,23 +234,6 @@ def _intake_panel(state: PageState) -> None:
         ui.label(
             "Auto-detect scans in the document's language (asks if unsure). Presets apply to files added next."
         ).classes("az-muted text-xs")
-
-        async def browse() -> None:
-            picked = await run.io_bound(_pick_files)
-            if picked:
-                await state.add_files(picked)  # type: ignore[attr-defined]
-
-        def on_enter() -> None:
-            dz.classes(add="az-drag")
-
-        def on_leave() -> None:
-            dz.classes(remove="az-drag")
-
-        dz.on("click", browse)
-        dz.on("dragenter.prevent", on_enter)
-        dz.on("dragover.prevent", lambda: None)
-        dz.on("dragleave.prevent", on_leave)
-        dz.on("drop.prevent", on_leave)
 
         with ui.expansion("Enter a path manually").classes("w-full mt-2"):
             manual = ui.input(placeholder=r"C:\path\to\document.docx").props("dense outlined").classes("w-full")
@@ -366,6 +338,12 @@ def _render_work(container, state: PageState) -> None:
                 ui.label("Output re-scanned — no residual PII of removed categories.").classes(
                     "az-muted text-xs mt-1"
                 )
+                with ui.row().classes("mt-2"):
+                    ui.button(
+                        "Open output folder",
+                        icon="folder_open",
+                        on_click=lambda p=job.out_path: _reveal_in_explorer(p),
+                    ).props("flat dense").classes("text-xs")
             return
 
         # status == review
@@ -461,7 +439,7 @@ async def _save_job(state: PageState, job: FileJob) -> None:
     state.refresh()  # type: ignore[attr-defined]
     try:
         out_path, report_path = await run.io_bound(
-            apply_document, Path(job.path), grouped, analyzer, config, None
+            apply_document, Path(job.path), grouped, analyzer, config, None, anonymized_dir()
         )
         job.out_path, job.report_path = str(out_path), str(report_path)
         job.status = "done"
@@ -480,6 +458,9 @@ async def _save_job(state: PageState, job: FileJob) -> None:
 def _clear(state: PageState) -> None:
     state.jobs.clear()
     state.selected = None
+    upload = getattr(state, "upload", None)
+    if upload is not None:
+        upload.reset()  # clear the uploader's own file list; the queue is authoritative
     state.refresh()  # type: ignore[attr-defined]
 
 
@@ -555,8 +536,22 @@ def reidentify_route() -> None:
                 ui.label(line).classes("az-mono text-xs")
 
 
+def _reveal_in_explorer(file_path: str) -> None:
+    """Open the OS file manager with the anonymized file selected (Windows), or at
+    least its folder. Best-effort -- a failure here must never crash the app."""
+    p = Path(file_path)
+    try:
+        if os.name == "nt" and p.exists():
+            os.startfile(p.parent)  # noqa: S606 -- opens Explorer at the output folder
+        elif p.parent.exists():
+            os.startfile(p.parent)  # type: ignore[attr-defined]
+    except Exception as exc:  # noqa: BLE001
+        ui.notify(f"Couldn't open the folder: {exc}", type="warning")
+
+
 def main() -> None:
     warm_start()
+    app.on_shutdown(_cleanup_work_dir)  # remove uploaded working copies on exit
     ui.run(title="Document Anonymizer", reload=False, native=True, window_size=(1400, 950))
 
 

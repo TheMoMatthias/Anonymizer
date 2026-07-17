@@ -96,6 +96,17 @@ html, body { margin: 0; width: 100%; overflow-x: hidden; }
 .az-dropzone:hover { background: var(--surface-2); border-color: var(--text-muted); }
 .az-dropzone.az-drag { border-color: __ACCENT__; background: color-mix(in srgb, __ACCENT__ 8%, var(--surface)); }
 
+/* ui.upload renders a Quasar QUploader; restyle it to read as our dashed
+   dropzone instead of the default colored widget. It highlights on dragover on
+   its own (Quasar toggles q-uploader--dnd), which we tint with the accent. */
+.az-dropzone.q-uploader { background: var(--surface); box-shadow: none; max-height: none; width: 100%; border-radius: 14px; }
+.az-dropzone .q-uploader__header { background: transparent; color: var(--text); }
+.az-dropzone .q-uploader__header .q-btn { color: var(--text-muted); }
+.az-dropzone .q-uploader__title { font-size: .8rem; font-weight: 600; white-space: normal; }
+.az-dropzone .q-uploader__subtitle { display: none; }
+.az-dropzone .q-uploader__list { background: transparent; padding: 6px 8px; }
+.az-dropzone.q-uploader--dnd { border-color: __ACCENT__; background: color-mix(in srgb, __ACCENT__ 8%, var(--surface)); }
+
 .az-stat { display:flex; flex-direction:column; gap:2px; }
 .az-stat .n { font-size: 1.4rem; font-weight: 700; line-height: 1; font-variant-numeric: tabular-nums; }
 .az-stat .l { font-size: .7rem; color: var(--text-muted); text-transform: uppercase; letter-spacing:.06em; }
