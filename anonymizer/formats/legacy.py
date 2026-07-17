@@ -29,6 +29,16 @@ def convert_to_modern(path: Path, out_dir: Path) -> Path:
 
     app = win32.gencache.EnsureDispatch(app_name)
     app.Visible = False
+    # These files come from external clients (untrusted). Force-disable macros
+    # (msoAutomationSecurityForceDisable=3) so an auto-macro can't run on Open, and
+    # suppress modal alert dialogs (password / repair / update-links prompts) that
+    # would otherwise hang a headless, Visible=False app forever. Best-effort: the
+    # available properties differ per Office application.
+    for prop, value in (("AutomationSecurity", 3), ("DisplayAlerts", False), ("AskToUpdateLinks", False)):
+        try:
+            setattr(app, prop, value)
+        except Exception:  # noqa: BLE001 -- not every app exposes every property
+            pass
     try:
         collection = getattr(app, collection_name)
         doc = collection.Open(str(path))

@@ -135,12 +135,21 @@ class StratumResult:
         return self.found / self.total if self.total else 0.0
 
 
+def _whole_token(needle: str, haystack: str) -> bool:
+    """Whole-token match, NOT substring: a common-noun surname ("Berg", "Koch")
+    must not count as found just because it is a substring of an unrelated finding
+    ("Bergstraße", a "…berg" ORG) -- that over-reports recall for exactly the
+    stratum this harness exists to measure honestly."""
+    import re
+
+    return re.search(rf"(?<!\w){re.escape(needle)}(?!\w)", haystack) is not None
+
+
 def _found(findings, needle: str) -> bool:
-    """A plant counts as found if ANY finding covers it. The entity TYPE is
-    deliberately not checked: for redaction, catching "Bauer" as NER_MISC rather
-    than PERSON still removes it from the document -- the leak is what matters,
-    not the label."""
-    return any(needle in f.value for f in findings)
+    """A plant counts as found if ANY finding covers it (as a whole token). The
+    entity TYPE is deliberately not checked: for redaction, catching "Bauer" as
+    NER_MISC rather than PERSON still removes it -- the leak is what matters."""
+    return any(_whole_token(needle, f.value) for f in findings)
 
 
 def measure_isolated(analyzer, config: dict) -> list[StratumResult]:
@@ -209,7 +218,7 @@ def measure_documents(analyzer, config: dict, workdir: Path) -> list[StratumResu
             planted = 5  # salutation, oblique, labelled, bare cell, signature
             result = scan_document(path, analyzer, config)
             caught = sum(
-                g.count for g in result.all_actionable() if surname in g.value
+                g.count for g in result.all_actionable() if _whole_token(surname, g.value)
             )
             r.total += planted
             r.found += min(caught, planted)

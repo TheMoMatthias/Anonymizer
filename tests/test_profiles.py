@@ -35,3 +35,14 @@ def test_maximize_recall_anonymizes_everything():
     out = profiles.apply_profile(_cfg(), "Maximize recall (strip everything)")
     assert all(s["default_action"] == "anonymize" for s in out["entities"].values())
     assert out["sensitivity"] == 0.15
+
+
+def test_nrp_is_special_category_and_never_skipped():
+    """GDPR Art. 9 data (NRP) must be its own high-sensitivity class, and the
+    unknown-entity fallback must NOT be the profile-skippable dates bucket."""
+    from anonymizer import profiles, taxonomy
+
+    assert taxonomy.data_class_for("NRP").key == "special_category"
+    assert taxonomy.data_class_for("SOME_CUSTOM_ENTITY").key == "other_entities"
+    for name, prof in profiles.PROFILES.items():
+        assert prof.get("classes", {}).get("special_category") != "skip", name

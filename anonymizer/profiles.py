@@ -18,6 +18,10 @@ PROFILES: dict[str, dict] = {
         "sensitivity": 0.0,
         "classes": {
             "people": "pseudonymize",
+            # names spaCy couldn't classify (MISC) follow the people policy; Art. 9
+            # special-category data is always one-way anonymized, never skipped.
+            "other_entities": "pseudonymize",
+            "special_category": "anonymize",
             "org_places": "pseudonymize",
             "contact": "pseudonymize",
             "financial_ids": "pseudonymize",
@@ -30,6 +34,8 @@ PROFILES: dict[str, dict] = {
         "sensitivity": 0.05,
         "classes": {
             "people": "pseudonymize",
+            "other_entities": "pseudonymize",
+            "special_category": "anonymize",
             "org_places": "pseudonymize",
             "contact": "anonymize",
             "financial_ids": "anonymize",
@@ -42,6 +48,8 @@ PROFILES: dict[str, dict] = {
         "sensitivity": 0.1,
         "classes": {
             "people": "anonymize",
+            "other_entities": "anonymize",
+            "special_category": "anonymize",
             "org_places": "pseudonymize",
             "contact": "anonymize",
             "financial_ids": "anonymize",

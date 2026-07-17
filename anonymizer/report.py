@@ -15,7 +15,12 @@ from .models import GroupedFinding
 def _config_hash(config: dict | None) -> str:
     if not config:
         return ""
-    blob = yaml.safe_dump(config, sort_keys=True, allow_unicode=True).encode("utf-8")
+    # Exclude the allow/deny lists: they can hold real PII, and a hash of them in
+    # the plaintext report JSON crosses the encrypted-lists trust boundary.
+    from .config import _SECURE_LIST_KEYS
+
+    filtered = {k: v for k, v in config.items() if k not in _SECURE_LIST_KEYS}
+    blob = yaml.safe_dump(filtered, sort_keys=True, allow_unicode=True).encode("utf-8")
     return hashlib.sha256(blob).hexdigest()[:16]
 
 

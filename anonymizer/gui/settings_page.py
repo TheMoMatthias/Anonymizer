@@ -14,12 +14,18 @@ ACTIONS = ["pseudonymize", "anonymize", "skip"]
 def build() -> None:
     cfg = config_mod.load_config()
 
+    flush_hooks: list = []
     _detection_section(cfg)
     _ocr_section(cfg)
-    _lists_and_recognizers(cfg)
+    _lists_and_recognizers(cfg, flush_hooks)
     _mapping_admin()
 
     def save() -> None:
+        # Flush any pending textarea edits into cfg BEFORE saving -- the lists sync
+        # on blur, but clicking Save without the textarea losing focus first could
+        # otherwise persist a stale (missing a just-typed deny term = a leak next scan).
+        for hook in flush_hooks:
+            hook()
         config_mod.save_config(cfg)
         ui.notify("Settings saved. Restart the app to apply detection changes.", type="positive")
 
@@ -81,7 +87,7 @@ def _ocr_section(cfg: dict) -> None:
         ).classes("az-muted text-xs")
 
 
-def _lists_and_recognizers(cfg: dict) -> None:
+def _lists_and_recognizers(cfg: dict, flush_hooks: list | None = None) -> None:
     with ui.element("div").classes("az-card w-full"):
         ui.label("Allow / deny lists").classes("az-h2 mb-2")
         with ui.row().classes("w-full gap-4"):
@@ -102,6 +108,8 @@ def _lists_and_recognizers(cfg: dict) -> None:
 
         allow_area.on("blur", sync_lists)
         deny_area.on("blur", sync_lists)
+        if flush_hooks is not None:
+            flush_hooks.append(sync_lists)  # save() flushes even if blur never fired
 
     with ui.element("div").classes("az-card w-full"):
         ui.label("Custom recognizers").classes("az-h2")

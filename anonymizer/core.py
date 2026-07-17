@@ -141,6 +141,10 @@ def _resolve_overlaps(findings: list[Finding], text: str) -> list[Finding]:
         winner.start, winner.end = new_start, new_end
         winner.value = text[new_start:new_end]
         winner.context = _snippet(text, new_start, new_end)
+        # The merged span is a NEW string that was never itself checksum-tested, so
+        # the old validated verdict no longer applies -- clear it (re-tier on score)
+        # rather than show a stale "verified" chip for a value never validated.
+        winner.validated = None
     return sorted(kept, key=lambda f: f.start)
 
 
@@ -166,7 +170,10 @@ def detect_unit(analyzer, unit: TextUnit, config: dict) -> list[Finding]:
         for r in results:
             start, end = r.start, r.end
             value = unit.text[start:end]
-            if r.entity_type == "PERSON":
+            # spaCy's German model routes many real names into MISC, not PERSON, so
+            # trim the honorific there too -- otherwise "Frau Bauer" (MISC) keys as a
+            # different entity than a bare "Bauer" elsewhere.
+            if r.entity_type in ("PERSON", "NER_MISC"):
                 trimmed = _HONORIFIC_PREFIX.match(value)
                 if trimmed:
                     start += trimmed.end()

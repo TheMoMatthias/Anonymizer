@@ -8,6 +8,7 @@ from docx.text.paragraph import Paragraph
 from docx.text.run import Run
 from lxml import etree
 
+from .. import xmlsafe
 from ..core import detect_unit
 from ..models import TextUnit
 from .run_replace import XmlRunAdapter, apply_findings_to_runs, runs_text_and_spans
@@ -63,16 +64,25 @@ def _textbox_paragraphs(doc: Document):
                 yield Paragraph(p_elem, doc)
 
 
-def _iter_table_paragraphs(table):
+def _iter_table_paragraphs(table, _seen: set | None = None):
     """A table's cell paragraphs, RECURSING into nested tables (a table inside a
     cell). `doc.tables` returns only top-level tables and `cell.paragraphs` does
     not descend into a nested table, so tables-within-tables -- common in bank
-    form layouts -- were scanned and redacted by neither path (a silent leak)."""
+    form layouts -- were scanned and redacted by neither path (a silent leak).
+
+    `row.cells` returns the SAME cell object more than once for a merged cell, so
+    a `_seen` set of cell element ids de-dups them -- otherwise a merged cell's
+    paragraphs are processed 2+ times (harmless but wasteful; relied on redaction
+    being idempotent)."""
+    seen = _seen if _seen is not None else set()
     for row in table.rows:
         for cell in row.cells:
+            if id(cell._tc) in seen:
+                continue
+            seen.add(id(cell._tc))
             yield from cell.paragraphs
             for nested in cell.tables:
-                yield from _iter_table_paragraphs(nested)
+                yield from _iter_table_paragraphs(nested, seen)
 
 
 def _iter_paragraphs(doc: Document):
@@ -94,7 +104,7 @@ def _extra_parts_paragraphs(path: Path):
         names = zf.namelist()
         contents = {part: zf.read(part) for part in EXTRA_PARTS if part in names}
     for part, blob in contents.items():
-        tree = etree.fromstring(blob)
+        tree = xmlsafe.fromstring(blob)
         for p in tree.iter(f"{W}p"):
             yield part, tree, p
 
@@ -142,7 +152,7 @@ def _apply_extra_parts(path: Path, analyzer, config, decisions: dict, mapping_st
     for part in EXTRA_PARTS:
         if part not in contents:
             continue
-        tree = etree.fromstring(contents[part])
+        tree = xmlsafe.fromstring(contents[part])
         part_changed = False
         for p_elem in tree.iter(f"{W}p"):
             t_elems = list(p_elem.iter(f"{W}t"))

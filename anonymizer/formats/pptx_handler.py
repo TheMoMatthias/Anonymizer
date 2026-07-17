@@ -6,6 +6,7 @@ from pathlib import Path
 from lxml import etree
 from pptx import Presentation
 
+from .. import xmlsafe
 from ..core import detect_unit
 from ..models import TextUnit
 from pptx.oxml.ns import qn
@@ -104,7 +105,7 @@ def _comment_text_elements(path: Path):
     with zipfile.ZipFile(path, "r") as zf:
         names = [n for n in zf.namelist() if n.startswith(COMMENT_PARTS_GLOB)]
         for name in names:
-            tree = etree.fromstring(zf.read(name))
+            tree = xmlsafe.fromstring(zf.read(name))
             for text_elem in _iter_comment_text_elements(tree):
                 yield name, tree, text_elem
 
@@ -146,7 +147,7 @@ def _apply_comments(path: Path, analyzer, config, decisions: dict, mapping_store
     for name in names:
         if not name.startswith(COMMENT_PARTS_GLOB):
             continue
-        tree = etree.fromstring(contents[name])
+        tree = xmlsafe.fromstring(contents[name])
         part_changed = False
         for text_elem in _iter_comment_text_elements(tree):
             if not text_elem.text or not text_elem.text.strip():

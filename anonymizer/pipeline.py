@@ -11,6 +11,7 @@ from lxml import etree
 from . import core
 from . import language
 from . import ocr as ocr_mod
+from . import xmlsafe
 from .engine import DEFAULT_LANGUAGES
 from .actions import decisions_lookup
 from .formats import docx_handler, legacy, pdf_handler, pptx_handler, xlsx_handler
@@ -235,7 +236,7 @@ def _scrub_metadata(out_path: Path) -> None:
         if part not in contents:
             continue
         try:
-            tree = etree.fromstring(contents[part])
+            tree = xmlsafe.fromstring(contents[part])
         except etree.XMLSyntaxError:
             continue
         part_changed = False
@@ -292,7 +293,7 @@ def _output_text_blob(out_path: Path) -> str:
                 if not (name.endswith(".xml") or name.endswith(".rels")):
                     continue
                 try:
-                    tree = etree.fromstring(zf.read(name))
+                    tree = xmlsafe.fromstring(zf.read(name))
                 except etree.XMLSyntaxError:
                     continue
                 parts.append("".join(tree.itertext()))
@@ -300,21 +301,23 @@ def _output_text_blob(out_path: Path) -> str:
     return out_path.read_text(encoding="utf-8", errors="ignore")
 
 
-def _literal_residual(out_path: Path, removed_values: list[str]) -> list[str]:
+def _literal_residual(out_path: Path, removed_values: list[str], always_check=()) -> list[str]:
     """Recognizer-INDEPENDENT backstop: for every value the reviewer chose to
     remove, confirm its literal text is truly gone from the WHOLE output, not
     just the body the extractor reads. Catches leaks the re-scan cannot -- a
     name still in docProps, a number still in a cell the extractor skipped.
     Case-insensitive, and also checks a whitespace-stripped form for IDs/IBANs
-    that may be reformatted. Values under 4 chars are skipped to avoid false
-    hits on common substrings."""
+    that may be reformatted. Values under 4 chars are skipped to avoid false hits
+    on common substrings -- EXCEPT terms in `always_check` (the user's deny list),
+    which are user-asserted PII and must be verified regardless of length."""
     blob = _output_text_blob(out_path)
     low = blob.lower()
     low_ns = re.sub(r"\s+", "", low)
+    always = {v.strip().lower() for v in always_check}
     residual: list[str] = []
     for value in removed_values:
         v = value.strip().lower()
-        if len(v) < 4:
+        if len(v) < 4 and v not in always:
             continue
         v_ns = re.sub(r"\s+", "", v)
         if v in low or (len(v_ns) >= 4 and v_ns in low_ns):
@@ -372,7 +375,7 @@ def apply_document(
                 _scrub_metadata(work_path)
                 residual = verify_output(work_path, decisions, analyzer, cfg)
                 removed_values = [g.value for g in grouped if g.action in _REMOVING_ACTIONS]
-                literal = _literal_residual(work_path, removed_values)
+                literal = _literal_residual(work_path, removed_values, always_check=cfg.get("deny_list", []))
                 if residual or literal:
                     parts = []
                     if residual:

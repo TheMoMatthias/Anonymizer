@@ -56,6 +56,17 @@ def _bundle_candidates() -> list[Path]:
 def find_tesseract(config: dict | None = None) -> str | None:
     """Resolves the tesseract executable path (see module docstring), or None."""
     explicit = (config or {}).get("tesseract_path") or os.environ.get("ANONYMIZER_TESSERACT")
+    if not explicit:
+        # The caller (PDF extraction) often has no config in hand, and resolution is
+        # cached process-wide on the FIRST call -- so without this a Settings-set
+        # tesseract_path would be ignored for the whole session. Consult the saved
+        # config as a fallback so the path setting is honored regardless of caller.
+        try:
+            from .config import load_config
+
+            explicit = load_config().get("tesseract_path")
+        except Exception:  # noqa: BLE001 -- OCR resolution must never crash the pipeline
+            explicit = None
     if explicit and Path(explicit).exists():
         return str(explicit)
     for cand in _bundle_candidates():
@@ -71,7 +82,11 @@ def _configure(cmd: str) -> None:
     pytesseract.pytesseract.tesseract_cmd = cmd
     tessdata = Path(cmd).parent / "tessdata"
     if tessdata.is_dir():
-        os.environ.setdefault("TESSDATA_PREFIX", str(tessdata.parent))
+        # A tesseract with a SIBLING tessdata (the offline bundle) ships its own
+        # deu/eng data -- point at it UNCONDITIONALLY (not setdefault), so a stale
+        # global TESSDATA_PREFIX from another install can't bypass the bundled data
+        # and silently degrade OCR on scanned documents.
+        os.environ["TESSDATA_PREFIX"] = str(tessdata.parent)
 
 
 def ocr_available(config: dict | None = None) -> bool:

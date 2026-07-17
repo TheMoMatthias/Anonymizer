@@ -69,6 +69,12 @@ entities:
   NER_MISC:
     default_action: pseudonymize
     confidence_threshold: 0.5
+  # Nationality / religious or political group (spaCy NORP -> presidio NRP; the
+  # English model produces it, the German model does not). GDPR Art. 9 special
+  # category -> anonymize (one-way), surfaced for review rather than auto-accepted.
+  NRP:
+    default_action: anonymize
+    confidence_threshold: 0.5
   BIC_CODE:
     default_action: pseudonymize
     confidence_threshold: 0.5
