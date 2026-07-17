@@ -8,15 +8,45 @@ from pptx import Presentation
 
 from ..core import detect_unit
 from ..models import TextUnit
+from pptx.oxml.ns import qn
+
 from .run_replace import XmlRunAdapter, apply_findings_to_runs, runs_text_and_spans
 
 
+class _BreakRun:
+    """A no-op run standing in for an a:br soft line break: contributes "\\n" to the
+    detection text so a name split across the break ("Klaus"<br>"Mueller") is not
+    concatenated into one false token ("KlausMueller" -> tagged ORGANIZATION, a
+    leak), but its text setter is a no-op so apply never tries to edit the break."""
+
+    @property
+    def text(self) -> str:
+        return "\n"
+
+    @text.setter
+    def text(self, value: str) -> None:  # a:br has no editable text
+        pass
+
+
+def _para_runs_with_breaks(p) -> list:
+    """The paragraph's a:r runs in document order, with a sentinel inserted for each
+    a:br. Detection AND apply use this ONE list, so offsets map to the real runs
+    while the line-break boundary is preserved for detection -- fixing both the
+    offset drift (which p.text caused) and the word-merge (which bare p.runs caused)."""
+    runs_iter = iter(p.runs)
+    out: list = []
+    for child in p._p:
+        if child.tag == qn("a:r"):
+            r = next(runs_iter, None)
+            if r is not None:
+                out.append(r)
+        elif child.tag == qn("a:br"):
+            out.append(_BreakRun())
+    return out
+
+
 def _para_run_text(p) -> str:
-    """Detection text built from the SAME run list apply writes to (the a:r runs),
-    so a finding's offsets map to the exact runs. `p.text` also includes a:br /
-    a:fld text that `p.runs` does NOT, which shifted every offset after a soft line
-    break or field and made apply redact the wrong bytes (corruption / leak)."""
-    return runs_text_and_spans(p.runs)[0]
+    return runs_text_and_spans(_para_runs_with_breaks(p))[0]
 
 P_NS = "http://schemas.openxmlformats.org/presentationml/2006/main"
 P = f"{{{P_NS}}}"
@@ -97,12 +127,12 @@ def scan(path: Path, analyzer, config) -> list:
 def apply(path: Path, out_path: Path, decisions: dict, analyzer, config, mapping_store) -> None:
     prs = Presentation(path)
     for p in _iter_paragraphs(prs):
-        text = _para_run_text(p)
+        runs = _para_runs_with_breaks(p)
+        text = runs_text_and_spans(runs)[0]
         if not text.strip():
             continue
-        unit = TextUnit(id="tmp", text=text)
-        findings = detect_unit(analyzer, unit, config)
-        apply_findings_to_runs(p.runs, findings, decisions, mapping_store)
+        findings = detect_unit(analyzer, TextUnit(id="tmp", text=text), config)
+        apply_findings_to_runs(runs, findings, decisions, mapping_store)
     prs.save(out_path)
     _apply_comments(out_path, analyzer, config, decisions, mapping_store)
 

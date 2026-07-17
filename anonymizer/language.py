@@ -15,10 +15,15 @@ import re
 
 # Very common function words, near-exclusive to each language. Kept short on
 # purpose -- more words add noise, not accuracy, for a de/en split.
+# NB: German markers that are ALSO ordinary English words ("hat", "die", "den") are
+# deliberately EXCLUDED -- as disambiguators they are worthless, and with the lower
+# short-doc floor one such coincidental hit plus an umlaut proper noun ("Björn ...
+# Düsseldorf") was enough to mis-flag an English sentence as confidently German
+# (running the German NER over English text -> missed English names, a leak).
 _DE = {
-    "der", "die", "das", "und", "sie", "nicht", "ein", "eine", "einen", "mit", "von", "für", "ist", "den",
+    "der", "das", "und", "sie", "nicht", "ein", "eine", "einen", "mit", "von", "für", "ist",
     "dem", "des", "im", "auf", "auch", "werden", "wird", "wurde", "sich", "bei", "aus", "zum", "zur", "oder",
-    "sind", "haben", "hat", "wir", "uns", "ihre", "ihren", "sehr", "geehrte", "damen", "herren", "bitte",
+    "sind", "haben", "wir", "uns", "ihre", "ihren", "sehr", "geehrte", "damen", "herren", "bitte",
 }
 _EN = {
     "the", "and", "of", "to", "in", "is", "for", "with", "that", "this", "are", "be", "on", "as", "by",
@@ -36,7 +41,7 @@ _UMLAUT_RE = re.compile(r"[äöüß]", re.IGNORECASE)
 # GERMAN model, missing its English names (a leak). Zero-signal text (names +
 # numbers only, no function words) still returns unconfident so the UI asks.
 _MIN_SIGNAL = 4
-_MIN_SIGNAL_SHORT = 2
+_MIN_SIGNAL_SHORT = 3  # >2 so one coincidental marker + the capped umlaut bonus can't reach it alone
 _SHORT_DOC_WORDS = 25
 _MIN_MARGIN = 1.5
 

@@ -186,7 +186,17 @@ class MappingStore:
             keyring.set_password(SERVICE, PREV_KEY_NAME, old_key)  # retain for fallback
         keyring.set_password(SERVICE, KEY_NAME, new_key.decode())  # publish BEFORE saving
         self._fernet = Fernet(new_key)
-        self.save()  # file now under the already-published new key
+        self.save()  # mapping file now under the already-published new key
+        # The encrypted allow/deny lists (config.lists.enc) are encrypted under this
+        # SAME key. Re-key them in the same operation -- loading them now decrypts via
+        # the just-set PREV key and re-encrypts under the new key. Otherwise a SECOND
+        # rotation would evict their key from the single PREV slot and strand them.
+        try:
+            from . import config as _config
+
+            _config._load_secure_lists()  # side effect: re-encrypts under the current key
+        except Exception:  # noqa: BLE001 -- mapping already rotated; prev-key fallback still covers one lag
+            pass
 
     def close(self, save: bool = True) -> None:
         if save:

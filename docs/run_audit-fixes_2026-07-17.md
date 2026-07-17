@@ -77,7 +77,42 @@ evaluation.py substring over-report + language mismatch; review.py high-tier ski
 audit.py swallow; settings blur-vs-save; fsync on atomic writes; TESSDATA_PREFIX; bic_valid
 noise; mapping concurrency lock.
 
-## Status: DONE — all 6 Critical + 8 High fixed, 105 tests green.
+## ROUND 2 (fresh full-codebase sweep, 2026-07-17) — regressions in round-1 fixes
+User approved fixing the 8 regressions/gaps this sweep found in round-1's own work:
+- [ ] C-a config `_load_secure_lists`: undecryptable lists.enc returned {} -> save_config
+      overwrote it empty -> silent permanent deny-list loss (leak). Fix: RAISE on
+      present-but-undecryptable (never overwrite), like MappingStore._decrypt.
+- [ ] C-b mapping `rotate_key`: re-keys mappings.db only, not lists.enc (same key) ->
+      2 rotations strand the lists. Fix: re-key lists.enc inside rotate_key.
+- [ ] H-a pdf_handler.apply: widget/annot redaction leaves orphaned appearance stream
+      (original value recoverable in bytes). Fix: doc.save(garbage=4, clean=True).
+- [ ] H-b pptx `_para_run_text`: drops a:br separator -> "Klaus<br>Mueller"->"KlausMueller"
+      -> ORG not PERSON -> leak. Fix: sentinel no-op run for a:br keeps the boundary.
+- [ ] H-c pipeline `_scrub_metadata`: swallows del_xml_metadata failure + verify blind to
+      XMP. Fix: don't swallow (fail loud) + read XMP in _output_text_blob.
+- [ ] M-a app.scan_all: no `status=="pending"` re-check -> multi-file drop scans a job
+      twice (race can discard edits). Fix: re-check in the loop.
+- [ ] M-b app._persist_upload: reserved check uses stem (before LAST dot); "nul.x.docx"
+      slips through -> NUL always exists -> uniquify while-loop spins forever. Fix:
+      first dot-component + loop cap.
+- [ ] M-d pdf `_has_large_image`: only largest single image >=50%; partial/tiled scans
+      with no OCR leak. Fix: TOTAL image coverage.
+Deferred to second wave: NRP/Art.9 reclassification, PDF-body pseudonymize tokens, OCR
+config threading, eval substring, settings blur-flush, config-hash PII, <4-char deny,
+XXE, .metatmp.pdf cleanup, docx merged-cell double-visit, xlsx header-straddle.
+
+Round 2 also fixed 2 NEW Criticals the sweep found:
+- [x] language.py: short-doc floor + English-colliding _DE words ("hat"/"die"/"den") let
+      an English sentence read as confident German (regression from R1's H7). Removed the
+      collisions + raised _MIN_SIGNAL_SHORT to 3.
+- [x] xlsx _analyze_cell_text: a finding straddling the "header: " prefix was dropped
+      wholesale (leak). Now clipped to the value side + value re-sliced.
+Round-2 DEFERRED to second wave (judgment): core.py Steuer-ID precision (fixing risks
+reopening the C2 leak-fix), MISC-honorific propagation, merge validated-reset.
+
+## Status: ROUND 1 DONE (105). ROUND 2 DONE (112 tests green). All 8 planned + 2 new
+Criticals fixed. Convergence not yet re-confirmed (each sweep has found regressions in
+the prior sweep's fixes -- diminishing returns; see final report).
 H8 encrypts allow/deny lists in %LOCALAPPDATA%\Anonymizer\lists.enc (mapping key),
 migrates any plaintext lists out of config.yaml, prev-key fallback on rotation.
 Second-wave Medium/Low items remain (listed above) -- not yet started.

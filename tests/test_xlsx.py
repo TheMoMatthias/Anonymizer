@@ -49,3 +49,12 @@ def test_xlsx_name_column_override_never_overlaps(analyzer, base_config):
     for (s1, e1), (s2, e2) in zip(spans, spans[1:]):
         assert e1 <= s2, f"overlapping findings would corrupt the cell: {spans}"
     assert findings, "name-column cell yielded no findings at all"
+
+
+def test_xlsx_header_straddling_span_is_clipped_not_dropped(analyzer, base_config):
+    """Regression (LEAK): a finding whose span starts inside the injected 'header: '
+    prefix but extends into the cell value was dropped wholesale, leaking the value.
+    It must be clipped to the value side instead."""
+    cfg = {**base_config, "languages": ["de"], "deny_list": ["Bemerkung: Geheimprojekt"]}
+    findings = xlsx_handler._analyze_cell_text("Geheimprojekt", "Bemerkung", analyzer, cfg)
+    assert any("Geheimprojekt" in f.value for f in findings), f"straddling value dropped: {findings}"

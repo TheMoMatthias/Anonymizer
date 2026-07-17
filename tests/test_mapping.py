@@ -83,3 +83,19 @@ def test_rotate_key_crash_during_publish_leaves_file_recoverable(mapping_db_path
     assert keyring.get_password("anonymizer-mapping-db", KEY_NAME), "current key must still be present"
     with MappingStore(mapping_db_path) as recovered:
         assert recovered.reverse(tok) == "Hans Mueller"  # file still decryptable after the crash
+
+
+def test_rotate_key_also_rekeys_the_encrypted_lists(tmp_path, monkeypatch):
+    """Regression: rotate_key re-keyed only mappings.db, not the lists.enc that
+    shares the same key -> two rotations evicted the lists' key from the single PREV
+    slot and stranded them. rotate_key must re-key the lists too."""
+    monkeypatch.setenv("LOCALAPPDATA", str(tmp_path))
+    from anonymizer import config as cfg_mod
+
+    cfg_mod._save_secure_lists({"deny_list": ["Klaus Mueller"], "allow_list": []})
+    store = MappingStore(tmp_path / "Anonymizer" / "mappings.db")
+    store.rotate_key()
+    store.rotate_key()  # the second rotation is what used to strand the lists
+    store.close(save=False)
+
+    assert "Klaus Mueller" in cfg_mod._load_secure_lists().get("deny_list", [])

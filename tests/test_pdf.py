@@ -113,3 +113,37 @@ def test_apply_truly_removes_text_not_just_visually(sample_pdf, analyzer, base_c
     doc.close()
     assert "Hans Mueller" not in extracted
     assert "DE89370400440532013000" not in extracted
+
+
+def test_pdf_widget_redaction_leaves_no_orphan_appearance_stream(tmp_path, analyzer, base_config, mapping_db_path):
+    """Regression (LEAK): redacting a form field via w.field_value + w.update() then
+    a plain doc.save left the OLD appearance stream (rendering the ORIGINAL value)
+    orphaned but recoverable in the bytes. The handler must save garbage-collected.
+    Tested against the handler directly (the pipeline's later metadata re-save would
+    otherwise mask it)."""
+    from anonymizer.formats import pdf_handler
+    from anonymizer.mapping import MappingStore
+
+    doc = fitz.open()
+    page = doc.new_page()
+    page.insert_text((72, 72), "Formular.")
+    w = fitz.Widget()
+    w.field_name = "holder"
+    w.field_type = fitz.PDF_WIDGET_TYPE_TEXT
+    w.rect = fitz.Rect(50, 100, 320, 120)
+    w.field_value = _IBAN
+    page.add_widget(w)
+    path = tmp_path / "w.pdf"
+    doc.save(path)
+    doc.close()
+
+    cfg = {**base_config, "languages": ["de"]}
+    grouped = scan_document(path, analyzer, cfg).all_actionable()
+    for g in grouped:
+        g.action = "anonymize"
+    decisions = {(g.entity_type, g.value.strip().lower()): g.action for g in grouped}
+    out = tmp_path / "w_out.pdf"
+    with MappingStore(mapping_db_path) as ms:
+        pdf_handler.apply(path, out, decisions, analyzer, cfg, ms)
+
+    assert _IBAN.encode() not in out.read_bytes(), "original widget value recoverable in output bytes"

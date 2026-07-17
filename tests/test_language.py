@@ -66,3 +66,11 @@ def test_zero_signal_short_text_stays_unconfident():
     not a confident (and possibly wrong) guess."""
     _lang, confident = detect_dominant("Invoice 4471 John Carpenter")
     assert confident is False
+
+
+def test_umlaut_names_plus_one_ambiguous_word_not_confident_german():
+    """Regression: the lower short-doc floor let ONE _DE/_EN-ambiguous marker (the
+    list used to include 'hat'/'die'/'den') plus umlaut proper nouns reach confident
+    German, mis-routing an English sentence to the German NER model (a leak)."""
+    lang, confident = detect_dominant("Björn wore a hat in Düsseldorf.")
+    assert not (lang == "de" and confident), (lang, confident)

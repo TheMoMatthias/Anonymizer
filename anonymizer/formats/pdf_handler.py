@@ -44,17 +44,22 @@ def _text_words(page) -> tuple[str, list]:
 
 
 def _has_large_image(page) -> bool:
+    """True if images cover a large share of the page -- the signal for a scanned
+    page. Uses TOTAL image coverage (summed rect areas), not the largest single
+    image, so a partial-page scan OR a tiled scan (many individually-sub-threshold
+    images) still trips the OCR/refuse path instead of being trusted as a thin text
+    layer. Overlapping images may overcount, which only errs toward refusing (safe)."""
     page_area = abs(page.rect.width * page.rect.height)
     if page_area <= 0:
         return False
+    covered = 0.0
     for img in page.get_images(full=True):
         try:
             for r in page.get_image_rects(img[0]):
-                if abs(r.width * r.height) >= _LARGE_IMAGE_FRACTION * page_area:
-                    return True
+                covered += abs(r.width * r.height)
         except Exception:  # noqa: BLE001 -- a malformed image xref must not crash extraction
             continue
-    return False
+    return covered >= _LARGE_IMAGE_FRACTION * page_area
 
 
 def _page_content(page, config) -> tuple[str, list]:
@@ -209,6 +214,9 @@ def apply(path: Path, out_path: Path, decisions: dict, analyzer, config, mapping
                 f"{len(unmapped)} approved redaction(s) could not be located on the "
                 f"page ({sample}) -- refusing to write a partially-redacted PDF."
             )
-        doc.save(str(out_path))
+        # garbage=4 + clean drops orphaned objects -- specifically the OLD widget/
+        # annotation appearance streams that still render the ORIGINAL value; a plain
+        # save leaves them physically recoverable in the output bytes.
+        doc.save(str(out_path), garbage=4, deflate=True, clean=True)
     finally:
         doc.close()

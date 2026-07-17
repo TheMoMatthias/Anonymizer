@@ -61,15 +61,28 @@ def _load_secure_lists() -> dict:
         from .mapping import PREV_KEY_NAME, SERVICE
 
         prev = keyring.get_password(SERVICE, PREV_KEY_NAME)
-        if not prev:
-            return {}
-        try:
-            raw = Fernet(prev.encode()).decrypt(blob)
-        except InvalidToken:
-            return {}
+        raw = None
+        if prev:
+            try:
+                raw = Fernet(prev.encode()).decrypt(blob)
+            except InvalidToken:
+                raw = None
+        if raw is None:
+            # PRESENT but undecryptable by the current OR previous key. Do NOT treat
+            # this as "absent" and return {}: load_config/save_config would then
+            # OVERWRITE lists.enc with an empty blob and PERMANENTLY drop the user's
+            # deny list -- silently turning off must-redact terms (a leak). Fail loud
+            # instead, exactly like MappingStore._decrypt does for the mapping DB.
+            raise RuntimeError(
+                "The encrypted allow/deny lists (lists.enc) exist but cannot be "
+                "decrypted with the current or previous key. Refusing to overwrite "
+                "them, which would lose the deny list. Restore the Credential Manager "
+                "key, or delete lists.enc to start the lists over."
+            )
+        # Decrypted under the previous key (post-rotation) -> re-encrypt under current.
         data = yaml.safe_load(raw.decode("utf-8")) or {}
         result = {k: list(data.get(k, [])) for k in _SECURE_LIST_KEYS}
-        _save_secure_lists(result)  # re-encrypt under the current key
+        _save_secure_lists(result)
         return result
     data = yaml.safe_load(raw.decode("utf-8")) or {}
     return {k: list(data.get(k, [])) for k in _SECURE_LIST_KEYS}

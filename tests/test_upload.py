@@ -172,3 +172,11 @@ def test_apply_document_wraps_output_dir_failure_as_processing_error(
     monkeypatch.setattr("pathlib.Path.mkdir", boom)
     with pytest.raises(ProcessingError):
         apply_document(sample_docx, grouped, analyzer, base_config, tmp_path / "m.db", tmp_path / "nope")
+
+
+def test_persist_upload_rejects_reserved_name_with_extra_dot(work_dir):
+    """Regression: 'nul.x.docx' also resolves to the NUL device (Path.stem only
+    strips the LAST extension), and because NUL always 'exists' the uniquify loop
+    span forever. The first dot-component must be checked."""
+    assert gui_app._persist_upload("nul.x.docx", b"x") is None
+    assert gui_app._persist_upload("COM1.report.docx", b"x") is None

@@ -113,13 +113,19 @@ def _persist_upload(name: str, data: bytes) -> Path | None:
     if not safe or Path(safe).suffix.lower() not in SUPPORTED_EXTENSIONS:
         return None
     stem, suffix = Path(safe).stem, Path(safe).suffix
-    if stem.lower() in _WINDOWS_RESERVED:  # NUL/CON/COM1... would hit a device, not a file
+    # Windows resolves DOS device names on the base name before the FIRST dot, so
+    # "nul.x.docx" ALSO hits the NUL device (Path.stem, which strips only the LAST
+    # extension, would miss it -- and because NUL always "exists", the uniquify loop
+    # below would then spin forever). Check the first dot-component.
+    if safe.split(".", 1)[0].strip().lower() in _WINDOWS_RESERVED:
         return None
     target = _work_dir() / safe
     n = 2
-    while target.exists():
+    while target.exists() and n < 10000:  # bounded: never spin on a pathological name
         target = _work_dir() / f"{stem} ({n}){suffix}"
         n += 1
+    if target.exists():
+        return None
     try:
         target.write_bytes(data)
     except OSError:
@@ -484,6 +490,13 @@ async def scan_all(state: PageState, refresh) -> None:
     analyzer, config = await run.io_bound(_ensure_analyzer)
     effective = profiles_mod.apply_profile(config, state.profile)
     pending = [j for j in state.jobs if j.status == "pending"]
+    # Claim them synchronously (NO await before this line runs to completion) so a
+    # concurrent scan_all -- a multi-file drop fires one handle_upload, hence one
+    # scan_all, per file -- can't re-capture the same still-"pending" jobs and scan
+    # them twice (duplicate inference + a race that could discard reviewer edits).
+    for j in pending:
+        j.status = "scanning"
+    refresh()
 
     # Resolve the scan language per file first (single-language scan is the fix
     # for ordinary German words being flagged as names).

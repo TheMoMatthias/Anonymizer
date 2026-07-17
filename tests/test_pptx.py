@@ -97,3 +97,22 @@ def test_pptx_line_break_does_not_misalign_redaction(tmp_path, analyzer, base_co
         for para in sh.text_frame.paragraphs for run in para.runs
     )
     assert "DE89370400440532013000" not in body
+
+
+def test_pptx_para_run_text_preserves_line_break_boundary():
+    """Regression (LEAK): concatenating runs with no separator merged a name split
+    across an a:br ('Klaus'<br>'Mueller' -> 'KlausMueller' -> tagged ORGANIZATION).
+    The a:br must contribute a boundary to the detection text."""
+    from pptx import Presentation as _P
+    from pptx.oxml.ns import qn
+    from pptx.util import Inches
+
+    from anonymizer.formats.pptx_handler import _para_run_text
+
+    prs = _P()
+    slide = prs.slides.add_slide(prs.slide_layouts[6])
+    p = slide.shapes.add_textbox(Inches(1), Inches(1), Inches(7), Inches(2)).text_frame.paragraphs[0]
+    p.add_run().text = "Klaus"
+    p._p.append(p._p.makeelement(qn("a:br"), {}))
+    p.add_run().text = "Mueller"
+    assert _para_run_text(p) == "Klaus\nMueller"

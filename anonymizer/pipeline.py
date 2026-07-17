@@ -207,14 +207,23 @@ def _scrub_metadata(out_path: Path) -> None:
         # physically recoverable in the file bytes. Drop the XMP packet too, then
         # atomically replace.
         tmp = out_path.with_name(out_path.stem + ".metatmp.pdf")
-        with fitz.open(out_path) as doc:
-            doc.set_metadata({})  # clears author/title/subject/keywords/creator/producer
+        try:
+            with fitz.open(out_path) as doc:
+                doc.set_metadata({})  # clears author/title/subject/keywords/creator/producer
+                # Drop the XMP packet (separate from /Info; garbage/clean do NOT remove
+                # it). Do NOT swallow a failure here -- if we can't remove XMP we cannot
+                # guarantee an author name isn't riding along, so fail loud rather than
+                # ship a PDF marked "verified" with PII still in its metadata.
+                doc.del_xml_metadata()
+                doc.save(str(tmp), garbage=4, deflate=True, clean=True)
+            os.replace(tmp, out_path)
+        except BaseException:
             try:
-                doc.del_xml_metadata()  # drop the XMP packet (separate from /Info)
-            except Exception:  # noqa: BLE001 -- older PyMuPDF may lack this
+                if tmp.exists():
+                    tmp.unlink()
+            except OSError:
                 pass
-            doc.save(str(tmp), garbage=4, deflate=True, clean=True)
-        os.replace(tmp, out_path)
+            raise
         return
     if suffix not in _OOXML_EXTS:
         return
@@ -257,6 +266,12 @@ def _output_text_blob(out_path: Path) -> str:
             parts: list[str] = []
             meta = doc.metadata or {}
             parts.append(" ".join(str(v) for v in meta.values() if v))  # /Info fields
+            try:  # raw XMP packet -- author/creator can live here, not just in /Info
+                xref = doc.xref_xml_metadata()
+                if xref:
+                    parts.append(doc.xref_stream(xref).decode("utf-8", "ignore"))
+            except Exception:  # noqa: BLE001
+                pass
             for page in doc:
                 parts.append(page.get_text())
                 # Form-field values and annotation text -- separate from the content

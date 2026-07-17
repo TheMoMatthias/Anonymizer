@@ -102,8 +102,14 @@ def _analyze_cell_text(text: str, header: str | None, analyzer, config, unit_id:
     offset = len(prefix)
     result = []
     for f in findings:
+        if f.end <= offset:
+            continue  # entirely inside the header context -- not the cell value
         if f.start < offset:
-            continue  # matched inside the header context, not the actual value
+            # Span STRADDLES the header/value boundary: clip to the value side and
+            # re-slice its value, rather than dropping it wholesale (which leaked the
+            # in-value portion -- e.g. a deny term that included the header text).
+            f.start = offset
+            f.value = combined[f.start : f.end]
         f.start -= offset
         f.end -= offset
         result.append(f)

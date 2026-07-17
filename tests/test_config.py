@@ -40,3 +40,20 @@ def test_plaintext_lists_are_migrated_out_of_config_yaml(tmp_path, monkeypatch):
     yaml_text = (base / "config.yaml").read_text(encoding="utf-8")
     assert "Petra Schmidt" not in yaml_text, "plaintext deny term must be migrated OUT of config.yaml"
     assert (base / "lists.enc").exists()
+
+
+def test_undecryptable_lists_raises_and_is_not_overwritten(tmp_path, monkeypatch):
+    """Regression (silent data loss): an undecryptable lists.enc used to be treated
+    like 'absent' -> load/save overwrote it empty -> the deny list was permanently,
+    silently lost (a leak). It must RAISE and leave the file intact instead."""
+    import pytest
+
+    monkeypatch.setenv("LOCALAPPDATA", str(tmp_path))
+    base = tmp_path / "Anonymizer"
+    base.mkdir(parents=True, exist_ok=True)
+    corrupt = b"not-a-valid-fernet-token-at-all"
+    (base / "lists.enc").write_bytes(corrupt)
+
+    with pytest.raises(RuntimeError):
+        cfg_mod._load_secure_lists()
+    assert (base / "lists.enc").read_bytes() == corrupt, "corrupt lists.enc must not be overwritten"
