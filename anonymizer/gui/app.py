@@ -2,8 +2,10 @@ from __future__ import annotations
 
 import os
 import shutil
+import subprocess
 import tempfile
 import threading
+from collections.abc import Awaitable, Callable
 from pathlib import Path
 
 from nicegui import app, run, ui
@@ -35,15 +37,49 @@ _analyzer_lock = threading.Lock()
 # working copy under the file's ORIGINAL name (so tokens, the report, and the
 # output filename stay correct) and feed that path into the normal scan pipeline.
 _upload_dir: Path | None = None
+_work_dir_lock = threading.Lock()  # _persist_upload runs on worker threads; guard lazy init
+_work_dir_swept = False  # sweep crash-leftovers at most ONCE per process
+
+# Writing to any of these basenames (in ANY directory) hits a legacy Windows DOS
+# device, not a file: NUL silently discards the bytes (-> a degenerate "clean"
+# file), COM1/LPT1 can BLOCK on a serial/printer device. Reject such uploads.
+_WINDOWS_RESERVED = {
+    "con", "prn", "aux", "nul",
+    *(f"com{i}" for i in range(1, 10)),
+    *(f"lpt{i}" for i in range(1, 10)),
+}
+
+
+def _work_root() -> Path:
+    # App-owned (%LOCALAPPDATA%\Anonymizer\work), NOT the system temp: working
+    # copies hold RAW client PII, and %TEMP% is essentially never swept, so a
+    # crash would leave unredacted documents there indefinitely.
+    return config_mod.app_data_dir() / "work"
 
 
 def _work_dir() -> Path:
-    """Lazily-created temp dir holding working copies of uploaded files. Cleaned
-    on app shutdown (registered in main()); never leaks into the system temp."""
-    global _upload_dir
-    if _upload_dir is None or not _upload_dir.exists():
-        _upload_dir = Path(tempfile.mkdtemp(prefix="anonymizer_upload_"))
-    return _upload_dir
+    """Lazily-created dir holding working copies of uploaded files, under the app's
+    own data dir (never the system temp). On first use it also sweeps any working
+    dirs a previously crashed session left behind, so raw-PII copies never
+    accumulate across runs.
+
+    Thread-safe: _persist_upload runs on worker threads (run.io_bound), and a
+    multi-file first-drop fires several concurrently. Without the lock two threads
+    could both lazy-init, and one's `upload_*` sweep would delete the dir the other
+    just created (and wrote PII into). The lock double-checks the dir, and the
+    crash-leftover sweep runs at most once per process so it can never delete a
+    concurrently-created sibling."""
+    global _upload_dir, _work_dir_swept
+    with _work_dir_lock:
+        if _upload_dir is None or not _upload_dir.exists():
+            root = _work_root()
+            root.mkdir(parents=True, exist_ok=True)
+            if not _work_dir_swept:
+                for stale in root.glob("upload_*"):  # leftovers from a crash (no clean shutdown)
+                    shutil.rmtree(stale, ignore_errors=True)
+                _work_dir_swept = True
+            _upload_dir = Path(tempfile.mkdtemp(prefix="upload_", dir=root))
+        return _upload_dir
 
 
 def _cleanup_work_dir() -> None:
@@ -53,30 +89,68 @@ def _cleanup_work_dir() -> None:
         _upload_dir = None
 
 
+def _discard_working_copy(job: FileJob) -> None:
+    """Remove a job's uploaded working copy (raw PII) as soon as it is terminal,
+    rather than holding every upload's plaintext on disk until shutdown. Only
+    touches files under the managed work dir, never a user's real source file."""
+    try:
+        p = Path(job.path)
+        if _upload_dir is not None and _upload_dir in p.parents:
+            p.unlink(missing_ok=True)
+    except OSError:
+        pass
+
+
 def _persist_upload(name: str, data: bytes) -> Path | None:
     """Write uploaded bytes to a working copy under the ORIGINAL filename, or
-    return None if the extension is unsupported (nothing is written for junk).
-    Only the basename of `name` is used -- an uploaded name must never escape the
-    work dir via a path separator. Uniquifies to keep two same-named files dropped
-    in one session from overwriting each other before they are scanned."""
+    return None if the name is unusable (unsupported extension, empty, a reserved
+    Windows device name) OR the write fails -- the caller surfaces None to the
+    user, so a failed upload is never silent. Only the basename is used and Windows
+    device/ADS hazards are stripped, so an uploaded name can neither escape the
+    work dir nor hit a device. Uniquifies same-named uploads within a session."""
     safe = Path(name.replace("\\", "/")).name
+    safe = safe.split(":", 1)[0].rstrip(". ")  # drop NTFS ADS ("f:evil") + trailing dots/spaces
     if not safe or Path(safe).suffix.lower() not in SUPPORTED_EXTENSIONS:
         return None
     stem, suffix = Path(safe).stem, Path(safe).suffix
+    if stem.lower() in _WINDOWS_RESERVED:  # NUL/CON/COM1... would hit a device, not a file
+        return None
     target = _work_dir() / safe
     n = 2
     while target.exists():
         target = _work_dir() / f"{stem} ({n}){suffix}"
         n += 1
-    target.write_bytes(data)
+    try:
+        target.write_bytes(data)
+    except OSError:
+        return None
     return target
+
+
+def _documents_dir() -> Path:
+    """The user's REAL Documents folder. On managed/bank Windows with OneDrive
+    Known-Folder redirection, that is under the OneDrive path, not ~/Documents --
+    so a naive Path.home()/Documents would write where Explorer shows nothing."""
+    if os.name == "nt":
+        try:
+            import winreg
+
+            key = r"Software\Microsoft\Windows\CurrentVersion\Explorer\User Shell Folders"
+            with winreg.OpenKey(winreg.HKEY_CURRENT_USER, key) as k:
+                val, _ = winreg.QueryValueEx(k, "Personal")
+            resolved = Path(os.path.expandvars(val))
+            if resolved.is_absolute():
+                return resolved
+        except OSError:
+            pass
+    return Path.home() / "Documents"
 
 
 def anonymized_dir() -> Path:
     """The fixed folder every anonymized copy is written to. Dropped/uploaded
     files have no origin folder, so a single predictable destination beats a copy
     landing next to a temp working file the user can never find."""
-    return Path.home() / "Documents" / "Anonymized"
+    return _documents_dir() / "Anonymized"
 
 
 def _ensure_analyzer():
@@ -100,6 +174,12 @@ class PageState:
         self.selected: int | None = None
         self.profile: str = profiles_mod.PROFILE_NAMES[0]
         self.language: str = "auto"  # "auto" | "de" | "en"
+        # Wired up by main_page()/_intake_panel so the nested render helpers can
+        # reach them; declared here so PageState's real interface is visible.
+        self.add_files: Callable[[list[str]], Awaitable[None]] | None = None
+        self.refresh: Callable[[], None] | None = None
+        self.save_all: Callable[[], Awaitable[None]] | None = None
+        self.upload: object | None = None  # the ui.upload widget
 
     @property
     def current(self) -> FileJob | None:
@@ -197,12 +277,18 @@ def _intake_panel(state: PageState) -> None:
 
         async def handle_upload(e) -> None:
             # ui.upload fires this once per file. `e.content` is a file-like of the
-            # uploaded bytes; we persist a working copy under the original name and
-            # feed its path into the normal scan pipeline.
-            data = e.content.read()
-            path = _persist_upload(e.name, data)
+            # uploaded bytes. The read AND the disk-write can be large/slow (up to
+            # the 100 MB cap), so both are kept off the event loop; ANY failure (bad
+            # name, disk full, unreadable, a device-name write that blocks) surfaces
+            # to the user -- an upload must never silently vanish.
+            try:
+                data = await run.io_bound(e.content.read)
+                path = await run.io_bound(_persist_upload, e.name, data)
+            except Exception as exc:  # noqa: BLE001
+                ui.notify(f"Couldn't add {e.name}: {exc}", type="negative", timeout=8000)
+                return
             if path is None:
-                ui.notify(f"Skipped unsupported file: {e.name}", type="warning")
+                ui.notify(f"Couldn't add {e.name} — unsupported or invalid filename.", type="warning")
                 return
             await state.add_files([str(path)])  # type: ignore[attr-defined]
 
@@ -432,11 +518,16 @@ async def scan_all(state: PageState, refresh) -> None:
 
 
 async def _save_job(state: PageState, job: FileJob) -> None:
+    # Re-entrancy guard: flip status BEFORE the first await so a rapid double-click
+    # (or Save + Save-all racing the same job) can't launch two apply_document runs
+    # on one source -- which would race the same atomic .part temp write.
+    if job.status != "review":
+        return
+    job.status = "saving"
+    state.refresh()  # type: ignore[attr-defined]
     analyzer, base = await run.io_bound(_ensure_analyzer)
     config = job.config or base  # same config the file was scanned with (parity)
     grouped = job.scan.all_actionable()
-    job.status = "saving"
-    state.refresh()  # type: ignore[attr-defined]
     try:
         out_path, report_path = await run.io_bound(
             apply_document, Path(job.path), grouped, analyzer, config, None, anonymized_dir()
@@ -452,10 +543,14 @@ async def _save_job(state: PageState, job: FileJob) -> None:
         job.status = "failed"
         job.error = f"Unexpected error: {exc}"
         ui.notify(job.error, type="negative", timeout=8000)
+    if job.status == "done":
+        _discard_working_copy(job)  # drop the raw-PII upload copy once safely saved
     state.refresh()  # type: ignore[attr-defined]
 
 
 def _clear(state: PageState) -> None:
+    for job in state.jobs:
+        _discard_working_copy(job)  # remove staged raw-PII copies, not user originals
     state.jobs.clear()
     state.selected = None
     upload = getattr(state, "upload", None)
@@ -537,14 +632,20 @@ def reidentify_route() -> None:
 
 
 def _reveal_in_explorer(file_path: str) -> None:
-    """Open the OS file manager with the anonymized file selected (Windows), or at
-    least its folder. Best-effort -- a failure here must never crash the app."""
+    """Open the OS file manager with the anonymized file selected (Windows), or its
+    folder. Best-effort -- a failure here must never crash the app."""
     p = Path(file_path)
     try:
         if os.name == "nt" and p.exists():
-            os.startfile(p.parent)  # noqa: S606 -- opens Explorer at the output folder
+            # /select highlights the file itself, matching the docstring's promise.
+            subprocess.run(["explorer", f"/select,{p}"], check=False)  # noqa: S603,S607
         elif p.parent.exists():
-            os.startfile(p.parent)  # type: ignore[attr-defined]
+            if os.name == "nt":
+                os.startfile(p.parent)  # type: ignore[attr-defined] # noqa: S606
+            else:
+                ui.notify(f"Saved in {p.parent}", type="info")
+        else:
+            ui.notify("That output folder no longer exists.", type="warning")
     except Exception as exc:  # noqa: BLE001
         ui.notify(f"Couldn't open the folder: {exc}", type="warning")
 

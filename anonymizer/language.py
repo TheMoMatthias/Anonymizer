@@ -29,8 +29,15 @@ _WORD_RE = re.compile(r"[a-zäöüß]+", re.IGNORECASE)
 _UMLAUT_RE = re.compile(r"[äöüß]", re.IGNORECASE)
 
 # Minimum signal (matched marker words) and margin to be "confident". Below
-# this the caller should ask the user rather than guess.
+# this the caller should ask the user rather than guess. Short documents (a memo,
+# an invoice line, a salutation) rarely accumulate 4 marker words even when the
+# language is obvious, so they used a lower floor -- otherwise a clearly-English
+# short text stayed unconfident and _narrow_language silently routed it to the
+# GERMAN model, missing its English names (a leak). Zero-signal text (names +
+# numbers only, no function words) still returns unconfident so the UI asks.
 _MIN_SIGNAL = 4
+_MIN_SIGNAL_SHORT = 2
+_SHORT_DOC_WORDS = 25
 _MIN_MARGIN = 1.5
 
 
@@ -41,14 +48,18 @@ def detect_dominant(text: str) -> tuple[str, bool]:
     words = [w.lower() for w in _WORD_RE.findall(text)]
     de = sum(1 for w in words if w in _DE)
     en = sum(1 for w in words if w in _EN)
-    # Umlaut-bearing WORDS are a German hint, but only a secondary one: a couple
-    # of umlaut *names* in English prose ("Björn Müller, Düsseldorf") must not
-    # flip the whole document to German. So we count words-with-an-umlaut (not
-    # raw umlaut characters) and CAP their contribution below _MIN_SIGNAL -- this
-    # guarantees umlauts alone can never reach "confident", so such a document
-    # falls through to the ask-the-user path instead of being mis-routed.
+    # Short docs use a lower confidence floor (few function words even when the
+    # language is obvious); long docs the standard floor.
+    min_signal = _MIN_SIGNAL_SHORT if len(words) <= _SHORT_DOC_WORDS else _MIN_SIGNAL
+    # Umlaut-bearing WORDS are a German hint, but only a secondary one: a couple of
+    # umlaut *names* in English prose ("Björn Müller, Düsseldorf") must not flip the
+    # whole document to German. Count words-with-an-umlaut (not raw umlaut chars) and
+    # CAP their contribution BELOW the effective floor, so umlauts alone can never
+    # reach "confident" -- such a doc falls through to ask-the-user instead of being
+    # mis-routed. (The cap tracks min_signal, else the lower short-doc floor would
+    # let a few umlaut names alone read as confidently German.)
     umlaut_words = sum(1 for w in words if _UMLAUT_RE.search(w))
-    de_score = de + min(umlaut_words, _MIN_SIGNAL - 1)
+    de_score = de + min(umlaut_words, max(0, min_signal - 1))
 
     if de_score == 0 and en == 0:
         return "de", False  # no signal -> default German, but unconfident
@@ -56,5 +67,5 @@ def detect_dominant(text: str) -> tuple[str, bool]:
         leader, lead_score, other = "de", de_score, en
     else:
         leader, lead_score, other = "en", en, de_score
-    confident = lead_score >= _MIN_SIGNAL and lead_score >= max(1, other) * _MIN_MARGIN
+    confident = lead_score >= min_signal and lead_score >= max(1, other) * _MIN_MARGIN
     return leader, confident

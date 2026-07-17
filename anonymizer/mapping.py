@@ -167,18 +167,26 @@ class MappingStore:
         self.conn.execute("DELETE FROM mappings")
 
     def rotate_key(self) -> None:
-        """Generates a fresh key and re-saves under it. Order matters: write the
-        ciphertext under the NEW key (atomically) FIRST, retain the old key as
-        the previous key, and only then publish the new key. If any step
-        crashes, the file and an available key still agree (current or previous),
-        so the mapping is never stranded."""
+        """Generates a fresh key and re-saves the mapping under it. Order is
+        critical for crash-safety: PUBLISH the keys to the keyring FIRST (retain
+        the old key as PREV, set the new key as current), and only THEN write the
+        file under the new key. This guarantees the on-disk file is decryptable at
+        EVERY crash point:
+          * crash while publishing keys       -> file still under the old key, and
+            (current or previous) still holds the old key -> recoverable.
+          * crash during the re-save          -> file still under the old key,
+            which is now retained as PREV     -> recoverable via the prev-key fallback.
+          * completed                         -> file under the new (current) key.
+        The old code saved under the new key BEFORE publishing it, so a crash in
+        that window stranded the entire reversible mapping (the file's key existed
+        only in memory) -- the exact loss this ordering prevents."""
         old_key = keyring.get_password(SERVICE, KEY_NAME)
         new_key = Fernet.generate_key()
-        self._fernet = Fernet(new_key)
-        self.save()  # file now under new key, atomically
         if old_key:
-            keyring.set_password(SERVICE, PREV_KEY_NAME, old_key)
-        keyring.set_password(SERVICE, KEY_NAME, new_key.decode())
+            keyring.set_password(SERVICE, PREV_KEY_NAME, old_key)  # retain for fallback
+        keyring.set_password(SERVICE, KEY_NAME, new_key.decode())  # publish BEFORE saving
+        self._fernet = Fernet(new_key)
+        self.save()  # file now under the already-published new key
 
     def close(self, save: bool = True) -> None:
         if save:

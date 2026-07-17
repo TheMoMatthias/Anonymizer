@@ -63,3 +63,37 @@ def test_apply_redacts_modern_threaded_comments(sample_pptx, analyzer, base_conf
         blob = b"".join(zf.read(n) for n in zf.namelist())
     assert b"Hans Mueller" not in blob
     assert b"DE89370400440532013000" not in blob
+
+
+def test_pptx_line_break_does_not_misalign_redaction(tmp_path, analyzer, base_config, mapping_db_path):
+    """Regression (CORRUPTION/LEAK): detection ran on p.text (which includes the
+    a:br vertical-tab char) but apply mapped offsets onto p.runs (a:r only), so a
+    value after a soft line break was redacted at the wrong offset. Detection now
+    uses the same run list; a value after a break must still be fully removed."""
+    from pptx import Presentation as _P
+    from pptx.oxml.ns import qn
+    from pptx.util import Inches
+
+    prs = _P()
+    slide = prs.slides.add_slide(prs.slide_layouts[6])  # blank
+    tf = slide.shapes.add_textbox(Inches(1), Inches(1), Inches(7), Inches(2)).text_frame
+    p = tf.paragraphs[0]
+    p.add_run().text = "Notiz:"
+    p._p.append(p._p.makeelement(qn("a:br"), {}))  # soft line break between the runs
+    p.add_run().text = "IBAN DE89370400440532013000"
+    path = tmp_path / "break.pptx"
+    prs.save(path)
+
+    grouped = scan_document(path, analyzer, base_config).all_actionable()
+    assert any("DE89370400440532013000" in g.value for g in grouped), "IBAN after break not scanned"
+    for g in grouped:
+        g.action = "anonymize"
+    # If offsets were misaligned this would leave residual and the output re-scan
+    # would fail loud; reaching a written file with the IBAN gone proves alignment.
+    out_path, _ = apply_document(path, grouped, analyzer, base_config, mapping_db_path)
+    out = Presentation(out_path)
+    body = " ".join(
+        run.text for sh in out.slides[0].shapes if sh.has_text_frame
+        for para in sh.text_frame.paragraphs for run in para.runs
+    )
+    assert "DE89370400440532013000" not in body

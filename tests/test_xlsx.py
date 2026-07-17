@@ -35,3 +35,17 @@ def test_xlsm_output_has_macros_stripped(tmp_path, analyzer, base_config, mappin
     out_path, _ = apply_document(path, grouped, analyzer, base_config, mapping_db_path)
 
     assert out_path.suffix == ".xlsx"
+
+
+def test_xlsx_name_column_override_never_overlaps(analyzer, base_config):
+    """Regression (CORRUPTION): the whole-cell name-column override was appended
+    after overlap resolution, so it could partially overlap a finding NER did make
+    (a KONTO number in the same cell) -> the cell splicer produced garbled tokens.
+    The returned findings must be non-overlapping."""
+    findings = xlsx_handler._analyze_cell_text(
+        "Mueller, Konto 12345678", "Name", analyzer, {**base_config, "languages": ["de"]}
+    )
+    spans = sorted((f.start, f.end) for f in findings)
+    for (s1, e1), (s2, e2) in zip(spans, spans[1:]):
+        assert e1 <= s2, f"overlapping findings would corrupt the cell: {spans}"
+    assert findings, "name-column cell yielded no findings at all"

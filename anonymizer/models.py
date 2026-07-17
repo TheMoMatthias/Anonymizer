@@ -3,6 +3,13 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 
 
+class ProcessingError(Exception):
+    """Raised when a document cannot be processed safely. The tool never emits a
+    partial or unverified `_psd` file -- better no output than a falsely-clean one.
+    Defined here (not in pipeline) so format handlers can fail loud without a
+    circular import; pipeline re-exports it for existing callers."""
+
+
 @dataclass
 class TextUnit:
     """A scannable piece of text within a document (a paragraph, cell, notes block, etc.)."""

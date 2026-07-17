@@ -63,21 +63,29 @@ def _textbox_paragraphs(doc: Document):
                 yield Paragraph(p_elem, doc)
 
 
+def _iter_table_paragraphs(table):
+    """A table's cell paragraphs, RECURSING into nested tables (a table inside a
+    cell). `doc.tables` returns only top-level tables and `cell.paragraphs` does
+    not descend into a nested table, so tables-within-tables -- common in bank
+    form layouts -- were scanned and redacted by neither path (a silent leak)."""
+    for row in table.rows:
+        for cell in row.cells:
+            yield from cell.paragraphs
+            for nested in cell.tables:
+                yield from _iter_table_paragraphs(nested)
+
+
 def _iter_paragraphs(doc: Document):
     for p in doc.paragraphs:
         yield p
     for table in doc.tables:
-        for row in table.rows:
-            for cell in row.cells:
-                yield from cell.paragraphs
+        yield from _iter_table_paragraphs(table)
     for section in doc.sections:
         for container in (section.header, section.footer):
             for p in container.paragraphs:
                 yield p
             for table in container.tables:
-                for row in table.rows:
-                    for cell in row.cells:
-                        yield from cell.paragraphs
+                yield from _iter_table_paragraphs(table)
     yield from _textbox_paragraphs(doc)
 
 

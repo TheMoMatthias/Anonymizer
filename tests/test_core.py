@@ -69,6 +69,9 @@ def test_stats_report_tiers(sample_docx, analyzer, base_config):
     assert "auto_accept" in result.stats and "needs_review" in result.stats
 
 
+_OV_TEXT = "x" * 64  # filler text for overlap tests that never trigger a re-slice
+
+
 def test_resolve_overlaps_keeps_one_longer_span():
     """Regression: two recognizers claiming overlapping-but-different spans for
     one phone number used to both survive (exact-tuple dedup), and apply then
@@ -76,7 +79,7 @@ def test_resolve_overlaps_keeps_one_longer_span():
     resolution must keep exactly one -- the longer (more complete) span."""
     a = Finding("PHONE_NUMBER", "030 12345678", 0.85, "", "u1", 5, 17)
     b = Finding("DE_PHONE", "030 12345678x", 0.60, "", "u1", 5, 18)  # overlaps, longer
-    kept = _resolve_overlaps([a, b])
+    kept = _resolve_overlaps([a, b], _OV_TEXT)
     assert len(kept) == 1
     assert kept[0].entity_type == "DE_PHONE"  # longer span wins -> more coverage
 
@@ -86,7 +89,7 @@ def test_resolve_overlaps_full_address_beats_contained_city():
     the house number is redacted too -- even though LOCATION scores higher."""
     city = Finding("LOCATION", "Königsallee", 0.85, "", "u1", 10, 21)
     addr = Finding("DE_ADDRESS", "Königsallee 3", 0.60, "", "u1", 10, 23)
-    kept = _resolve_overlaps([city, addr])
+    kept = _resolve_overlaps([city, addr], _OV_TEXT)
     assert len(kept) == 1 and kept[0].entity_type == "DE_ADDRESS"
 
 
@@ -94,12 +97,54 @@ def test_resolve_overlaps_keeps_touching_and_disjoint():
     a = Finding("PERSON", "Anna", 0.9, "", "u1", 0, 4)
     b = Finding("PERSON", "Berlin", 0.9, "", "u1", 5, 11)
     c = Finding("IBAN_CODE", "DE00", 0.98, "", "u1", 11, 15)  # touches b at 11
-    kept = _resolve_overlaps([a, b, c])
+    kept = _resolve_overlaps([a, b, c], _OV_TEXT)
     assert [k.start for k in kept] == [0, 5, 11]  # none overlap; sorted by start
 
 
 def test_resolve_overlaps_denylist_wins():
     real = Finding("PERSON", "Musterbank", 0.85, "", "u1", 0, 10)
     deny = Finding("DENY_LIST", "Musterbank", 1.0, "", "u1", 0, 10)
-    kept = _resolve_overlaps([real, deny])
+    kept = _resolve_overlaps([real, deny], _OV_TEXT)
     assert len(kept) == 1 and kept[0].entity_type == "DENY_LIST"
+
+
+def test_resolve_overlaps_crossing_spans_merge_not_leak():
+    """Regression (LEAK): a PERSON anchor over-reaching into an address used to be
+    dropped WHOLESALE by a longer, CROSSING DE_ADDRESS, leaving the customer name
+    redacted by nothing. Crossing overlaps must MERGE to the union, not drop the
+    loser's exclusive range."""
+    text = "Kontoinhaber: Klaus Mueller Hauptstr 12, Musterstadt."
+    person = Finding(
+        "PERSON", "Klaus Mueller Hauptstr", 0.75, "", "u1",
+        text.index("Klaus"), text.index("Hauptstr") + len("Hauptstr"),
+    )
+    addr = Finding(
+        "DE_ADDRESS", "Hauptstr 12, Musterstadt", 0.60, "", "u1",
+        text.index("Hauptstr"), text.index("Musterstadt") + len("Musterstadt"),
+    )
+    kept = _resolve_overlaps([person, addr], text)
+    assert len(kept) == 1, "crossing spans must merge into one, not drop one"
+    covered = kept[0]
+    assert covered.start <= text.index("Klaus"), "merged span must cover the name"
+    assert covered.end >= text.index("Musterstadt") + len("Musterstadt")
+    assert "Klaus Mueller" in covered.value  # value re-sliced from text to cover both
+
+
+def test_checksum_failed_steuer_id_still_surfaces(analyzer, base_config):
+    """Regression (LEAK): a checksum-FAILED Steuer-ID was demoted to 0.4 then
+    dropped by its 0.6 threshold, vanishing from the actionable set. A typo'd/OCR'd
+    tax ID is still identifying and must be surfaced (flagged unverified)."""
+    cfg = {**base_config, "languages": ["de"]}
+    unit = TextUnit("u1", "Steuer-ID: 12345678901 des Kunden.")
+    findings = detect_unit(analyzer, unit, cfg)
+    st = [f for f in findings if f.entity_type == "DE_STEUER_ID"]
+    assert st, f"checksum-failed Steuer-ID dropped: {[(f.entity_type, f.value) for f in findings]}"
+    assert st[0].validated is False
+
+
+def test_honorific_herrn_dative_is_anchored(analyzer, base_config):
+    """'Herrn <Name>' (dative -- the postal address-block form) must anchor the name
+    exactly like 'Herr <Name>'; the plain 'Herr' pattern silently missed 'Herrn'."""
+    cfg = {**base_config, "languages": ["de"]}
+    typed = {(f.entity_type, f.value) for f in detect_unit(analyzer, TextUnit("u1", "Herrn Klaus Mueller"), cfg)}
+    assert any(et == "PERSON" and "Mueller" in v for et, v in typed), typed

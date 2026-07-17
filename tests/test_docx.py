@@ -72,3 +72,18 @@ def test_reprocessing_same_value_is_consistent(tmp_path, analyzer, base_config, 
     placeholder1 = next(w for w in text1.split() if w.startswith("[PERSON_"))
     placeholder2 = next(w for w in text2.split() if w.startswith("[PERSON_"))
     assert placeholder1 == placeholder2
+
+
+def test_docx_nested_table_is_scanned(tmp_path, analyzer, base_config):
+    """Regression (LEAK): a table nested inside a table cell (common in bank form
+    layouts) was visited by neither scan nor apply -- doc.tables is top-level only
+    and cell.paragraphs doesn't descend into a nested table."""
+    doc = Document()
+    outer = doc.add_table(rows=1, cols=1)
+    inner = outer.cell(0, 0).add_table(rows=1, cols=1)
+    inner.cell(0, 0).text = "IBAN DE89370400440532013000"
+    path = tmp_path / "nested.docx"
+    doc.save(path)
+
+    found = {g.value for g in scan_document(path, analyzer, base_config).all_actionable()}
+    assert any("DE89370400440532013000" in v for v in found), f"nested-table IBAN not scanned: {found}"

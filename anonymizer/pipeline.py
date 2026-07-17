@@ -15,8 +15,10 @@ from .engine import DEFAULT_LANGUAGES
 from .actions import decisions_lookup
 from .formats import docx_handler, legacy, pdf_handler, pptx_handler, xlsx_handler
 from .mapping import MappingStore
-from .models import Finding, GroupedFinding, ScanResult
+from .models import Finding, GroupedFinding, ProcessingError, ScanResult
 from .report import write_report
+
+__all__ = ["ProcessingError"]  # re-exported for callers doing `from .pipeline import ProcessingError`
 
 _HANDLERS = {
     ".docx": docx_handler,
@@ -34,12 +36,6 @@ SUPPORTED_EXTENSIONS = set(_HANDLERS) | set(legacy.LEGACY_EXTENSIONS)
 # Actions that remove a value; used to decide what the output re-scan must not
 # still contain.
 _REMOVING_ACTIONS = ("pseudonymize", "anonymize")
-
-
-class ProcessingError(Exception):
-    """Raised when a document cannot be processed safely. The tool never emits a
-    partial or unverified `_psd` file -- better no output than a falsely-clean
-    one."""
 
 
 def _handler_for(path: Path):
@@ -106,7 +102,9 @@ def _narrow_language(config: dict, units: list) -> dict:
 # nothing to gain and would only add false positives.
 _PROPAGATABLE = ("PERSON",)
 _MIN_PROPAGATE_LEN = 4
-_HONORIFIC_PREFIX = re.compile(r"^(?:Herr|Frau|Hr\.|Fr\.|Dr\.|Prof\.)\s+")
+# `Herrn?` covers the dative "Herrn" address-block form; kept in sync with
+# core._HONORIFIC_PREFIX and engine._HONORIFICS.
+_HONORIFIC_PREFIX = re.compile(r"^(?:Herrn?|Frau|Hr\.|Fr\.|Dr\.|Prof\.)\s+")
 
 
 def _with_propagation(config: dict, units: list, analyzer) -> dict:
@@ -204,9 +202,19 @@ def _scrub_metadata(out_path: Path) -> None:
     if suffix == ".pdf":
         import fitz
 
+        # A FULL rewrite (garbage-collect + clean), NOT saveIncr: an incremental
+        # save appends a revision and leaves the OLD /Info object (author name)
+        # physically recoverable in the file bytes. Drop the XMP packet too, then
+        # atomically replace.
+        tmp = out_path.with_name(out_path.stem + ".metatmp.pdf")
         with fitz.open(out_path) as doc:
             doc.set_metadata({})  # clears author/title/subject/keywords/creator/producer
-            doc.saveIncr()
+            try:
+                doc.del_xml_metadata()  # drop the XMP packet (separate from /Info)
+            except Exception:  # noqa: BLE001 -- older PyMuPDF may lack this
+                pass
+            doc.save(str(tmp), garbage=4, deflate=True, clean=True)
+        os.replace(tmp, out_path)
         return
     if suffix not in _OOXML_EXTS:
         return
@@ -246,7 +254,22 @@ def _output_text_blob(out_path: Path) -> str:
         import fitz
 
         with fitz.open(out_path) as doc:
-            return "\n".join(page.get_text() for page in doc)
+            parts: list[str] = []
+            meta = doc.metadata or {}
+            parts.append(" ".join(str(v) for v in meta.values() if v))  # /Info fields
+            for page in doc:
+                parts.append(page.get_text())
+                # Form-field values and annotation text -- separate from the content
+                # stream, so get_text() misses them; the literal backstop must see them.
+                try:
+                    for w in list(page.widgets() or []):
+                        if isinstance(w.field_value, str):
+                            parts.append(w.field_value)
+                    for a in list(page.annots() or []):
+                        parts.append((a.info or {}).get("content", ""))
+                except Exception:  # noqa: BLE001
+                    pass
+            return "\n".join(parts)
     if suffix in _OOXML_EXTS:
         parts = []
         with zipfile.ZipFile(out_path) as zf:
@@ -293,17 +316,22 @@ def apply_document(
     out_dir: Path | None = None,
 ) -> tuple[Path, Path]:
     decisions = {(g.entity_type, g.value.strip().lower()): g.action for g in grouped}
-    out_path = output_path_for(path, out_dir)
-    # The fixed output folder may not exist yet (first save) -- create it before
-    # the sibling-temp write. Harmless when out_dir is None (parent already exists).
-    out_path.parent.mkdir(parents=True, exist_ok=True)
-    # Write to a sibling temp so the final file appears only once fully written
-    # AND verified -- a failure never leaves a partial/unverified _psd behind,
-    # and never clobbers a good prior output.
-    # Keep the real extension (…​.part.docx) so the verifier's format lookup works
-    # and the temp file is unmistakably not the final output.
-    work_path = out_path.with_name(f"{out_path.stem}.part{out_path.suffix}")
+    # Resolve the output path, create the (possibly not-yet-existing) fixed output
+    # folder, and derive the sibling temp INSIDE the try, so a failure here (an
+    # unwritable/missing Documents folder, disk full, path too long) surfaces as a
+    # ProcessingError like every other pipeline failure -- fail-loud, never a raw
+    # OSError escaping the contract. work_path stays None until bound so the
+    # except arms don't reference an unbound name if resolution itself failed.
+    work_path: Path | None = None
     try:
+        out_path = output_path_for(path, out_dir)
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        # Write to a sibling temp so the final file appears only once fully written
+        # AND verified -- a failure never leaves a partial/unverified _psd behind,
+        # and never clobbers a good prior output. Keep the real extension
+        # (….part.docx) so the verifier's format lookup works and the temp file is
+        # unmistakably not the final output.
+        work_path = out_path.with_name(f"{out_path.stem}.part{out_path.suffix}")
         with tempfile.TemporaryDirectory() as tmp:
             resolved = (
                 legacy.convert_to_modern(path, Path(tmp))
@@ -316,10 +344,11 @@ def apply_document(
             # Same derivation as scan_document, from the same units + analyzer,
             # so apply redacts exactly the set the reviewer approved.
             cfg = _with_propagation(cfg, units, analyzer)
-            # The mapping is persisted ONLY after the verified output is
-            # committed (os.replace). Otherwise a verify failure -- no file
-            # written -- would still leave orphan pseudonym entries and advance
-            # placeholder numbers for a document that never existed.
+            # The mapping is persisted only after verification PASSES (never on a
+            # verify failure -- that would leave orphan pseudonym entries for a
+            # document that was never written), and BEFORE the output is committed.
+            # If the mapping save fails, no output is committed, so we never ship a
+            # file whose [PERSON_1] tokens map back to nothing.
             mapping_store = MappingStore(mapping_db_path)
             try:
                 handler.apply(resolved, work_path, decisions, analyzer, cfg, mapping_store)
@@ -337,15 +366,17 @@ def apply_document(
                     if literal:
                         parts.append(f"{len(literal)} removed value(s) still present verbatim in the output")
                     raise ProcessingError(f"Verification failed: {'; '.join(parts)}. No file was written.")
-                os.replace(work_path, out_path)
-                mapping_store.save()  # commit pseudonyms only now that the file exists
+                mapping_store.save()  # persist pseudonyms FIRST (verify already passed)
+                os.replace(work_path, out_path)  # commit output only once the mapping is durable
             finally:
                 mapping_store.close(save=False)
     except ProcessingError:
-        _cleanup(work_path)
+        if work_path is not None:
+            _cleanup(work_path)
         raise
     except Exception as exc:  # noqa: BLE001
-        _cleanup(work_path)
+        if work_path is not None:
+            _cleanup(work_path)
         raise ProcessingError(f"Could not anonymize '{path.name}': {exc}") from exc
 
     report_path = write_report(out_path, grouped, config=config, verified=True)

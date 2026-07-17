@@ -65,7 +65,10 @@ _CASE_SENSITIVE_FLAGS = regex.MULTILINE | regex.DOTALL
 # missed "Yılmaz" (Turkish dotless ı). \p{Lu}\p{L}+ covers Turkish, Polish,
 # Romanian, Vietnamese and ALL-CAPS forms. (The `regex` module supports \p{}.)
 _NAME = r"\p{Lu}\p{L}+(?:[-\s]\p{Lu}\p{L}+){0,2}"
-_HONORIFICS = r"(?:Herr|Frau|Hr\.|Fr\.|Dr\.|Prof\.)"
+# `Herrn?` also matches the dative "Herrn" that opens a German postal address
+# block ("Herrn\n<Name>\n<Straße>") -- the single most common place a customer name
+# appears in a bank letter, and exactly the sparse-context spot spaCy misses.
+_HONORIFICS = r"(?:Herrn?|Frau|Hr\.|Fr\.|Dr\.|Prof\.)"
 _NAME_LABELS = (
     r"(?:Name|Kunde|Kundin|Kontoinhaber|Sachbearbeiter|Ansprechpartner|Empfänger|"
     r"Berater|Beraterin|Mitarbeiter|Antragsteller|Versicherungsnehmer|Vertragspartner)"

@@ -1,4 +1,7 @@
-from anonymizer.mapping import MappingStore
+import keyring
+import pytest
+
+from anonymizer.mapping import KEY_NAME, MappingStore
 
 
 def test_consistent_placeholder_within_session(mapping_db_path):
@@ -54,3 +57,29 @@ def test_rotate_key_keeps_data_readable(mapping_db_path):
         store.rotate_key()
     with MappingStore(mapping_db_path) as store:  # opens under the rotated key
         assert store.reverse(tok) == "DE89370400440532013000"
+
+
+def test_rotate_key_crash_during_publish_leaves_file_recoverable(mapping_db_path, monkeypatch):
+    """Regression (DATA LOSS): rotate_key used to write the file under the NEW key
+    BEFORE publishing that key, so a crash in that window stranded the entire
+    reversible mapping (its key existed only in memory). Keys are now published
+    FIRST, so a crash during rotation must always leave the file decryptable by a
+    key still in the keyring."""
+    with MappingStore(mapping_db_path) as store:
+        tok = store.get_or_create("PERSON", "Hans Mueller", label="PERSON")
+
+    store = MappingStore(mapping_db_path)
+    in_memory_set = keyring.set_password  # the conftest in-memory backend
+
+    def crash(*_a, **_k):
+        raise RuntimeError("crash during key publish")
+
+    monkeypatch.setattr(keyring, "set_password", crash)
+    with pytest.raises(RuntimeError):
+        store.rotate_key()
+    store.close(save=False)
+
+    monkeypatch.setattr(keyring, "set_password", in_memory_set)  # restore (not undo -> keep isolation)
+    assert keyring.get_password("anonymizer-mapping-db", KEY_NAME), "current key must still be present"
+    with MappingStore(mapping_db_path) as recovered:
+        assert recovered.reverse(tok) == "Hans Mueller"  # file still decryptable after the crash

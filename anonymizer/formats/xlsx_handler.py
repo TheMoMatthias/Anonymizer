@@ -6,7 +6,7 @@ from pathlib import Path
 import openpyxl
 
 from ..actions import decisions_lookup, resolve_replacement
-from ..core import detect_unit
+from ..core import _resolve_overlaps, detect_unit
 from ..models import Finding, TextUnit
 
 EXTENSIONS = (".xlsx", ".xlsm", ".xls")
@@ -109,8 +109,7 @@ def _analyze_cell_text(text: str, header: str | None, analyzer, config, unit_id:
         result.append(f)
 
     # The column header declares this cell is a person. Trust it over the model,
-    # but only where nothing already claims the cell -- an IBAN or a name the NER
-    # did find keeps its own, better-typed finding.
+    # but only where the whole cell isn't already claimed end-to-end.
     value = text.strip()
     if (
         _NAME_COLUMN_HEADER.search(header or "")
@@ -130,7 +129,12 @@ def _analyze_cell_text(text: str, header: str | None, analyzer, config, unit_id:
                 end=start + len(value),
             )
         )
-    return result
+    # The whole-cell override can PARTIALLY overlap a finding NER did make (just the
+    # surname, or a KONTO number in the same cell). Appending it raw left overlapping
+    # spans, which the cell splicer assumes never happens -> garbled tokens. Re-resolve
+    # the combined set so the no-overlap invariant holds (the override merges to cover
+    # the cell rather than corrupting it).
+    return _resolve_overlaps(result, text)
 
 
 def scan(path: Path, analyzer, config) -> list:

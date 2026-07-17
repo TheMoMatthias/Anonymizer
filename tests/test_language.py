@@ -51,3 +51,18 @@ def test_umlaut_names_do_not_beat_real_english_function_words():
         "Please transfer to Björn Müller in Düsseldorf for the account review today"
     )
     assert lang == "en" and confident is True
+
+
+def test_short_english_text_routes_confidently():
+    """Regression (LEAK): a short English text with only 2-3 function words fell
+    below the fixed floor of 4, so _narrow_language silently routed it to the
+    German model and missed its English names. Short docs use a lower floor."""
+    lang, confident = detect_dominant("Please transfer 500 to John Smith. Regards, Jane.")
+    assert lang == "en" and confident is True, (lang, confident)
+
+
+def test_zero_signal_short_text_stays_unconfident():
+    """Names + numbers with no function words: still ambiguous -> ask the user,
+    not a confident (and possibly wrong) guess."""
+    _lang, confident = detect_dominant("Invoice 4471 John Carpenter")
+    assert confident is False

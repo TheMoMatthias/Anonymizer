@@ -8,7 +8,15 @@ from pptx import Presentation
 
 from ..core import detect_unit
 from ..models import TextUnit
-from .run_replace import XmlRunAdapter, apply_findings_to_runs
+from .run_replace import XmlRunAdapter, apply_findings_to_runs, runs_text_and_spans
+
+
+def _para_run_text(p) -> str:
+    """Detection text built from the SAME run list apply writes to (the a:r runs),
+    so a finding's offsets map to the exact runs. `p.text` also includes a:br /
+    a:fld text that `p.runs` does NOT, which shifted every offset after a soft line
+    break or field and made apply redact the wrong bytes (corruption / leak)."""
+    return runs_text_and_spans(p.runs)[0]
 
 P_NS = "http://schemas.openxmlformats.org/presentationml/2006/main"
 P = f"{{{P_NS}}}"
@@ -55,8 +63,9 @@ def extract_text_units(path: Path) -> list[TextUnit]:
     prs = Presentation(path)
     units = []
     for i, p in enumerate(_iter_paragraphs(prs)):
-        if p.text.strip():
-            units.append(TextUnit(id=f"p{i}", text=p.text))
+        text = _para_run_text(p)
+        if text.strip():
+            units.append(TextUnit(id=f"p{i}", text=text))
     units.extend(_extract_comment_units(path))
     return units
 
@@ -88,9 +97,10 @@ def scan(path: Path, analyzer, config) -> list:
 def apply(path: Path, out_path: Path, decisions: dict, analyzer, config, mapping_store) -> None:
     prs = Presentation(path)
     for p in _iter_paragraphs(prs):
-        if not p.text.strip():
+        text = _para_run_text(p)
+        if not text.strip():
             continue
-        unit = TextUnit(id="tmp", text=p.text)
+        unit = TextUnit(id="tmp", text=text)
         findings = detect_unit(analyzer, unit, config)
         apply_findings_to_runs(p.runs, findings, decisions, mapping_store)
     prs.save(out_path)

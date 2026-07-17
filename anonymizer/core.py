@@ -31,10 +31,10 @@ MAX_POSSIBLE_MISSES = 300
 # tier) and to one whose checksum FAILED. A failing checksum no longer zeroes
 # the finding: a typo'd / OCR'd IBAN or card number is still an identifying
 # string that must not leak, so it is DEMOTED to a review-tier score (kept, and
-# flagged with the "unverified" chip) instead of dropped -- the reviewer
-# decides. IDs whose threshold sits above this score (e.g. Steuer-ID at 0.6)
-# still fall out of the actionable set and re-surface via the completeness scan,
-# so nothing is silently lost.
+# flagged with the "unverified" chip) instead of dropped -- the reviewer decides.
+# A checksum-FAILED finding (validated is False) BYPASSES the score-threshold gate
+# in detect_unit, so an ID whose threshold sits above this demoted score (e.g.
+# Steuer-ID at 0.6) is still surfaced for review rather than silently filtered.
 _VALIDATED_SCORE = 0.98
 _INVALID_SCORE = 0.4
 
@@ -47,7 +47,10 @@ _PROPAGATED_SCORE = 0.85
 # it keys the pseudonym on the name itself, so "Herr Müller" here and a bare
 # "Müller" in a table cell become the SAME token rather than two people -- and
 # it gives document-wide propagation the right seed to match on.
-_HONORIFIC_PREFIX = re.compile(r"^(?:Herr|Frau|Hr\.|Fr\.|Dr\.|Prof\.)\s+")
+# `Herrn?` covers the dative "Herrn" that opens a German postal address block
+# ("Herrn\n<Name>\n<Straße>") -- a plain "Herr" pattern silently misses it. Kept in
+# sync with engine._HONORIFICS and pipeline's honorific stripper.
+_HONORIFIC_PREFIX = re.compile(r"^(?:Herrn?|Frau|Hr\.|Fr\.|Dr\.|Prof\.)\s+")
 
 
 def _snippet(text: str, start: int, end: int) -> str:
@@ -82,7 +85,7 @@ def _refine(finding: Finding) -> Finding:
     return finding
 
 
-def _resolve_overlaps(findings: list[Finding]) -> list[Finding]:
+def _resolve_overlaps(findings: list[Finding], text: str) -> list[Finding]:
     """Keeps a non-overlapping set. Apply replaces spans by splicing text and
     ASSUMES they never overlap (see the format handlers' run/cell replacement);
     two recognizers claiming overlapping-but-not-identical spans for the same
@@ -93,11 +96,21 @@ def _resolve_overlaps(findings: list[Finding]) -> list[Finding]:
     We keep the LONGER span first, then the higher score: for a redaction tool,
     covering MORE of a value is always safer than covering less, so the full
     address wins over the bare city and the complete phone wins over a fragment.
-    A kept superset also covers any contained finding's PII. On an exact tie
-    (same span and score, e.g. DE_ADDRESS vs spaCy LOCATION on one PLZ+city) we
-    prefer the specific pattern recognizer over the generic NER label and then
-    break ties by entity type, so the result is deterministic. Touching spans
-    (end == next start) do not overlap.
+    On an exact tie (same span and score, e.g. DE_ADDRESS vs spaCy LOCATION on one
+    PLZ+city) we prefer the specific pattern recognizer over the generic NER label
+    and then break ties by entity type, so the result is deterministic. Touching
+    spans (end == next start) do not overlap.
+
+    Overlap handling is UNION-MERGE, not drop-the-loser: a finding fully CONTAINED
+    by a kept span adds nothing and is dropped, but a CROSSING (partial) overlap is
+    merged -- the kept span is extended to cover the union of every span it crosses,
+    and its value re-sliced from `text`. Dropping the loser outright (the old
+    behaviour) leaked any character range covered ONLY by the loser: e.g. an
+    over-reaching PERSON anchor "Klaus Mueller Hauptstr" crossing a longer
+    DE_ADDRESS "Hauptstr 12, Musterstadt" dropped the PERSON entirely, leaving the
+    customer name "Klaus Mueller" redacted by nothing. Merging over-redacts the
+    crossing region (safe) instead of leaking it; the merged span keeps the
+    highest-priority overlapper's entity type.
     """
     ordered = sorted(
         findings,
@@ -111,9 +124,23 @@ def _resolve_overlaps(findings: list[Finding]) -> list[Finding]:
     )
     kept: list[Finding] = []
     for f in ordered:
-        if any(f.start < k.end and k.start < f.end for k in kept):
+        overlappers = [k for k in kept if f.start < k.end and k.start < f.end]
+        if not overlappers:
+            kept.append(f)
             continue
-        kept.append(f)
+        if any(k.start <= f.start and f.end <= k.end for k in overlappers):
+            continue  # fully contained by a kept span -> its PII is already covered
+        # Crossing overlap: extend the highest-priority overlapper to the union of
+        # f and EVERY span it crosses (f may bridge two adjacent kept spans), so no
+        # detected PII char is left uncovered and the kept set stays non-overlapping.
+        new_start = min(f.start, *(k.start for k in overlappers))
+        new_end = max(f.end, *(k.end for k in overlappers))
+        winner = overlappers[0]  # earliest-inserted == highest priority in sort order
+        for loser in overlappers[1:]:
+            kept.remove(loser)
+        winner.start, winner.end = new_start, new_end
+        winner.value = text[new_start:new_end]
+        winner.context = _snippet(text, new_start, new_end)
     return sorted(kept, key=lambda f: f.start)
 
 
@@ -155,7 +182,12 @@ def detect_unit(analyzer, unit: TextUnit, config: dict) -> list[Finding]:
             )
             _refine(finding)
             threshold = entities_cfg.get(r.entity_type, {}).get("confidence_threshold", 0.5)
-            if finding.score < max(0.0, threshold - sensitivity):
+            # A checksum-FAILED ID (validated is False) is demoted to _INVALID_SCORE
+            # but MUST still be surfaced for review -- a typo'd/OCR'd Steuer-ID is
+            # identifying, and its 0.6 threshold would otherwise silently drop the
+            # 0.4-demoted finding. Only findings that did NOT fail a checksum obey the
+            # score gate.
+            if finding.validated is not False and finding.score < max(0.0, threshold - sensitivity):
                 continue
             candidates.append(finding)
 
@@ -196,7 +228,7 @@ def detect_unit(analyzer, unit: TextUnit, config: dict) -> list[Finding]:
             )
         )
 
-    return _resolve_overlaps(candidates)
+    return _resolve_overlaps(candidates, unit.text)
 
 
 # --- completeness / unmatched-risk scan -------------------------------------
