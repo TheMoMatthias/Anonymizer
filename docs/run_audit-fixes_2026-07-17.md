@@ -61,8 +61,8 @@ path left in the Critical/High set. Report at each batch boundary.
       persists first; if save fails no output is committed. (Med, but 2-line + same
       fail-loud theme — include with C6.)
 
-### Batch 5 — Persistence (settings/config)
-- [ ] H8 deny_list (UI tells users to add missed PII) stored plaintext in config.yaml →
+### Batch 5 — Persistence (settings/config)  ✅ DONE (105 tests green)
+- [x] H8 deny_list (UI tells users to add missed PII) stored plaintext in config.yaml →
       PII at rest. Fix: store deny/allow terms encrypted (via MappingStore or a separate
       encrypted file), or hash+match; at minimum stop persisting raw terms in plaintext.
       NOTE: may need a design decision (where/how) → may pause here.
@@ -77,4 +77,7 @@ evaluation.py substring over-report + language mismatch; review.py high-tier ski
 audit.py swallow; settings blur-vs-save; fsync on atomic writes; TESSDATA_PREFIX; bic_valid
 noise; mapping concurrency lock.
 
-## Status: IN PROGRESS — Batch 1
+## Status: DONE — all 6 Critical + 8 High fixed, 105 tests green.
+H8 encrypts allow/deny lists in %LOCALAPPDATA%\Anonymizer\lists.enc (mapping key),
+migrates any plaintext lists out of config.yaml, prev-key fallback on rotation.
+Second-wave Medium/Low items remain (listed above) -- not yet started.
