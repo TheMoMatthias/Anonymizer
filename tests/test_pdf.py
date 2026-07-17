@@ -147,3 +147,27 @@ def test_pdf_widget_redaction_leaves_no_orphan_appearance_stream(tmp_path, analy
         pdf_handler.apply(path, out, decisions, analyzer, cfg, ms)
 
     assert _IBAN.encode() not in out.read_bytes(), "original widget value recoverable in output bytes"
+
+
+def test_pdf_text_page_with_many_images_uses_text_layer(tmp_path, analyzer, base_config, monkeypatch):
+    """Regression: total-image-coverage must NOT override a page that has a healthy
+    digital text layer. A real letter with a logo + signature + footer graphic
+    (summing >50% of the page) must be processed from its text, not refused/re-OCR'd.
+    OCR is forced OFF so a misclassification would raise -- the test then proves it
+    doesn't."""
+    from anonymizer import ocr as ocr_mod
+
+    monkeypatch.setattr(ocr_mod, "ocr_available", lambda config=None: False)
+    doc = fitz.open()
+    page = doc.new_page(width=600, height=800)
+    page.insert_text((60, 60), f"Sehr geehrter Herr Mueller, betreffend Ihr Konto {_IBAN} im Anhang.")
+    for top in (0, 300, 560):  # three big images summing well over 50% of the page
+        pix = fitz.Pixmap(fitz.csRGB, fitz.IRect(0, 0, 600, 240))
+        pix.clear_with(205)
+        page.insert_image(fitz.Rect(0, top, 600, top + 240), pixmap=pix)
+    path = tmp_path / "letter_with_images.pdf"
+    doc.save(path)
+    doc.close()
+
+    grouped = scan_document(path, analyzer, base_config).all_actionable()  # must NOT raise
+    assert any(_IBAN in g.value for g in grouped), "text-layer IBAN missed on an image-heavy page"

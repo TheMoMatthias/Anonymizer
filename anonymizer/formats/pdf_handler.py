@@ -75,9 +75,14 @@ def _page_content(page, config) -> tuple[str, list]:
     (no image) returns ("", []); the document-level guard refuses a whole PDF that
     yields no units at all."""
     text, boxes = _text_words(page)
-    large_image = _has_large_image(page)
-    if len(text.strip()) >= _MIN_TEXT_CHARS and not large_image:
+    # A healthy digital text layer is TRUSTED as-is, even alongside a logo, a scanned
+    # signature, or a chart -- image coverage alone must NOT force a text-rich page
+    # onto the OCR/refuse path (that would refuse a legitimate letter, or discard an
+    # accurate text layer for a lossy re-OCR that can misread an IBAN digit/name).
+    if len(text.strip()) >= _MIN_TEXT_CHARS:
         return text, boxes
+    # Thin/empty text: a scanned page (large image, no real text) or a near-blank one.
+    large_image = _has_large_image(page)
     if ocr_mod.ocr_available(config):
         ocr_text, ocr_boxes = ocr_mod.ocr_page(page)
         if ocr_text.strip():
@@ -88,7 +93,7 @@ def _page_content(page, config) -> tuple[str, list]:
                 "be read by OCR, so it cannot be anonymized safely and no output was "
                 "written."
             )
-        return text, boxes  # no image, OCR empty -> the short text layer is all there is
+        return text, boxes  # no large image, OCR empty -> genuinely near-blank page
     if large_image:  # scanned page, no OCR available -> refuse
         raise ProcessingError(
             f"Page {page.number + 1} is a scanned/image page and OCR is not available "

@@ -40,8 +40,13 @@ _UMLAUT_RE = re.compile(r"[äöüß]", re.IGNORECASE)
 # short text stayed unconfident and _narrow_language silently routed it to the
 # GERMAN model, missing its English names (a leak). Zero-signal text (names +
 # numbers only, no function words) still returns unconfident so the UI asks.
+# Short docs use a lower floor so a clearly-English short text (2-3 markers) isn't
+# left unconfident and silently routed to the German model. The umlaut-name false
+# positive is closed by excluding the "hat"/"die"/"den" collisions above + the
+# umlaut cap tracking min_signal -- NOT by raising this floor (floor 3 wrongly
+# flips short English with exactly 2 markers to unconfident -> German default).
 _MIN_SIGNAL = 4
-_MIN_SIGNAL_SHORT = 3  # >2 so one coincidental marker + the capped umlaut bonus can't reach it alone
+_MIN_SIGNAL_SHORT = 2
 _SHORT_DOC_WORDS = 25
 _MIN_MARGIN = 1.5
 
