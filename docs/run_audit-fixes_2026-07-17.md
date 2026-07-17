@@ -110,9 +110,17 @@ Round 2 also fixed 2 NEW Criticals the sweep found:
 Round-2 DEFERRED to second wave (judgment): core.py Steuer-ID precision (fixing risks
 reopening the C2 leak-fix), MISC-honorific propagation, merge validated-reset.
 
-## Status: ROUND 1 DONE (105). ROUND 2 DONE (112 tests green). All 8 planned + 2 new
-Criticals fixed. Convergence not yet re-confirmed (each sweep has found regressions in
-the prior sweep's fixes -- diminishing returns; see final report).
+## ROUND 2 CONVERGENCE CHECK (scoped re-audit of the round-2 diff) — 2 regressions found + fixed:
+- [x] pdf `_page_content`: total-image-coverage forced text-rich letters (logo+sig+footer
+      >50%) onto the OCR/refuse path. Now trusts a healthy text layer (>=_MIN_TEXT_CHARS)
+      regardless of image coverage; only THIN-text pages hit the large-image gate.
+- [x] language `_MIN_SIGNAL_SHORT`: reverted 3->2 (floor 3 flipped short English with 2
+      markers to unconfident->German default). Collision fix (hat/die/den removal) stands.
+Security lens on the crypto/config/pipeline round-2 diff: CONVERGED, no findings.
+
+## Status: DONE (113 tests green). Loop stopped by user choice after the scoped
+convergence check. Critical+High leak/corruption/data-loss paths closed across 3 rounds
+(commits ba9a386, 1f154a4, 9aa603e, 0b987b8). Second wave (Medium/Low) still pending.
 H8 encrypts allow/deny lists in %LOCALAPPDATA%\Anonymizer\lists.enc (mapping key),
 migrates any plaintext lists out of config.yaml, prev-key fallback on rotation.
 Second-wave Medium/Low items remain (listed above) -- not yet started.
