@@ -112,6 +112,25 @@ def _lists_and_recognizers(cfg: dict, flush_hooks: list | None = None) -> None:
             flush_hooks.append(sync_lists)  # save() flushes even if blur never fired
 
     with ui.element("div").classes("az-card w-full"):
+        ui.label("Name columns — spreadsheets").classes("az-h2 mb-1")
+        ui.label(
+            "Extra column-header words that mark a column as people, so every cell in it is "
+            "treated as a name (catches bare surnames the model misses in a table cell). One "
+            "per line, matched case-insensitively. Built-ins already cover Name, Kunde, "
+            "Sachbearbeiter, Ansprechpartner, Projektleiter, Betreuer, Verantwortlich, and more."
+        ).classes("az-muted text-xs mb-2")
+        nch_area = ui.textarea(value="\n".join(cfg.get("name_column_headers", []))).props("outlined").classes(
+            "w-full"
+        )
+
+        def sync_name_headers() -> None:
+            cfg["name_column_headers"] = [ln.strip() for ln in nch_area.value.splitlines() if ln.strip()]
+
+        nch_area.on("blur", sync_name_headers)
+        if flush_hooks is not None:
+            flush_hooks.append(sync_name_headers)
+
+    with ui.element("div").classes("az-card w-full"):
         ui.label("Custom recognizers").classes("az-h2")
         ui.label("German bank-specific patterns Presidio doesn't ship with.").classes("az-muted text-xs mb-2")
         column = ui.column().classes("w-full gap-2")

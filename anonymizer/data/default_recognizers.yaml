@@ -108,6 +108,13 @@ allow_list:
   - Vertraulich
 deny_list: []
 
+# Extra spreadsheet column-header words that mark a column as PEOPLE (matched
+# case-insensitively as a substring). A matching header makes every cell in the
+# column be treated as a name -- this catches bare surnames NER misses in a table
+# cell. Built-in stems already cover Name/Kunde/Sachbearbeiter/Ansprechpartner/
+# Projektleiter/Betreuer/Verantwortlich/... ; add your workbook's own here.
+name_column_headers: []
+
 # Small curated set of German bank-specific recognizers Presidio doesn't ship.
 # context words boost score when found near a match (Presidio's built-in context logic).
 custom_recognizers:

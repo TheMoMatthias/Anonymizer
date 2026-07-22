@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import functools
 import re
 from pathlib import Path
 
@@ -21,11 +22,32 @@ EXTENSIONS = (".xlsx", ".xlsm", ".xls")
 # labelled the column. Note this does NOT work via Presidio's context boost --
 # that only lifts PATTERN recognizers, and spaCy NER gets no boost from it at
 # all, which is why "Kunde: Müller" in a cell still missed.
-_NAME_COLUMN_HEADER = re.compile(
-    r"(name|kunde|kundin|inhaber|empf(ä|ae)nger|sachbearbeiter|ansprechpartner|"
-    r"berater|mitarbeiter|antragsteller|vertragspartner|beg(ü|ue)nstigter)",
-    re.IGNORECASE,
+# Built-in column-header stems that declare a column holds PEOPLE. Matched
+# case-insensitively as a SUBSTRING, so "leiter" covers Projekt-/Team-/Abteilungs-
+# leiter and "berechtigt" covers zeichnungs-/bevollmächtigt forms. The shipped set
+# was too narrow for a real "database" workbook (it missed Projektleiter, Betreuer,
+# Verantwortlich, ...), so a name column with such a header leaked ~65% via NER
+# alone. Extend per workbook via config["name_column_headers"] (Settings > Detection).
+_NAME_HEADER_TERMS = (
+    "name", "kunde", "kundin", "inhaber", "empfänger", "empfaenger",
+    "sachbearbeiter", "ansprechpartner", "berater", "beraterin", "mitarbeiter",
+    "antragsteller", "vertragspartner", "begünstigter", "beguenstigter",
+    # widened: common German business / bank name-column headers.
+    "projektleiter", "leiter", "betreuer", "verantwortlich", "referent",
+    "gesellschafter", "geschäftsführer", "geschaeftsfuehrer", "prokurist",
+    "zeichnungsberechtigt", "bevollmächtigt", "bevollmaechtigt", "berechtigt",
+    "unterzeichner", "auftraggeber", "eigentümer", "eigentuemer",
+    "vorname", "nachname", "familienname", "teilnehmer", "kontaktperson",
 )
+
+
+@functools.lru_cache(maxsize=8)
+def _name_header_re(extra_terms: tuple[str, ...] = ()):
+    """Compiled people-column-header matcher for the built-in stems plus any
+    workbook-specific extras. lru_cached on the extra-terms tuple so the per-cell
+    hot path never recompiles."""
+    terms = _NAME_HEADER_TERMS + tuple(t.strip().lower() for t in extra_terms if t.strip())
+    return re.compile("|".join(re.escape(t) for t in terms), re.IGNORECASE)
 # Cell contents that a name column can still hold but which are not names.
 _NOT_A_NAME = re.compile(r"^[\W\d_]*$|^(unbekannt|n/?a|keine?|leer|-{1,3}|divers)$", re.IGNORECASE)
 _NAME_COLUMN_SCORE = 0.8
@@ -117,8 +139,9 @@ def _analyze_cell_text(text: str, header: str | None, analyzer, config, unit_id:
     # The column header declares this cell is a person. Trust it over the model,
     # but only where the whole cell isn't already claimed end-to-end.
     value = text.strip()
+    header_re = _name_header_re(tuple(config.get("name_column_headers", ())))
     if (
-        _NAME_COLUMN_HEADER.search(header or "")
+        header_re.search(header or "")
         and value
         and not _NOT_A_NAME.match(value)
         and not any(f.start == 0 and f.end >= len(value) for f in result)

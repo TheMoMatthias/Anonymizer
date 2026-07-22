@@ -58,3 +58,22 @@ def test_xlsx_header_straddling_span_is_clipped_not_dropped(analyzer, base_confi
     cfg = {**base_config, "languages": ["de"], "deny_list": ["Bemerkung: Geheimprojekt"]}
     findings = xlsx_handler._analyze_cell_text("Geheimprojekt", "Bemerkung", analyzer, cfg)
     assert any("Geheimprojekt" in f.value for f in findings), f"straddling value dropped: {findings}"
+
+
+def test_name_header_re_widened_and_configurable():
+    """The built-in people-header set now covers common German business headers,
+    is extendable via config, and does not match non-people headers."""
+    assert xlsx_handler._name_header_re().search("Projektleiter")  # widened built-in
+    assert xlsx_handler._name_header_re().search("Betreuer")
+    assert xlsx_handler._name_header_re().search("Verantwortlich")
+    assert not xlsx_handler._name_header_re().search("Betrag")  # not a people column
+    assert not xlsx_handler._name_header_re().search("Sachwalter")  # only via config...
+    assert xlsx_handler._name_header_re(("Sachwalter",)).search("Sachwalter")  # ...added here
+
+
+def test_xlsx_configured_name_header_claims_bare_surname(analyzer, base_config):
+    """A workbook-specific header added via config['name_column_headers'] makes the
+    whole cell a person -- catching a bare common-noun surname NER misses in a cell."""
+    cfg = {**base_config, "languages": ["de"], "name_column_headers": ["Sachwalter"]}
+    findings = xlsx_handler._analyze_cell_text("Weber", "Sachwalter", analyzer, cfg)
+    assert any("Weber" in f.value for f in findings), f"configured header did not claim the cell: {findings}"

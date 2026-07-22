@@ -253,6 +253,41 @@ def _scrub_metadata(out_path: Path) -> None:
                 zf.writestr(n, contents[n])
 
 
+# OOXML local tag names that delimit an INDEPENDENT value: a spreadsheet cell
+# (`c`) or shared-string item (`si`), a word/slide paragraph (`p`), a table row
+# (`tr`). Text is concatenated WITHIN these (so a name split across formatting
+# runs -- <t>Mül</t><t>ler</t> -- still rejoins for the residual check) but a
+# sentinel is inserted BETWEEN them, so gluing two unrelated cells can never
+# forge a phantom match. Worksheets store string cells as integer shared-string
+# INDICES in <v>, so without this the concatenated indices of adjacent cells
+# coincidentally spell removed customer numbers and trip a false hard-fail.
+_OOXML_VALUE_BOUNDARY = frozenset({"c", "si", "p", "tr"})
+
+
+def _ooxml_text_with_boundaries(tree) -> str:
+    """itertext(), but with a NUL sentinel wrapping every independent value
+    container so cross-container concatenation can't forge a literal match."""
+    out: list[str] = []
+
+    def walk(el) -> None:
+        tag = el.tag
+        local = tag.rsplit("}", 1)[-1] if isinstance(tag, str) else ""
+        boundary = local in _OOXML_VALUE_BOUNDARY
+        if boundary:
+            out.append("\x00")
+        if el.text:
+            out.append(el.text)
+        for child in el:
+            walk(child)
+            if child.tail:
+                out.append(child.tail)
+        if boundary:
+            out.append("\x00")
+
+    walk(tree)
+    return "".join(out)
+
+
 def _output_text_blob(out_path: Path) -> str:
     """Every readable string in the output, INCLUDING parts the format handlers
     don't normally touch (OOXML metadata, text boxes, numeric cells, every XML
@@ -296,7 +331,7 @@ def _output_text_blob(out_path: Path) -> str:
                     tree = xmlsafe.fromstring(zf.read(name))
                 except etree.XMLSyntaxError:
                     continue
-                parts.append("".join(tree.itertext()))
+                parts.append(_ooxml_text_with_boundaries(tree))
         return "\n".join(parts)
     return out_path.read_text(encoding="utf-8", errors="ignore")
 
@@ -311,6 +346,16 @@ def _literal_residual(out_path: Path, removed_values: list[str], always_check=()
     on common substrings -- EXCEPT terms in `always_check` (the user's deny list),
     which are user-asserted PII and must be verified regardless of length."""
     blob = _output_text_blob(out_path)
+    # Mask the tool's OWN replacement tokens ([PERSON_1], [KUNDENNR_3], [REDACTED], ...)
+    # before searching. A removed value that is a substring of a token is NOT a leak
+    # -- it is the anonymized output: e.g. an NER-misflagged header word "Kundennr"
+    # (removed as a LOCATION) is a substring of the [KUNDENNR_n] tokens that replaced
+    # the customer NUMBERS, so an unmasked substring scan reports a phantom leak and
+    # the fail-loud gate refuses to write ANY file. The sentinel (NUL: never in real
+    # text, not whitespace so the stripped form can't bridge across it) replaces each
+    # token so it neither matches a removed value nor joins two real fragments. A real
+    # leak sitting OUTSIDE a token is untouched and still caught.
+    blob = re.sub(r"\[[A-Z0-9_]+\]", "\x00", blob)
     low = blob.lower()
     low_ns = re.sub(r"\s+", "", low)
     always = {v.strip().lower() for v in always_check}
