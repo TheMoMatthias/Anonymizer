@@ -33,6 +33,11 @@ _COLUMN_QCOLOR = {"none": "grey-7", "pseudonymize": "primary", "anonymize": "neg
 # Trust tiers, most-confident first, for the by-confidence bulk bands.
 _TIER_BANDS = [("high", "High confidence"), ("medium", "Medium"), ("low", "Low")]
 
+# Max per-value rows rendered per class before the rest is summarized. Each row is
+# a live segmented toggle, so rendering thousands at once (a "database" workbook)
+# stalls the screen. The overflow stays fully decidable (bulk) and expandable.
+_REVIEW_CAP = 100
+
 
 def _action_toggle(initial: str):
     tog = ui.toggle(_ACTION_LABELS, value=initial).props("dense unelevated no-caps")
@@ -44,9 +49,16 @@ def _action_toggle(initial: str):
     return tog, paint
 
 
-def _class_card(dcg, on_change: Callable) -> None:
+def _class_card(dcg, on_change: Callable, expanded: set, rerender: Callable) -> None:
     review_items = dcg.review_items
     auto_items = dcg.high_tier_items
+    show_all = dcg.key in expanded
+    cap = None if show_all else _REVIEW_CAP
+    shown_review = review_items if cap is None else review_items[:cap]
+    over_review = review_items[len(shown_review):]
+    shown_auto = auto_items if cap is None else auto_items[:cap]
+    over_auto = auto_items[len(shown_auto):]
+
     with ui.element("div").classes("az-card w-full"):
         # Header: category + bulk action for the whole class.
         with ui.row().classes("items-center gap-3 w-full"):
@@ -60,12 +72,12 @@ def _class_card(dcg, on_change: Callable) -> None:
                 if auto_items:
                     caption += f" · {len(auto_items)} auto-accepted"
                 ui.label(caption).classes("az-muted text-xs")
-            # Say exactly how many rows the bulk control touches: it also
-            # rewrites the auto-accepted items tucked inside the collapsed
-            # strip, and silently changing decisions the reviewer cannot see
-            # would break the mental model.
+            # Say exactly how many rows the bulk control touches: it rewrites EVERY
+            # value in the class -- the auto-accepted ones and the summarized overflow
+            # too -- and silently changing decisions the reviewer cannot see would
+            # break the mental model.
             ui.label(f"Set all {len(dcg.items)}:").classes("az-muted text-xs").tooltip(
-                "Applies to every value in this category, including the auto-accepted ones."
+                "Applies to every value in this category, including hidden overflow and auto-accepted ones."
             )
             bulk, bulk_paint = _action_toggle(_dominant_action(dcg.items))
 
@@ -73,27 +85,55 @@ def _class_card(dcg, on_change: Callable) -> None:
 
         def bulk_apply() -> None:
             bulk_paint()
-            for g, tog, paint in selects:
+            for g in dcg.items:  # EVERY value in the class, incl. capped-out overflow + auto
                 g.action = bulk.value
+            for g, tog, paint in selects:  # sync only the toggles actually on screen
                 tog.set_value(bulk.value)
                 paint()
             on_change()
 
         bulk.on_value_change(bulk_apply)
 
-        # Review-tier items first (the ones that actually need attention).
+        # Review-tier items first (the ones that actually need attention), capped.
         if review_items:
             with ui.column().classes("w-full mt-2 gap-0"):
-                for g in review_items:
-                    row_selects = _capture_row(g, on_change)
-                    selects.extend(row_selects)
+                for g in shown_review:
+                    selects.extend(_capture_row(g, on_change))
+            if over_review:
+                _overflow_row(over_review, dcg.key, expanded, rerender, on_change)
 
-        # High-confidence items collapsed out of the way.
+        # High-confidence items collapsed out of the way, also capped.
         if auto_items:
             with ui.expansion(f"{len(auto_items)} auto-accepted (high confidence)").classes("w-full mt-2"):
                 with ui.column().classes("w-full gap-0"):
-                    for g in auto_items:
+                    for g in shown_auto:
                         selects.extend(_capture_row(g, on_change))
+                    if over_auto:
+                        ui.label(f"+ {len(over_auto)} more auto-accepted not shown").classes(
+                            "az-muted text-xs px-1 py-1"
+                        )
+
+
+def _overflow_row(items: list, key: str, expanded: set, rerender: Callable, on_change: Callable) -> None:
+    """Summary row for the review-tier values beyond the render cap: a bulk action
+    for all of them at once, and a 'Show all' that renders the full class."""
+    with ui.row().classes("az-row items-center gap-3 w-full py-1 px-1"):
+        ui.label(f"+ {len(items)} more value(s) not shown").classes("az-muted text-xs flex-grow")
+        ui.label("set these to:").classes("az-muted text-xs")
+        tog = ui.toggle(_ACTION_LABELS, value=_dominant_action(items)).props("dense unelevated no-caps")
+
+        def set_overflow(_e=None, items=items, t=tog) -> None:
+            for g in items:
+                g.action = t.value
+            on_change()
+
+        tog.on_value_change(set_overflow)
+
+        def show_all(k=key) -> None:
+            expanded.add(k)
+            rerender()
+
+        ui.button("Show all", on_click=show_all).props("flat dense").classes("text-xs")
 
 
 def _capture_row(g: GroupedFinding, on_change: Callable) -> list:
@@ -159,9 +199,19 @@ def render_review(container, result: ScanResult, on_change: Callable, column_pol
         # By-confidence bulk bands: accept high, review medium, glance-and-decide low.
         _tier_bands(result, container, on_change, column_policies)
 
+        # Per-class rows are capped for responsiveness; a class expands on demand.
+        # Expanded state rides on the ScanResult so it survives the in-place
+        # re-render (decisions mutate + re-render) but resets when a new file is
+        # scanned into a fresh ScanResult.
+        if not hasattr(result, "_expanded_classes"):
+            result._expanded_classes = set()
+
+        def rerender() -> None:
+            render_review(container, result, on_change, column_policies)
+
         with ui.column().classes("w-full gap-3 az-scroll pr-1"):
             for dcg in result.groups:
-                _class_card(dcg, on_change)
+                _class_card(dcg, on_change, result._expanded_classes, rerender)
 
             if result.possible_misses:
                 _possible_misses_card(result.possible_misses)

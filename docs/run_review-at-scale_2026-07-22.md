@@ -89,7 +89,11 @@ Non-spreadsheet column concept; semantic topic detection; rule persistence.
     -> its own follow-up. Per-value skip (class cards) + per-class skip (bulk toggle) still available.
   - GUI import-clean + logic mirrors existing toggles, but the live native webview was NOT run
     headlessly -> user should visually confirm the review screen.
-- [ ] Stage 2: row virtualization (user data is "mostly distinct" -> may still be a long list after
-      column rules; virtualize the per-value rows)
+- [x] Stage 2: cap + summarize (chosen over true virtualization -- lower risk, keeps the card design,
+      fits trust-and-spot-check). Each class renders at most `_REVIEW_CAP` (100) review rows and 100
+      auto rows; the rest is a summary row with a bulk "set these to X" + "Show all" (expand state on
+      the ScanResult, per-file). Per-class "Set all" now writes EVERY item incl. capped overflow.
+      Headless build-smoke (scratchpad smoke_review.py): 250-item class renders capped (1450 elements)
+      and expands (2945) with no build error; live webview still user-verified.
 - [ ] Deferred follow-ups: column "skip" (needs cell-level decisions); column-rule persistence;
-      promote possible-misses to redaction.
+      promote possible-misses to redaction; true virtualization if cap+summarize proves insufficient.
