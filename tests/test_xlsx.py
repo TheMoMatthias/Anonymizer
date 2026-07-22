@@ -60,6 +60,36 @@ def test_xlsx_header_straddling_span_is_clipped_not_dropped(analyzer, base_confi
     assert any("Geheimprojekt" in f.value for f in findings), f"straddling value dropped: {findings}"
 
 
+def test_xlsx_repeated_values_memoized_consistently(tmp_path, analyzer, base_config, mapping_db_path):
+    """Detection/redaction is memoized per (header, cell-text) for speed on large
+    'database' sheets. A value repeated across many cells and sheets must still be
+    caught at EVERY occurrence, pseudonymize to the SAME token, and pass the
+    fail-loud verify -- memoization must not drop or diverge any occurrence."""
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.title = "A"
+    ws["A1"] = "Name"
+    ws2 = wb.create_sheet("B")
+    ws2["A1"] = "Kunde"
+    for r in range(2, 12):
+        ws[f"A{r}"] = "Hans Mueller"   # 10 rows
+        ws2[f"A{r}"] = "Hans Mueller"  # + 10 rows on another sheet = 20 occurrences
+    path = tmp_path / "repeat.xlsx"
+    wb.save(path)
+
+    grouped = scan_document(path, analyzer, base_config).all_actionable()
+    person_occurrences = sum(g.count for g in grouped if g.entity_type == "PERSON")
+    assert person_occurrences >= 20, f"memoization dropped occurrences: {person_occurrences}"
+
+    for g in grouped:
+        g.action = "pseudonymize"
+    out_path, _ = apply_document(path, grouped, analyzer, base_config, mapping_db_path)  # raises if verify fails
+    out = openpyxl.load_workbook(out_path)
+    tokens = {out["A"][f"A{r}"].value for r in range(2, 12)} | {out["B"][f"A{r}"].value for r in range(2, 12)}
+    assert len(tokens) == 1, f"repeated value not consistently tokenized: {tokens}"
+    assert next(iter(tokens)).startswith("[PERSON_"), f"unexpected token: {tokens}"
+
+
 def test_name_header_re_widened_and_configurable():
     """The built-in people-header set now covers common German business headers,
     is extendable via config, and does not match non-people headers."""

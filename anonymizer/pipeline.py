@@ -119,7 +119,15 @@ def _with_propagation(config: dict, units: list, analyzer) -> dict:
     if not config.get("propagate_enabled", True):
         return config
     values: set[tuple[str, str]] = set()
+    # Propagation needs only the SET of confirmed values, so a unit whose text was
+    # already scanned adds nothing -- skip it. In a spreadsheet the same cell text
+    # recurs thousands of times, and detection (one NER pass per unit) is the whole
+    # cost; deduping the pass-1 sweep by text is a large, result-preserving saving.
+    seen_text: set[str] = set()
     for unit in units:
+        if unit.text in seen_text:
+            continue
+        seen_text.add(unit.text)
         for f in core.detect_unit(analyzer, unit, config):
             if f.entity_type not in _PROPAGATABLE:
                 continue

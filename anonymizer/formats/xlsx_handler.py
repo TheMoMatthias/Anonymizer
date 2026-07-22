@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import functools
 import re
+from dataclasses import replace
 from pathlib import Path
 
 import openpyxl
@@ -169,10 +170,25 @@ def _analyze_cell_text(text: str, header: str | None, analyzer, config, unit_id:
 def scan(path: Path, analyzer, config) -> list:
     wb = openpyxl.load_workbook(path, data_only=False)
     findings = []
+    # A "database" sheet repeats the same value thousands of times (a status, a
+    # division, a city), and detection (one spaCy NER pass per cell) is the entire
+    # cost. Memoize by (header, cell-text) for this scan: identical cells detect
+    # once. Findings are re-stamped with each cell's unit_id (offsets/values are
+    # relative to the cell text, so nothing else changes) so completeness-scan
+    # coverage still maps to the right unit.
+    cache: dict[tuple[str | None, str], list] = {}
+
+    def detect(text, header, key):
+        base = cache.get((header, text))
+        if base is None:
+            base = _analyze_cell_text(text, header, analyzer, config)
+            cache[(header, text)] = base
+        return [replace(f, unit_id=key) for f in base]
+
     for key, text, header in _iter_cell_units(wb):
-        findings.extend(_analyze_cell_text(text, header, analyzer, config, unit_id=key))
+        findings.extend(detect(text, header, key))
     for key, text in _iter_defined_name_units(wb):
-        findings.extend(_analyze_cell_text(text, None, analyzer, config, unit_id=key))
+        findings.extend(detect(text, None, key))
     return findings
 
 
@@ -194,6 +210,19 @@ def apply(path: Path, out_path: Path, decisions: dict, analyzer, config, mapping
     # keep_vba=False (the default) strips any macro project from the output,
     # which is intentional: anonymized copies are never macro-enabled.
     wb = openpyxl.load_workbook(path, data_only=False, keep_vba=False)
+    # Memoize the redacted output by (header, text) for this apply -- a repeated
+    # cell redacts to the same string. Safe: the pseudonym mapping is value-keyed,
+    # so the same value already maps to the same token whether recomputed or cached
+    # (the first call creates the mapping entry; the rest reuse the string).
+    redact_cache: dict[tuple[str | None, str], str] = {}
+
+    def redact(text: str, header: str | None) -> str:
+        out = redact_cache.get((header, text))
+        if out is None:
+            out = _apply_findings_to_text(text, header, analyzer, config, decisions, mapping_store)
+            redact_cache[(header, text)] = out
+        return out
+
     for ws in wb.worksheets:
         headers = _column_headers(ws)
         for row in ws.iter_rows():
@@ -201,20 +230,18 @@ def apply(path: Path, out_path: Path, decisions: dict, analyzer, config, mapping
                 header = headers.get(cell.column) if cell.row != 1 else None
                 text = _cell_scan_text(cell)
                 if text is not None:
-                    new_value = _apply_findings_to_text(text, header, analyzer, config, decisions, mapping_store)
+                    new_value = redact(text, header)
                     if new_value != text:
                         # A redacted numeric cell must become a string cell so
                         # the token ("[KONTO_1]") can be stored at all.
                         cell.value = new_value
                 if cell.comment is not None and cell.comment.text.strip():
-                    new_text = _apply_findings_to_text(
-                        cell.comment.text, header, analyzer, config, decisions, mapping_store
-                    )
+                    new_text = redact(cell.comment.text, header)
                     if new_text != cell.comment.text:
                         cell.comment.text = new_text
     for name, defn in wb.defined_names.items():
         if isinstance(defn.value, str) and defn.value.strip():
-            new_value = _apply_findings_to_text(defn.value, None, analyzer, config, decisions, mapping_store)
+            new_value = redact(defn.value, None)
             if new_value != defn.value:
                 defn.value = new_value
     wb.save(out_path)
