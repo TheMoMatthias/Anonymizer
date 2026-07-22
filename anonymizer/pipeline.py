@@ -177,11 +177,16 @@ def scan_document(path: Path, analyzer, config: dict) -> ScanResult:
             cfg = _narrow_language(config, units)
             cfg = _with_propagation(cfg, units, analyzer)
             findings = handler.scan(resolved, analyzer, cfg)
+            # Column descriptors (spreadsheets only) for column-level review policy;
+            # computed here while the resolved file still exists.
+            columns = handler.column_summary(resolved, findings) if hasattr(handler, "column_summary") else []
     except ProcessingError:
         raise
     except Exception as exc:  # noqa: BLE001 -- fail loud, never silently pass
         raise ProcessingError(f"Could not read '{path.name}': {exc}") from exc
-    return core.build_scan_result(findings, units, cfg)
+    result = core.build_scan_result(findings, units, cfg)
+    result.columns = columns
+    return result
 
 
 def verify_output(out_path: Path, decisions: dict, analyzer, config: dict) -> list[Finding]:

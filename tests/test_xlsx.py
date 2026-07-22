@@ -90,6 +90,60 @@ def test_xlsx_repeated_values_memoized_consistently(tmp_path, analyzer, base_con
     assert next(iter(tokens)).startswith("[PERSON_"), f"unexpected token: {tokens}"
 
 
+def test_column_summary_lists_headers_and_counts(analyzer, base_config, tmp_path):
+    """Column summary reports each column's header + how many findings landed in it,
+    so the reviewer can set a whole-column policy without opening the file."""
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.title = "Data"
+    ws.append(["Kunde", "Projekt", "Notiz"])
+    ws.append(["Hans Mueller", "Geheimprojekt Nordwind", "offen"])
+    ws.append(["Petra Weber", "Fusion", "zu"])
+    path = tmp_path / "cols.xlsx"
+    wb.save(path)
+
+    result = scan_document(path, analyzer, {**base_config, "languages": ["de"]})
+    cols = {c.key: c for c in result.columns}
+    assert cols["Data!A"].header == "Kunde" and cols["Data!A"].pii_count >= 2  # two names
+    assert cols["Data!B"].header == "Projekt"
+    assert cols["Data!C"].header == "Notiz"
+
+
+def test_column_blackout_redacts_undetected_cells_and_verifies(analyzer, base_config, tmp_path, mapping_db_path):
+    """A whole-column blackout redacts EVERY non-empty cell -- including a topic-
+    sensitive cell entity detection can't judge -- tokenizes repeats consistently,
+    leaves empty cells alone, and still passes the fail-loud verify."""
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.title = "Data"
+    ws.append(["Kunde", "Projekt"])
+    ws.append(["Hans Mueller", "Streng geheimes Vorhaben Nordwind"])
+    ws.append(["Petra Weber", "Marktstrategie 2027"])
+    ws.append(["Klaus Bauer", "Streng geheimes Vorhaben Nordwind"])  # repeat -> same token
+    ws.append(["Anna Klein", ""])  # empty -> stays empty
+    path = tmp_path / "blackout.xlsx"
+    wb.save(path)
+
+    cfg = {**base_config, "languages": ["de"]}
+    grouped = scan_document(path, analyzer, cfg).all_actionable()
+    for g in grouped:
+        g.action = "pseudonymize"
+    apply_cfg = {**cfg, "column_policies": {"Data!B": "pseudonymize"}}
+    out_path, _ = apply_document(path, grouped, analyzer, apply_cfg, mapping_db_path)  # raises if verify fails
+
+    out = openpyxl.load_workbook(out_path)["Data"]
+    assert out["B2"].value.startswith("[PROJEKT_"), f"undetected cell not blacked out: {out['B2'].value!r}"
+    assert out["B2"].value == out["B4"].value, "repeated column value not consistently tokenized"
+    assert out["B5"].value in (None, ""), "empty cell must stay empty"
+    assert out["A2"].value != "Hans Mueller", "name column must still be redacted via the value path"
+
+
+def test_column_entity_type_readable_and_safe():
+    assert xlsx_handler._column_entity_type("Projekt", "B") == "PROJEKT"
+    assert xlsx_handler._column_entity_type("Kunden-Nr.", "A") == "KUNDEN_NR"
+    assert xlsx_handler._column_entity_type("", "D") == "COLUMN_D"  # no header -> column letter
+
+
 def test_name_header_re_widened_and_configurable():
     """The built-in people-header set now covers common German business headers,
     is extendable via config, and does not match non-people headers."""

@@ -102,6 +102,23 @@ class FileJob:
 
 
 @dataclass
+class ColumnInfo:
+    """One spreadsheet column, surfaced to the reviewer so a whole-column policy
+    can be set at scale (redact/pseudonymize every cell) without deciding per
+    value. `key` is the stable identity a policy is keyed on ("Sheet!A")."""
+
+    sheet: str
+    column: str  # column letter, e.g. "A"
+    header: str  # row-1 header text, or "" if none
+    sample: str  # a representative non-empty value from the column
+    pii_count: int  # findings the scan located in this column
+
+    @property
+    def key(self) -> str:
+        return f"{self.sheet}!{self.column}"
+
+
+@dataclass
 class ScanResult:
     # Actionable findings grouped by data class, most-sensitive first.
     groups: list[DataClassGroup] = field(default_factory=list)
@@ -109,6 +126,8 @@ class ScanResult:
     possible_misses: list[GroupedFinding] = field(default_factory=list)
     # Coverage/telemetry for the reviewer (units scanned, counts per tier, ...).
     stats: dict = field(default_factory=dict)
+    # Spreadsheet columns (empty for non-tabular formats), for column-level policy.
+    columns: list["ColumnInfo"] = field(default_factory=list)
 
     def all_actionable(self) -> list[GroupedFinding]:
         return [g for grp in self.groups for g in grp.items]

@@ -6,10 +6,11 @@ from dataclasses import replace
 from pathlib import Path
 
 import openpyxl
+from openpyxl.utils import column_index_from_string, get_column_letter
 
-from ..actions import decisions_lookup, resolve_replacement
+from ..actions import decisions_lookup, resolve_replacement, token_label
 from ..core import _resolve_overlaps, detect_unit
-from ..models import Finding, TextUnit
+from ..models import ColumnInfo, Finding, TextUnit
 
 EXTENSIONS = (".xlsx", ".xlsm", ".xls")
 
@@ -117,6 +118,75 @@ def extract_text_units(path: Path) -> list[TextUnit]:
     return units
 
 
+# --- column-level policy (redact/pseudonymize a whole column) -----------------
+# A column policy blacks out EVERY non-empty cell in a column regardless of what
+# detection found -- the only way to redact a column whose sensitivity is topical
+# (a confidential project description) rather than an identifiable entity. Actions
+# supported at the column level: "pseudonymize" (consistent per-column token) and
+# "anonymize" (one-way). "skip" is intentionally NOT here: the value-keyed decision
+# model can't express "keep this value here but remove it elsewhere", so a skipped
+# column that shares a value with a removed one would trip the fail-loud verify.
+_COLUMN_BLACKOUT_ACTIONS = ("pseudonymize", "anonymize")
+
+
+def _column_entity_type(header: str, col_letter: str) -> str:
+    """Per-column entity type for pseudonym tokens, derived from the header so a
+    pseudonymized 'Projekt' column renders readable, re-identifiable [PROJEKT_n]
+    tokens. Falls back to the column letter when there is no header."""
+    base = re.sub(r"[^0-9A-Za-zÄÖÜäöüß]+", "_", (header or "").strip()).strip("_").upper()
+    return base or f"COLUMN_{col_letter}"
+
+
+def _coord_column(coord: str) -> str | None:
+    m = re.match(r"([A-Z]+)", coord)
+    return m.group(1) if m else None
+
+
+def column_summary(path: Path, findings: list) -> list[ColumnInfo]:
+    """Describe each spreadsheet column (sheet, letter, header, a sample value,
+    and how many findings landed in it) so the reviewer can set a whole-column
+    policy. Only columns that carry a header OR at least one finding are listed --
+    empty structural columns are noise."""
+    counts: dict[tuple[str, str], int] = {}
+    for f in findings:
+        parts = f.unit_id.split("|")
+        if len(parts) == 3 and parts[0] in ("cell", "comment"):
+            col = _coord_column(parts[2])
+            if col:
+                counts[(parts[1], col)] = counts.get((parts[1], col), 0) + 1
+
+    wb = openpyxl.load_workbook(path, data_only=False, read_only=True)
+    out: list[ColumnInfo] = []
+    try:
+        for ws in wb.worksheets:
+            headers: dict[str, str] = {}
+            for cell in next(ws.iter_rows(min_row=1, max_row=1), []):
+                if isinstance(cell.value, str) and cell.value.strip():
+                    headers[get_column_letter(cell.column)] = cell.value.strip()
+            wanted = set(headers) | {col for (sheet, col) in counts if sheet == ws.title}
+            samples: dict[str, str] = {}
+            for i, row in enumerate(ws.iter_rows(min_row=2)):
+                if i >= 200 or len(samples) >= len(wanted):  # sample from the first rows only
+                    break
+                for cell in row:
+                    col = get_column_letter(cell.column)
+                    if col in wanted and col not in samples and cell.value not in (None, ""):
+                        samples[col] = str(cell.value)
+            for col in sorted(wanted, key=column_index_from_string):
+                out.append(
+                    ColumnInfo(
+                        sheet=ws.title,
+                        column=col,
+                        header=headers.get(col, ""),
+                        sample=samples.get(col, ""),
+                        pii_count=counts.get((ws.title, col), 0),
+                    )
+                )
+    finally:
+        wb.close()
+    return out
+
+
 def _analyze_cell_text(text: str, header: str | None, analyzer, config, unit_id: str = "tmp") -> list:
     prefix = f"{header}: " if header else ""
     combined = prefix + text
@@ -210,6 +280,18 @@ def apply(path: Path, out_path: Path, decisions: dict, analyzer, config, mapping
     # keep_vba=False (the default) strips any macro project from the output,
     # which is intentional: anonymized copies are never macro-enabled.
     wb = openpyxl.load_workbook(path, data_only=False, keep_vba=False)
+    # Whole-column blackout policies: {"Sheet!A": "pseudonymize"|"anonymize"}.
+    column_policies = config.get("column_policies", {}) or {}
+    blackout_cache: dict[tuple[str, str], str] = {}  # (col_key, value) -> token
+
+    def blackout(col_key: str, header: str, col_letter: str, value: str, action: str) -> str:
+        cached = blackout_cache.get((col_key, value))
+        if cached is None:
+            entity = _column_entity_type(header, col_letter)
+            cached = resolve_replacement(entity, value, action, mapping_store) or value
+            blackout_cache[(col_key, value)] = cached
+        return cached
+
     # Memoize the redacted output by (header, text) for this apply -- a repeated
     # cell redacts to the same string. Safe: the pseudonym mapping is value-keyed,
     # so the same value already maps to the same token whether recomputed or cached
@@ -227,7 +309,22 @@ def apply(path: Path, out_path: Path, decisions: dict, analyzer, config, mapping
         headers = _column_headers(ws)
         for row in ws.iter_rows():
             for cell in row:
+                col_letter = get_column_letter(cell.column)
+                policy = column_policies.get(f"{ws.title}!{col_letter}")
                 header = headers.get(cell.column) if cell.row != 1 else None
+                # A column blackout wins over any per-value decision: EVERY non-empty
+                # cell (header row excluded) is replaced, including cells detection
+                # never flagged. Formula cells are left (consistent with detection).
+                if (
+                    policy in _COLUMN_BLACKOUT_ACTIONS
+                    and cell.row != 1
+                    and cell.data_type in ("s", "n")
+                    and cell.value not in (None, "")
+                ):
+                    cell.value = blackout(
+                        f"{ws.title}!{col_letter}", headers.get(cell.column, ""), col_letter, str(cell.value), policy
+                    )
+                    continue
                 text = _cell_scan_text(cell)
                 if text is not None:
                     new_value = redact(text, header)

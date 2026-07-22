@@ -444,7 +444,13 @@ def _render_work(container, state: PageState) -> None:
         def on_change() -> None:
             pass  # decisions mutate in place; preview reads them live
 
-        review.render_review(review_box, job.scan, on_change)
+        # Column policies live on the job's config so they flow into apply_document
+        # (via the same config the file was scanned with) and are mutated in place
+        # by the Columns panel, exactly like per-value decisions.
+        if job.config is None:
+            job.config = {}
+        column_policies = job.config.setdefault("column_policies", {})
+        review.render_review(review_box, job.scan, on_change, column_policies)
 
         with ui.row().classes("w-full justify-end gap-2 mt-1"):
             ui.button("Preview changes", icon="visibility", on_click=lambda: _preview_dialog(job)).props("flat")

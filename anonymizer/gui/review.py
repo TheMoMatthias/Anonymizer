@@ -25,6 +25,14 @@ ACTIONS = ["pseudonymize", "anonymize", "skip"]
 _ACTION_LABELS = {"pseudonymize": "Pseudonym", "anonymize": "Anonymize", "skip": "Skip"}
 _ACTION_QCOLOR = {"pseudonymize": "primary", "anonymize": "negative", "skip": "grey-7"}
 
+# Whole-column policy (spreadsheets): "none" leaves the column to per-value review;
+# the others black out EVERY non-empty cell in the column (see xlsx_handler).
+_COLUMN_LABELS = {"none": "Keep", "pseudonymize": "Pseudonym", "anonymize": "Anonymize"}
+_COLUMN_QCOLOR = {"none": "grey-7", "pseudonymize": "primary", "anonymize": "negative"}
+
+# Trust tiers, most-confident first, for the by-confidence bulk bands.
+_TIER_BANDS = [("high", "High confidence"), ("medium", "Medium"), ("low", "Low")]
+
 
 def _action_toggle(initial: str):
     tog = ui.toggle(_ACTION_LABELS, value=initial).props("dense unelevated no-caps")
@@ -126,7 +134,7 @@ def _dominant_action(items: list[GroupedFinding]) -> str:
     return max(counts, key=counts.get) if counts else "pseudonymize"
 
 
-def render_review(container, result: ScanResult, on_change: Callable) -> None:
+def render_review(container, result: ScanResult, on_change: Callable, column_policies: dict | None = None) -> None:
     container.clear()
     with container:
         if not result.all_actionable() and not result.possible_misses:
@@ -135,13 +143,21 @@ def render_review(container, result: ScanResult, on_change: Callable) -> None:
 
         _stat_bar(result)
 
+        # Whole-column policies (spreadsheets) -- the fastest lever at scale: one
+        # decision per column instead of thousands per value.
+        if result.columns and column_policies is not None:
+            _columns_panel(result, column_policies, container, on_change)
+
         # Global bulk actions.
         with ui.row().classes("items-center gap-2 w-full"):
             ui.label("Apply to everything:").classes("az-muted text-xs")
             for action in ACTIONS:
-                ui.button(action, on_click=lambda a=action: _set_all(result, a, container, on_change)).props(
-                    "flat dense"
-                ).classes("text-xs")
+                ui.button(
+                    action, on_click=lambda a=action: _set_all(result, a, container, on_change, column_policies)
+                ).props("flat dense").classes("text-xs")
+
+        # By-confidence bulk bands: accept high, review medium, glance-and-decide low.
+        _tier_bands(result, container, on_change, column_policies)
 
         with ui.column().classes("w-full gap-3 az-scroll pr-1"):
             for dcg in result.groups:
@@ -151,10 +167,92 @@ def render_review(container, result: ScanResult, on_change: Callable) -> None:
                 _possible_misses_card(result.possible_misses)
 
 
-def _set_all(result: ScanResult, action: str, container, on_change: Callable) -> None:
+def _columns_panel(result: ScanResult, column_policies: dict, container, on_change: Callable) -> None:
+    """One row per spreadsheet column with a whole-column policy toggle. A blackout
+    policy redacts EVERY non-empty cell in the column -- the only way to cover a
+    column that is sensitive by topic (a project description) rather than by a
+    detectable entity, and the fastest way to decide a high-cardinality column
+    (5000 unique customer numbers -> one decision)."""
+    from itertools import groupby
+
+    with ui.element("div").classes("az-card w-full"):
+        with ui.row().classes("items-center gap-2"):
+            ui.icon("view_column", size="1.2rem").classes("az-muted")
+            ui.label("Columns").classes("az-h2")
+        ui.label(
+            "Redact or pseudonymize an ENTIRE column — every non-empty cell, even ones with no detected "
+            "PII. Use for sensitive project/description columns, or to decide a whole ID column at once. "
+            "Pseudonymize keeps a consistent token per value so lookups still work."
+        ).classes("az-muted text-xs mb-2")
+        for sheet, cols in groupby(result.columns, key=lambda c: c.sheet):
+            ui.label(sheet).classes("az-kicker mt-1")
+            for c in cols:
+                with ui.row().classes("az-row items-center gap-3 w-full py-1 px-1"):
+                    with ui.column().classes("gap-0 flex-grow min-w-0"):
+                        title = f"{c.column} · {c.header}" if c.header else c.column
+                        ui.label(title).classes("text-sm truncate").tooltip(c.sample or title)
+                        if c.sample:
+                            ui.label(f"e.g. {c.sample[:48]}").classes("az-muted text-xs truncate").tooltip(c.sample)
+                    if c.pii_count:
+                        theme.chip(f"{c.pii_count} PII", theme.WARNING)
+                    tog = ui.toggle(_COLUMN_LABELS, value=column_policies.get(c.key, "none")).props(
+                        "dense unelevated no-caps"
+                    )
+
+                    def paint(t=tog) -> None:
+                        t.props(f"toggle-color={_COLUMN_QCOLOR.get(t.value, 'grey-7')}")
+
+                    paint()
+
+                    def changed(_e=None, key=c.key, t=tog, p=paint) -> None:
+                        if t.value == "none":
+                            column_policies.pop(key, None)
+                        else:
+                            column_policies[key] = t.value
+                        p()
+                        on_change()
+
+                    tog.on_value_change(changed)
+
+
+def _tier_bands(result: ScanResult, container, on_change: Callable, column_policies: dict | None) -> None:
+    """Bulk-set every finding of a confidence tier at once. Low is offered but NEVER
+    auto-applied -- a failed-checksum ID is demoted to low yet still identifying, so
+    the reviewer must glance before skipping it."""
+    items = result.all_actionable()
+    by_tier = {tier: [g for g in items if g.tier == tier] for tier, _ in _TIER_BANDS}
+    if not any(by_tier.values()):
+        return
+    with ui.row().classes("items-center gap-4 w-full flex-wrap"):
+        ui.label("By confidence:").classes("az-muted text-xs")
+        for tier, label in _TIER_BANDS:
+            gs = by_tier[tier]
+            if not gs:
+                continue
+            with ui.row().classes("items-center gap-1"):
+                ui.label(f"{label} ({len(gs)})").classes("az-muted text-xs")
+                tog = ui.toggle(_ACTION_LABELS, value=_dominant_action(gs)).props("dense unelevated no-caps")
+
+                def apply(_e=None, tier=tier, t=tog) -> None:
+                    _set_all_tier(result, tier, t.value, container, on_change, column_policies)
+
+                tog.on_value_change(apply)
+
+
+def _set_all(result: ScanResult, action: str, container, on_change: Callable, column_policies: dict | None = None) -> None:
     for g in result.all_actionable():
         g.action = action
-    render_review(container, result, on_change)
+    render_review(container, result, on_change, column_policies)
+    on_change()
+
+
+def _set_all_tier(
+    result: ScanResult, tier: str, action: str, container, on_change: Callable, column_policies: dict | None
+) -> None:
+    for g in result.all_actionable():
+        if g.tier == tier:
+            g.action = action
+    render_review(container, result, on_change, column_policies)
     on_change()
 
 
