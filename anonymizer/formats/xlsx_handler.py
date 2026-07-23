@@ -10,7 +10,8 @@ from openpyxl.utils import column_index_from_string, get_column_letter
 
 from ..actions import decisions_lookup, resolve_replacement, token_label
 from ..core import _resolve_overlaps, detect_unit
-from ..models import ColumnInfo, Finding, TextUnit
+from ..models import ColumnInfo, Finding, ProcessingError, TextUnit
+from .run_replace import apply_aux_parts, aux_text_units
 
 EXTENSIONS = (".xlsx", ".xlsm", ".xls")
 
@@ -88,6 +89,26 @@ def _cell_scan_text(cell) -> str | None:
     return None
 
 
+# A formula's double-quoted STRING LITERALS. `=("Kunde "&"Mueller")` and
+# `=CONCATENATE("Hans Mueller";A2)` put real PII in a cell whose stored value is a
+# formula, which _cell_scan_text deliberately skips -- so it was never scanned,
+# never removed, and (being undecided) never re-checked by the verify either.
+# Only the literals are scanned and spliced: a token anywhere else in the
+# expression would corrupt the formula, and the structure (function names, cell
+# refs, operators) is not PII. `""` is Excel's escaped quote and stays inside the
+# literal.
+_FORMULA_LITERAL_RE = re.compile(r'"((?:[^"]|"")*)"')
+
+
+def _formula_literals(formula: str) -> list[tuple[int, int, str]]:
+    """(start, end, text) of each string literal in a formula, offsets into `formula`."""
+    return [(m.start(1), m.end(1), m.group(1)) for m in _FORMULA_LITERAL_RE.finditer(formula)]
+
+
+def _cell_formula(cell) -> str | None:
+    return cell.value if cell.data_type == "f" and isinstance(cell.value, str) else None
+
+
 def _iter_cell_units(wb):
     """Yields (id, text, header) -- header is the column-1-row text for that
     column, given as context so recognizers relying on nearby German context
@@ -101,6 +122,11 @@ def _iter_cell_units(wb):
                 text = _cell_scan_text(cell)
                 if text is not None:
                     yield f"cell|{ws.title}|{cell.coordinate}", text, header
+                formula = _cell_formula(cell)
+                if formula is not None:
+                    for k, (_s, _e, literal) in enumerate(_formula_literals(formula)):
+                        if literal.strip():
+                            yield f"formula|{ws.title}|{cell.coordinate}|{k}", literal, header
                 if cell.comment is not None and cell.comment.text.strip():
                     yield f"comment|{ws.title}|{cell.coordinate}", cell.comment.text, header
 
@@ -111,10 +137,25 @@ def _iter_defined_name_units(wb):
             yield f"defined_name|{name}", defn.value
 
 
+def _iter_sheet_name_units(wb):
+    """The worksheet TITLES. Their authoritative copy is xl/workbook.xml
+    <sheet name="...">, which no cell walk reaches -- and for this deployment a
+    workbook with ONE SHEET PER CLIENT is a completely normal shape, so a sheet
+    name is a first-class leak, not decoration. (docProps/app.xml TitlesOfParts is
+    only a CACHE of these; blanking it removed the evidence, not the leak.)"""
+    for ws in wb.worksheets:
+        if ws.title.strip():
+            yield f"sheetname|{ws.title}", ws.title
+
+
 def extract_text_units(path: Path) -> list[TextUnit]:
     wb = openpyxl.load_workbook(path, data_only=False)
     units = [TextUnit(id=key, text=text) for key, text, _header in _iter_cell_units(wb)]
     units.extend(TextUnit(id=key, text=text) for key, text in _iter_defined_name_units(wb))
+    units.extend(TextUnit(id=key, text=text) for key, text in _iter_sheet_name_units(wb))
+    # Surfaces openpyxl's cell model never exposes: external hyperlink TARGETS
+    # (the URL behind a cell link) and chart part text (see run_replace).
+    units.extend(aux_text_units(path))
     return units
 
 
@@ -129,11 +170,22 @@ def extract_text_units(path: Path) -> list[TextUnit]:
 _COLUMN_BLACKOUT_ACTIONS = ("pseudonymize", "anonymize")
 
 
+# German umlauts MUST be transliterated, not preserved: actions.TOKEN_RE is
+# `[A-Z0-9_]` and can never match one, so a pseudonymized 'Prüfung' column wrote
+# [PRÜFUNG_1] tokens that reidentify_text could NEVER reverse -- permanently
+# unreversible, and silently so. The German transliteration keeps the label
+# readable (PRUEFUNG, not PRFUNG) while staying inside the token alphabet.
+_UMLAUT_TRANSLITERATION = str.maketrans(
+    {"Ä": "AE", "Ö": "OE", "Ü": "UE", "ä": "AE", "ö": "OE", "ü": "UE", "ß": "SS", "ẞ": "SS"}
+)
+
+
 def _column_entity_type(header: str, col_letter: str) -> str:
     """Per-column entity type for pseudonym tokens, derived from the header so a
     pseudonymized 'Projekt' column renders readable, re-identifiable [PROJEKT_n]
     tokens. Falls back to the column letter when there is no header."""
-    base = re.sub(r"[^0-9A-Za-zÄÖÜäöüß]+", "_", (header or "").strip()).strip("_").upper()
+    ascii_header = (header or "").strip().translate(_UMLAUT_TRANSLITERATION)
+    base = re.sub(r"[^0-9A-Za-z]+", "_", ascii_header).strip("_").upper()
     return base or f"COLUMN_{col_letter}"
 
 
@@ -150,7 +202,7 @@ def column_summary(path: Path, findings: list) -> list[ColumnInfo]:
     counts: dict[tuple[str, str], int] = {}
     for f in findings:
         parts = f.unit_id.split("|")
-        if len(parts) == 3 and parts[0] in ("cell", "comment"):
+        if len(parts) >= 3 and parts[0] in ("cell", "comment", "formula"):
             col = _coord_column(parts[2])
             if col:
                 counts[(parts[1], col)] = counts.get((parts[1], col), 0) + 1
@@ -259,6 +311,13 @@ def scan(path: Path, analyzer, config) -> list:
         findings.extend(detect(text, header, key))
     for key, text in _iter_defined_name_units(wb):
         findings.extend(detect(text, None, key))
+    for key, text in _iter_sheet_name_units(wb):
+        findings.extend(detect(text, None, key))
+    # scan() builds its own unit stream rather than reusing extract_text_units, so
+    # the auxiliary surfaces must be added here too or they would be reported to
+    # the reviewer but never actually scanned.
+    for unit in aux_text_units(path):
+        findings.extend(detect_unit(analyzer, unit, config))
     return findings
 
 
@@ -274,6 +333,139 @@ def _apply_findings_to_text(text: str, header: str | None, analyzer, config, dec
             continue
         result = result[: f.start] + replacement + result[f.end :]
     return result
+
+
+# --- sheet-name redaction -----------------------------------------------------
+#
+# Excel forbids [ ] : * ? / \ in a worksheet title and caps it at 31 characters,
+# so a redacted title CANNOT carry a "[PERSON_1]" token -- there is no legal way to
+# write one. A title that holds values the reviewer removed is therefore replaced
+# wholesale by a neutral, unique placeholder. Deliberate trade-off: the TITLE is
+# one-way even when the value in it was pseudonymized. Nothing becomes
+# unrecoverable that was not already: the same person's name still appears as its
+# pseudonym everywhere it occurs in cells, and the alternative -- leaving the tab
+# reading "Kunde Hans Mueller" -- is the leak this exists to close.
+_SHEET_TITLE_PLACEHOLDERS = ("Sheet", "Blatt", "Tabelle", "Anonym")
+_MAX_SHEET_TITLE = 31
+
+
+def _checked_removed_values(decisions: dict, config) -> set[str]:
+    """The lower-cased values whose literal survival anywhere in the output is a
+    leak, using the same rule as pipeline._literal_residual: everything the reviewer
+    removed, minus values under 4 characters (too short to identify anyone and a
+    magnet for substring false positives), plus every deny-list term regardless of
+    length. Used to prove a REPLACEMENT title is itself clean."""
+    removed = {
+        value
+        for (_entity, value), action in decisions.items()
+        if action in _COLUMN_BLACKOUT_ACTIONS and len(value) >= 4
+    }
+    removed.update(t.strip().lower() for t in (config.get("deny_list") or []) if t.strip())
+    return removed
+
+
+def _sheet_renames(wb, redact, removed: set[str]) -> dict[str, str]:
+    """{old title: new title} for every sheet whose NAME carries a removed value.
+
+    The trigger is the ordinary redaction: if redacting the title changes it, the
+    title holds something the reviewer removed. It has to be exactly that test and
+    not a length-filtered one, because pipeline.verify_output re-scans the output
+    with the recognizers and would re-detect a short value just the same.
+
+    The replacement is a neutral placeholder PROVEN clean two ways -- no decided
+    value redacts out of it, and no checked removed value is a substring of it. A
+    workbook whose sheet is literally called "Sheet" would otherwise be renamed to
+    "Sheet_1" and still contain the removed value, so such candidates are rejected
+    and the next stem is tried. If none is safe we fail loud rather than ship it."""
+    taken = set(wb.sheetnames)
+    renames: dict[str, str] = {}
+    for ws in wb.worksheets:
+        title = ws.title
+        if not title.strip() or redact(title, None) == title:
+            continue
+        candidate = None
+        for stem in _SHEET_TITLE_PLACEHOLDERS:
+            for n in range(1, len(wb.worksheets) + 50):
+                trial = f"{stem}_{n}"
+                if trial in taken or len(trial) > _MAX_SHEET_TITLE:
+                    continue
+                trial_low = trial.lower()
+                if any(v in trial_low for v in removed) or redact(trial, None) != trial:
+                    continue
+                candidate = trial
+                break
+            if candidate:
+                break
+        if candidate is None:
+            raise ProcessingError(
+                f"Could not build a safe replacement name for sheet '{title}' -- every "
+                "candidate still contained a value that had to be removed. No file was written."
+            )
+        taken.add(candidate)
+        renames[title] = candidate
+    return renames
+
+
+def _rewrite_sheet_refs(expr: str, renames: dict[str, str]) -> str:
+    """Repoints every sheet reference in a formula / defined-name expression at the
+    renamed sheet. Both spellings Excel uses are handled: the quoted `'Kunde X'!A1`
+    (internal apostrophes doubled) and the bare `Umsatz!A1`. The replacement is
+    always emitted quoted, which is valid for any title."""
+    for old, new in renames.items():
+        quoted_old = "'" + old.replace("'", "''") + "'"
+        expr = expr.replace(f"{quoted_old}!", f"'{new}'!")
+        # Bare form only when nothing sheet-name-ish precedes it, so "BLA!A1" is
+        # never mangled by a sheet called "A".
+        expr = re.sub(rf"(?<![\w.']){re.escape(old)}!", f"'{new}'!", expr)
+    return expr
+
+
+def _apply_sheet_renames(wb, renames: dict[str, str]) -> None:
+    if not renames:
+        return
+    for ws in wb.worksheets:
+        new = renames.get(ws.title)
+        if new is not None:
+            ws.title = new
+    for ws in wb.worksheets:
+        for row in ws.iter_rows():
+            for cell in row:
+                formula = _cell_formula(cell)
+                if formula is not None:
+                    rewritten = _rewrite_sheet_refs(formula, renames)
+                    if rewritten != formula:
+                        cell.value = rewritten
+    for _name, defn in wb.defined_names.items():
+        if isinstance(defn.value, str):
+            rewritten = _rewrite_sheet_refs(defn.value, renames)
+            if rewritten != defn.value:
+                defn.value = rewritten
+
+
+def _assert_no_stale_sheet_refs(wb, renames: dict[str, str]) -> None:
+    """Fail loud if a renamed sheet's OLD title still appears in any formula or
+    defined name. Two things go wrong at once if it does: the reference is now
+    dangling (a #REF! in the colleague's copy), and the old title IS the PII we
+    just removed -- so shipping the file would be the leak. Reference spellings
+    this rewriter does not know (3D refs across a sheet RANGE) land here."""
+    if not renames:
+        return
+    for ws in wb.worksheets:
+        for row in ws.iter_rows():
+            for cell in row:
+                formula = _cell_formula(cell)
+                if formula and any(old in formula for old in renames):
+                    raise ProcessingError(
+                        f"Sheet '{ws.title}' cell {cell.coordinate} still references a sheet name "
+                        "that had to be redacted, in a form this tool cannot rewrite safely. "
+                        "No file was written."
+                    )
+    for name, defn in wb.defined_names.items():
+        if isinstance(defn.value, str) and any(old in defn.value for old in renames):
+            raise ProcessingError(
+                f"Defined name '{name}' still references a sheet name that had to be redacted, "
+                "in a form this tool cannot rewrite safely. No file was written."
+            )
 
 
 def apply(path: Path, out_path: Path, decisions: dict, analyzer, config, mapping_store) -> None:
@@ -305,16 +497,40 @@ def apply(path: Path, out_path: Path, decisions: dict, analyzer, config, mapping
             redact_cache[(header, text)] = out
         return out
 
+    def redact_formula(formula: str, header: str | None) -> str:
+        """Redacts only the quoted string literals, right-to-left so earlier
+        offsets stay valid -- the expression around them is left byte-identical."""
+        result = formula
+        for start, end, literal in reversed(_formula_literals(formula)):
+            if not literal.strip():
+                continue
+            new_literal = redact(literal, header)
+            if new_literal != literal:
+                result = result[:start] + new_literal + result[end:]
+        return result
+
+    # Sheet TITLES are redacted before anything else, so the reference rewrite runs
+    # while formulas still hold the original names -- and every later pass then
+    # sees the already-safe title.
+    renames = _sheet_renames(wb, redact, _checked_removed_values(decisions, config))
+    _apply_sheet_renames(wb, renames)
+    # Column policies were keyed by the reviewer against the ORIGINAL sheet titles,
+    # so a renamed sheet must still find its policy.
+    original_title = {new: old for old, new in renames.items()}
+
     for ws in wb.worksheets:
+        sheet_key = original_title.get(ws.title, ws.title)
         headers = _column_headers(ws)
         for row in ws.iter_rows():
             for cell in row:
                 col_letter = get_column_letter(cell.column)
-                policy = column_policies.get(f"{ws.title}!{col_letter}")
+                policy = column_policies.get(f"{sheet_key}!{col_letter}")
                 header = headers.get(cell.column) if cell.row != 1 else None
                 # A column blackout wins over any per-value decision: EVERY non-empty
                 # cell (header row excluded) is replaced, including cells detection
-                # never flagged. Formula cells are left (consistent with detection).
+                # never flagged. Formula cells are left to the value path below,
+                # which redacts the PII inside their string literals without
+                # destroying the expression.
                 if (
                     policy in _COLUMN_BLACKOUT_ACTIONS
                     and cell.row != 1
@@ -322,7 +538,7 @@ def apply(path: Path, out_path: Path, decisions: dict, analyzer, config, mapping
                     and cell.value not in (None, "")
                 ):
                     cell.value = blackout(
-                        f"{ws.title}!{col_letter}", headers.get(cell.column, ""), col_letter, str(cell.value), policy
+                        f"{sheet_key}!{col_letter}", headers.get(cell.column, ""), col_letter, str(cell.value), policy
                     )
                     continue
                 text = _cell_scan_text(cell)
@@ -332,6 +548,11 @@ def apply(path: Path, out_path: Path, decisions: dict, analyzer, config, mapping
                         # A redacted numeric cell must become a string cell so
                         # the token ("[KONTO_1]") can be stored at all.
                         cell.value = new_value
+                formula = _cell_formula(cell)
+                if formula is not None:
+                    new_formula = redact_formula(formula, header)
+                    if new_formula != formula:
+                        cell.value = new_formula
                 if cell.comment is not None and cell.comment.text.strip():
                     new_text = redact(cell.comment.text, header)
                     if new_text != cell.comment.text:
@@ -341,4 +562,8 @@ def apply(path: Path, out_path: Path, decisions: dict, analyzer, config, mapping
             new_value = redact(defn.value, None)
             if new_value != defn.value:
                 defn.value = new_value
+    # Checked LAST, once the string literals inside formulas have been redacted, so
+    # a leftover really is an unrewritten reference rather than redacted prose.
+    _assert_no_stale_sheet_refs(wb, renames)
     wb.save(out_path)
+    apply_aux_parts(out_path, analyzer, config, decisions, mapping_store)

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import bisect
+import io
 import os
 import re
 import tempfile
@@ -106,6 +108,10 @@ _MIN_PROPAGATE_LEN = 4
 # `Herrn?` covers the dative "Herrn" address-block form; kept in sync with
 # core._HONORIFIC_PREFIX and engine._HONORIFICS.
 _HONORIFIC_PREFIX = re.compile(r"^(?:Herrn?|Frau|Hr\.|Fr\.|Dr\.|Prof\.)\s+")
+# Every line-break form a document can leave INSIDE one detected span: CR/LF, the
+# vertical tab OOXML uses for a soft break, a form feed, and the Unicode
+# line/paragraph separators. A propagation seed must never straddle one of these.
+_LINE_SPLIT = re.compile(r"[\r\n\v\f  ]+")
 
 
 def _with_propagation(config: dict, units: list, analyzer) -> dict:
@@ -131,15 +137,26 @@ def _with_propagation(config: dict, units: list, analyzer) -> dict:
         for f in core.detect_unit(analyzer, unit, config):
             if f.entity_type not in _PROPAGATABLE:
                 continue
-            value = _HONORIFIC_PREFIX.sub("", f.value).strip()
-            if len(value) >= _MIN_PROPAGATE_LEN:
-                values.add((f.entity_type, value))
-            # Also seed the surname alone: NER reliably catches "Björn Müller"
-            # in prose but misses a bare "Müller" in a cell -- and the bare form
-            # is precisely the measured gap.
-            parts = [p for p in value.split() if len(p) >= _MIN_PROPAGATE_LEN]
-            if len(parts) > 1:
-                values.add((f.entity_type, parts[-1]))
+            # A detected span can run ACROSS a line break -- a multi-line cell, a
+            # wrapped paragraph, or a German address block ("Herrn\nHans Mueller\n
+            # Hauptstrasse 5"). Seeding that verbatim is doubly wrong: the literal
+            # pattern (pass 2 escapes it) matches nowhere else, and the "last
+            # whitespace token" surname seed becomes the street name, so the real
+            # surname is never propagated and a bare "Mueller" in another cell LEAKS.
+            # Seed each LINE independently instead.
+            for line in _LINE_SPLIT.split(f.value):
+                value = _HONORIFIC_PREFIX.sub("", line).strip()
+                if len(value) >= _MIN_PROPAGATE_LEN:
+                    values.add((f.entity_type, value))
+                # Also seed the surname alone: NER reliably catches "Björn Müller"
+                # in prose but misses a bare "Müller" in a cell -- and the bare form
+                # is precisely the measured gap. Two people sharing a surname both
+                # seed it, so their bare-surname mentions collapse into ONE pseudonym
+                # (documented trade-off: merging two subjects is wrong, but dropping
+                # the seed LEAKS a real surname -- see test_hardening.py).
+                parts = [p for p in value.split() if len(p) >= _MIN_PROPAGATE_LEN]
+                if len(parts) > 1:
+                    values.add((f.entity_type, parts[-1]))
     if not values:
         return config
     return {**config, "propagate": sorted(values)}
@@ -191,7 +208,19 @@ def scan_document(path: Path, analyzer, config: dict) -> ScanResult:
 
 def verify_output(out_path: Path, decisions: dict, analyzer, config: dict) -> list[Finding]:
     """Re-scans a written output and returns any residual finding whose value
-    was supposed to be removed -- i.e. a leak. Empty list == verified clean."""
+    was supposed to be removed -- i.e. a leak. Empty list == verified clean.
+
+    This pass is HANDLER-DEPENDENT by construction (it re-reads the output with
+    the same handler that wrote it), so it is only half the gate: a location the
+    handler is blind to on the way IN is equally invisible on the way OUT, and a
+    value the scan never surfaced is not in `decisions` and so is not checked here
+    at all. `_literal_residual` is the other half -- recognizer- AND handler-
+    independent, reading the raw package (every XML part's text AND attribute
+    values, external relationship targets, embedded OOXML packages, PDF
+    metadata/annotations/link URIs). Both
+    must pass before an output is committed. The lesson from the surfaces closed
+    in run_replace.aux_text_units: whenever an extractor gains reach, this pass
+    gains it too -- never rely on this one alone."""
     handler = _handler_for(out_path)
     residual: list[Finding] = []
     for f in handler.scan(out_path, analyzer, config):
@@ -201,17 +230,56 @@ def verify_output(out_path: Path, decisions: dict, analyzer, config: dict) -> li
 
 
 _OOXML_EXTS = (".docx", ".xlsx", ".xlsm", ".pptx")
-_OOXML_META_PARTS = ("docProps/core.xml", "docProps/app.xml")
+_OOXML_META_PARTS = ("docProps/core.xml", "docProps/app.xml", "docProps/custom.xml")
 # Identifying metadata fields (OOXML local tag names) the body-text redaction
 # never touches -- author / last editor / manager / company routinely carry the
-# real advisor or author name.
-_META_CLEAR_TAGS = frozenset({"creator", "lastModifiedBy", "manager", "company", "lastPrinted"})
+# real advisor or author name, and dc:title is the classic home of a customer
+# name ("Kreditakte Hans Mueller"). Matched CASE-INSENSITIVELY: core.xml spells
+# them lowerCamel (cp:lastModifiedBy) but app.xml spells the same fields
+# TitleCase (<Company>, <Manager>), so a case-sensitive set silently missed
+# app.xml entirely.
+_META_CLEAR_TAGS = frozenset(
+    {
+        "creator",
+        "lastmodifiedby",
+        "manager",
+        "company",
+        "lastprinted",
+        # Descriptive fields -- never body text, so neither the redaction nor the
+        # recognizer re-scan ever looked at them.
+        "title",
+        "subject",
+        "description",
+        "keywords",
+        "category",
+        "contentstatus",
+    }
+)
+# app.xml caches every Word heading / Excel sheet name here, and this copy is not
+# reached by any redaction pass, so the ORIGINAL text survived in a "verified"
+# file. Blanking it is necessary but NEVER sufficient on its own: it is only a
+# cache, so for a Word heading the authoritative copy is the body (redacted there)
+# and for an Excel sheet name it is xl/workbook.xml <sheet name="...">. Clearing
+# the cache alone would remove the evidence and leave the leak, which is why sheet
+# names are surfaced and renamed by xlsx_handler (_iter_sheet_name_units /
+# _apply_sheet_renames) rather than trusted to this.
+_META_CLEAR_SUBTREES = frozenset({"titlesofparts"})
+
+
+def _local_name(el) -> str:
+    """The namespace-stripped tag, or "" for a comment/PI (whose .tag is not a
+    string -- etree.QName would raise on those)."""
+    tag = el.tag
+    return tag.rsplit("}", 1)[-1] if isinstance(tag, str) else ""
 
 
 def _scrub_metadata(out_path: Path) -> None:
     """Blanks identifying document metadata so a real name in docProps/PDF-info
     can't ride along in a file marked 'verified' (the body-text redaction and
-    the recognizer re-scan both read body text only)."""
+    the recognizer re-scan both read body text only). Covers the identity fields
+    (creator / lastModifiedBy / manager / company), the descriptive ones
+    (title / subject / description / keywords / category), app.xml's cached
+    heading + sheet-name list, and drops docProps/custom.xml outright."""
     suffix = out_path.suffix.lower()
     if suffix == ".pdf":
         import fitz
@@ -253,10 +321,25 @@ def _scrub_metadata(out_path: Path) -> None:
         except etree.XMLSyntaxError:
             continue
         part_changed = False
+        if part == "docProps/custom.xml":
+            # Custom properties are arbitrary user-defined fields (bank templates
+            # put the case owner / customer number there) with no fixed names to
+            # match, and they hold typed values (vt:i4, vt:filetime) that blanking
+            # would make invalid. Drop the properties entirely -- an anonymized copy
+            # keeps no custom metadata.
+            for prop in list(tree):
+                tree.remove(prop)
+                part_changed = True
         for el in tree.iter():
-            if etree.QName(el).localname in _META_CLEAR_TAGS and (el.text or ""):
+            local = _local_name(el).lower()
+            if local in _META_CLEAR_TAGS and (el.text or ""):
                 el.text = ""
                 part_changed = True
+            elif local in _META_CLEAR_SUBTREES:
+                for descendant in el.iter():
+                    if descendant.text:
+                        descendant.text = ""
+                        part_changed = True
         if part_changed:
             contents[part] = etree.tostring(tree, xml_declaration=True, encoding="UTF-8", standalone=True)
             changed = True
@@ -277,9 +360,40 @@ def _scrub_metadata(out_path: Path) -> None:
 _OOXML_VALUE_BOUNDARY = frozenset({"c", "si", "p", "tr"})
 
 
-def _ooxml_text_with_boundaries(tree) -> str:
+# A BARE NUMBER in an attribute is a size, index, count or id -- a column width
+# ("8.7109375"), a sheetId, a window dimension. Document values never live there:
+# a customer number typed into a cell is stored as element TEXT (<v>). Reading
+# them back would be pure noise with a measurable cost: a large workbook carries
+# thousands of such numbers, and a 6-digit removed customer number matching a
+# substring of one is a spurious HARD FAIL (no output at all) on roughly every
+# other big workbook.
+_MACHINE_NUMBER_RE = re.compile(r"^[+-]?\d+(?:[.,]\d+)?$")
+# Word REVISION-SAVE IDs (w:rsidR, w:rsidRPr, w:rsidTr, ...) are random 8-hex-digit
+# session markers Word stamps on nearly every paragraph. Never content, and a
+# fresh phantom-match surface on every save.
+_RSID_ATTR_PREFIX = "rsid"
+
+
+def _is_rsid_attr(name: str) -> bool:
+    return name.rsplit("}", 1)[-1].lower().startswith(_RSID_ATTR_PREFIX)
+
+
+def _ooxml_text_with_boundaries(tree, attributes: bool = True) -> str:
     """itertext(), but with a NUL sentinel wrapping every independent value
-    container so cross-container concatenation can't forge a literal match."""
+    container so cross-container concatenation can't forge a literal match.
+
+    Also emits every ATTRIBUTE VALUE (each NUL-wrapped, so one can never glue onto
+    its neighbour or onto element text). Reading text only left the backstop with a
+    blind spot wide enough to drive a leak through: a sheet NAME lives in
+    `xl/workbook.xml <sheet name="...">`, a cell hyperlink's tooltip in
+    `<hyperlink tooltip="...">`, a Word field code in `<w:fldSimple w:instr="...">`,
+    drawing alt-text in `<docPr descr="...">`, a tracked-change author in
+    `<w:ins w:author="...">`. Each of those survived a "verified" write. An
+    allow-list of interesting attribute names would just be the same blind spot
+    with a shorter name, so ALL of them are read -- a spurious hard fail costs a
+    re-run, a missed one ships the customer's name. lxml keeps namespace
+    DECLARATIONS out of `.attrib`, so the machine-only xmlns URIs are excluded for
+    free; the two remaining pure-plumbing parts are handled by the caller."""
     out: list[str] = []
 
     def walk(el) -> None:
@@ -288,6 +402,10 @@ def _ooxml_text_with_boundaries(tree) -> str:
         boundary = local in _OOXML_VALUE_BOUNDARY
         if boundary:
             out.append("\x00")
+        if attributes and isinstance(tag, str):
+            for name, value in el.attrib.items():
+                if value and not _MACHINE_NUMBER_RE.match(value) and not _is_rsid_attr(name):
+                    out.append(f"\x00{value}\x00")
         if el.text:
             out.append(el.text)
         for child in el:
@@ -304,9 +422,12 @@ def _ooxml_text_with_boundaries(tree) -> str:
 def _output_text_blob(out_path: Path) -> str:
     """Every readable string in the output, INCLUDING parts the format handlers
     don't normally touch (OOXML metadata, text boxes, numeric cells, every XML
-    part; every PDF page). Text nodes are concatenated so a value split across
-    runs still appears contiguous -- for the recognizer-independent residual
-    check."""
+    part, every XML ATTRIBUTE VALUE -- sheet names, hyperlink tooltips, field
+    codes, alt-text, tracked-change authors -- external relationship targets, and
+    OOXML packages EMBEDDED inside a compressed part; every PDF page plus its
+    metadata, form fields, annotations and link URIs). Text nodes are concatenated
+    so a value split across runs still appears contiguous -- for the
+    recognizer-independent residual check."""
     suffix = out_path.suffix.lower()
     if suffix == ".pdf":
         import fitz
@@ -331,22 +452,139 @@ def _output_text_blob(out_path: Path) -> str:
                             parts.append(w.field_value)
                     for a in list(page.annots() or []):
                         parts.append((a.info or {}).get("content", ""))
+                    # Link TARGETS: a URI lives in a link annotation, not the
+                    # content stream, so get_text() never reaches it.
+                    for link in page.get_links():
+                        if link.get("uri"):
+                            parts.append(link["uri"])
                 except Exception:  # noqa: BLE001
                     pass
             return "\n".join(parts)
     if suffix in _OOXML_EXTS:
-        parts = []
         with zipfile.ZipFile(out_path) as zf:
-            for name in zf.namelist():
-                if not (name.endswith(".xml") or name.endswith(".rels")):
-                    continue
-                try:
-                    tree = xmlsafe.fromstring(zf.read(name))
-                except etree.XMLSyntaxError:
-                    continue
-                parts.append(_ooxml_text_with_boundaries(tree))
-        return "\n".join(parts)
+            return _ooxml_zip_blob(zf)
     return out_path.read_text(encoding="utf-8", errors="ignore")
+
+
+# An OOXML package can EMBED another one (a chart's source workbook, an OLE
+# object). Its text is compressed inside an already-compressed part, so neither a
+# raw byte scan of the outer file nor an XML sweep of its parts can see it.
+_EMBEDDED_PACKAGE_RE = re.compile(r"\.(?:xlsx|xlsm|docx|pptx)$", re.IGNORECASE)
+_MAX_EMBED_DEPTH = 2
+
+# Parts whose ATTRIBUTES are pure package plumbing or the app's own FORMATTING
+# VOCABULARY, never user content: the relationship graph and the content-type
+# manifest (part paths, MIME types, relationship ids), and the style / theme /
+# font / settings tables, whose attributes are Word's and Excel's own English
+# names -- "Hyperlink", "Normal", "heading 1", "Emphasis". Reading those would
+# manufacture nothing but spurious HARD FAILS: a recognizer that (quite readily)
+# claims "HYPERLINK" as an ORGANIZATION would then refuse to write ANY output for
+# every document that uses the built-in hyperlink style.
+#
+# This is NOT a leak surface: none of these parts is extracted on the way in, so a
+# value living only here can never reach the decision set the backstop re-checks.
+# It costs coverage only in the absurd case of a value that is decided elsewhere
+# AND also happens to be a user-defined STYLE name. Their element TEXT is still
+# read, as before. Every other part -- body, worksheets, charts, comments,
+# docProps -- is read attributes and all.
+_PLUMBING_BASENAMES = frozenset(
+    {
+        "[content_types].xml",  # NOTE: this set is matched against a LOWER-CASED basename
+        "styles.xml",
+        "styleswitheffects.xml",
+        "settings.xml",
+        "websettings.xml",
+        "fonttable.xml",
+        "numbering.xml",
+        "calcchain.xml",
+        "tablestyles.xml",
+        "presprops.xml",
+        "viewprops.xml",
+    }
+)
+_THEME_PART_RE = re.compile(r"(?:^|/)theme/[^/]*\.xml$", re.IGNORECASE)
+
+
+def _is_plumbing_part(name: str) -> bool:
+    base = name.rsplit("/", 1)[-1]
+    return (
+        name.endswith(".rels")
+        or base.lower() in _PLUMBING_BASENAMES
+        or bool(_THEME_PART_RE.search(name))
+    )
+
+
+def _ooxml_zip_blob(zf: zipfile.ZipFile, depth: int = 0) -> str:
+    parts: list[str] = []
+    for name in zf.namelist():
+        if name.endswith(".xml") or name.endswith(".rels"):
+            try:
+                tree = xmlsafe.fromstring(zf.read(name))
+            except etree.XMLSyntaxError:
+                continue
+            parts.append(_ooxml_text_with_boundaries(tree, attributes=not _is_plumbing_part(name)))
+            if name.endswith(".rels"):
+                # An EXTERNAL relationship target is real user content
+                # (mailto:hans.mueller@bank.de, a UNC path holding a customer name).
+                # Only External ones: internal targets are package paths
+                # ("docProps/core.xml").
+                for el in tree.iter():
+                    if isinstance(el.tag, str) and el.get("TargetMode") == "External":
+                        parts.append(f"\x00{el.get('Target') or ''}\x00")
+        elif depth < _MAX_EMBED_DEPTH and _EMBEDDED_PACKAGE_RE.search(name):
+            try:
+                with zipfile.ZipFile(io.BytesIO(zf.read(name))) as inner:
+                    parts.append(_ooxml_zip_blob(inner, depth + 1))
+            except (zipfile.BadZipFile, OSError, RuntimeError):
+                continue
+    return "\n".join(parts)
+
+
+# A rendered replacement token the tool itself writes: [PERSON_1], [KUNDENNR_3],
+# [REDACTED], [PROJEKT_2]. Labels are upper-case by construction (actions.token_label
+# / xlsx_handler._column_entity_type), so the pattern is deliberately case-SENSITIVE.
+_TOKEN_RUN_RE = re.compile(r"\[[A-Z0-9_]+\]")
+
+
+def _token_inner_spans(blob: str) -> list[tuple[int, int]]:
+    """(start, end) of the text INSIDE each replacement-token run, in `blob`
+    coordinates. Sorted and non-overlapping by construction, so a single bisect
+    finds the only run that can contain a given offset."""
+    return [(m.start() + 1, m.end() - 1) for m in _TOKEN_RUN_RE.finditer(blob)]
+
+
+def _is_phantom(start: int, end: int, inners: list[tuple[int, int]], starts: list[int]) -> bool:
+    """True when a match at [start, end) is the tool's OWN output rather than a leak.
+
+    The one thing the mask is for: a removed value that is a PROPER substring of a
+    replacement token's label. The classic case is an NER-misflagged header word
+    "Kundennr" (removed as a LOCATION) sitting inside the [KUNDENNR_n] tokens that
+    replaced the customer NUMBERS -- reporting that refuses to write ANY file.
+
+    A match that covers a token's ENTIRE inner text, or spills outside it, is NOT
+    suppressed: `[FALL_00219384]` in the output is indistinguishable from a minted
+    token, and a bank case reference captured WITHOUT its delimiters
+    ("FALL_00219384") is exactly the common recognizer shape -- round 1 masked the
+    whole run and made that leak invisible. Fail-loud wins the tie: an ambiguous
+    full-token match is reported."""
+    i = bisect.bisect_right(starts, start) - 1
+    if i < 0:
+        return False
+    ts, te = inners[i]
+    return ts <= start and end <= te and not (start == ts and end == te)
+
+
+def _strip_whitespace_with_map(blob: str) -> tuple[str, list[int]]:
+    """The blob with all whitespace removed, plus the original index of each kept
+    character -- so a match in the stripped form maps back to a real span and can
+    still be phantom-tested."""
+    chars: list[str] = []
+    index: list[int] = []
+    for i, ch in enumerate(blob):
+        if not ch.isspace():
+            chars.append(ch)
+            index.append(i)
+    return "".join(chars), index
 
 
 def _literal_residual(out_path: Path, removed_values: list[str], always_check=()) -> list[str]:
@@ -357,28 +595,58 @@ def _literal_residual(out_path: Path, removed_values: list[str], always_check=()
     Case-insensitive, and also checks a whitespace-stripped form for IDs/IBANs
     that may be reformatted. Values under 4 chars are skipped to avoid false hits
     on common substrings -- EXCEPT terms in `always_check` (the user's deny list),
-    which are user-asserted PII and must be verified regardless of length."""
+    which are user-asserted PII and must be verified regardless of length.
+
+    Matches inside the tool's own replacement tokens are suppressed PER VALUE (see
+    `_is_phantom`). Round 1 did this by deleting every token run from the haystack
+    up front, which had two failure modes -- it erased bracket-free values that
+    genuinely survived inside a bracket run, and, once a bracket-bearing value
+    forced a run to be kept, it handed EVERY other value a free false match inside
+    that run. Deciding per match, per value, has neither."""
     blob = _output_text_blob(out_path)
-    # Mask the tool's OWN replacement tokens ([PERSON_1], [KUNDENNR_3], [REDACTED], ...)
-    # before searching. A removed value that is a substring of a token is NOT a leak
-    # -- it is the anonymized output: e.g. an NER-misflagged header word "Kundennr"
-    # (removed as a LOCATION) is a substring of the [KUNDENNR_n] tokens that replaced
-    # the customer NUMBERS, so an unmasked substring scan reports a phantom leak and
-    # the fail-loud gate refuses to write ANY file. The sentinel (NUL: never in real
-    # text, not whitespace so the stripped form can't bridge across it) replaces each
-    # token so it neither matches a removed value nor joins two real fragments. A real
-    # leak sitting OUTSIDE a token is untouched and still caught.
-    blob = re.sub(r"\[[A-Z0-9_]+\]", "\x00", blob)
-    low = blob.lower()
-    low_ns = re.sub(r"\s+", "", low)
     always = {v.strip().lower() for v in always_check}
+    inners = _token_inner_spans(blob)
+    starts = [s for s, _e in inners]
+    low = blob.lower()
+    blob_ns: str | None = None
+    low_ns = ""
+    ns_index: list[int] = []
+
+    def _real_match(pattern_value: str, haystack: str, offsets: list[int] | None) -> bool:
+        """True if `pattern_value` occurs in `haystack` at least once outside a
+        replacement token. `offsets` maps haystack indices back to blob indices
+        (identity when None)."""
+        for m in re.finditer(re.escape(pattern_value), haystack, re.IGNORECASE):
+            if offsets is None:
+                start, end = m.start(), m.end()
+            elif m.end() > m.start():
+                start, end = offsets[m.start()], offsets[m.end() - 1] + 1
+            else:
+                continue
+            if not _is_phantom(start, end, inners, starts):
+                return True
+        return False
+
     residual: list[str] = []
     for value in removed_values:
         v = value.strip().lower()
         if len(v) < 4 and v not in always:
             continue
+        # Cheap membership test first: the overwhelmingly common (clean) case then
+        # costs one substring scan per value, exactly as before, and the precise
+        # span-by-span pass only runs for values that are actually present.
+        if v in low and _real_match(v, blob, None):
+            residual.append(value)
+            continue
+        # Second haystack with ALL whitespace removed, so an IBAN/ID that the output
+        # reformatted ("DE89 3704 ...") is still caught. Built once, lazily.
         v_ns = re.sub(r"\s+", "", v)
-        if v in low or (len(v_ns) >= 4 and v_ns in low_ns):
+        if len(v_ns) < 4:
+            continue
+        if blob_ns is None:
+            blob_ns, ns_index = _strip_whitespace_with_map(blob)
+            low_ns = blob_ns.lower()
+        if v_ns in low_ns and _real_match(v_ns, blob_ns, ns_index):
             residual.append(value)
     return residual
 

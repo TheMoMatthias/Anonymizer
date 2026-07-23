@@ -6,15 +6,30 @@ All scans force a single German language (`languages: ["de"]`) to mirror the
 real per-document routing the pipeline applies.
 """
 
-from anonymizer.core import detect_unit
+import pytest
+
+from anonymizer import taxonomy
+from anonymizer.core import build_scan_result, detect_unit
 from anonymizer.models import TextUnit
 from anonymizer.validators import bic_valid
 
 
-def _types(analyzer, base_config, text):
+def _findings(analyzer, base_config, text):
     cfg = {**base_config, "languages": ["de"]}
-    findings = detect_unit(analyzer, TextUnit("u1", text), cfg)
-    return {(f.entity_type, f.value) for f in findings}
+    return detect_unit(analyzer, TextUnit("u1", text), cfg)
+
+
+def _types(analyzer, base_config, text):
+    return {(f.entity_type, f.value) for f in _findings(analyzer, base_config, text)}
+
+
+def _art9(analyzer, base_config, text):
+    """Findings that land in the GDPR Art. 9 special-category data class."""
+    return [
+        f
+        for f in _findings(analyzer, base_config, text)
+        if taxonomy.data_class_for(f.entity_type).key == taxonomy.SPECIAL_CATEGORY.key
+    ]
 
 
 def test_bic_does_not_leak(analyzer, base_config):
@@ -149,3 +164,536 @@ def test_bic_valid_country_gate():
     assert bic_valid("DEUTDEFF")  # 8-char BIC, DE
     assert not bic_valid("TRANSFER")  # 'SF' not an ISO country
     assert not bic_valid("HELLO")  # wrong shape
+
+
+# --- GDPR Art. 9 special-category data (German) -----------------------------
+# A previous wave added the special_category CLASS to the taxonomy but no German
+# recognizer ever emitted into it, so the class existed and never fired: health,
+# religion and union/party data in a German workbook were a silent, total leak.
+
+
+@pytest.mark.parametrize(
+    "text,needle",
+    [
+        ("Diagnose: Diabetes mellitus", "Diabetes"),
+        ("Krankenkasse: AOK Bayern", "AOK"),
+        ("Pflegegrad: 3", "3"),
+        ("GdB: 50", "50"),
+        ("Der Kunde ist seit Mai arbeitsunfähig.", "arbeitsunfähig"),
+        ("Schwerbehinderung liegt vor", "Schwerbehinderung"),
+        ("Die Barmer bestätigt den Versicherungsschutz.", "Barmer"),
+    ],
+)
+def test_art9_health_data_detected(analyzer, base_config, text, needle):
+    """Health data is Art. 9 and had ZERO German detection."""
+    hits = _art9(analyzer, base_config, text)
+    assert any(needle in f.value for f in hits), f"Art.9 health leak in {text!r}: {hits}"
+
+
+@pytest.mark.parametrize(
+    "text,needle",
+    [
+        ("Konfession: rk", "rk"),
+        ("Kirchensteuermerkmal: ev", "ev"),
+        ("Religionszugehörigkeit: islamisch", "islamisch"),
+        ("Der Kunde ist evangelisch", "evangelisch"),
+        ("Konfession: jüdisch", "jüdisch"),
+    ],
+)
+def test_art9_religion_detected(analyzer, base_config, text, needle):
+    hits = _art9(analyzer, base_config, text)
+    assert any(needle in f.value for f in hits), f"Art.9 religion leak in {text!r}: {hits}"
+
+
+@pytest.mark.parametrize(
+    "text,needle",
+    [
+        ("Gewerkschaft: ver.di", "ver.di"),
+        ("Mitglied der IG Metall seit 2001", "IG Metall"),
+        ("Parteimitgliedschaft: SPD", "SPD"),
+        ("Gewerkschaftszugehörigkeit: DGB", "DGB"),
+    ],
+)
+def test_art9_union_and_party_detected(analyzer, base_config, text, needle):
+    hits = _art9(analyzer, base_config, text)
+    assert any(needle in f.value for f in hits), f"Art.9 union/party leak in {text!r}: {hits}"
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        # A German bank workbook carries a Kirchensteuer amount column on EVERY
+        # row. The AMOUNT is not the special-category datum and flagging it would
+        # bury the reviewer -- whole-column policy is the right tool there.
+        "Kirchensteuer 128,40 EUR",
+        "Solidaritätszuschlag und Kirchensteuer werden einbehalten",
+        # "die linke Seite" must not match the party "Die Linke" (case-sensitive).
+        "Bitte die linke Spalte prüfen",
+        # An ordinary payment sentence must not trip any Art. 9 pattern.
+        "Die Abrechnung erfolgt quartalsweise gemäß den Geschäftsbedingungen.",
+        # These probes run in the GERMAN scan (see _art9), where the German word
+        # lists are active. English words quoted inside a German document must
+        # still not collide with them: "aids" the verb and "orthodox" the
+        # adjective are why HIV/AIDS is case-sensitive and why a bare "orthodox"
+        # is not in the religion list. (An English-ROUTED document is covered
+        # separately by test_german_art9_wordlists_do_not_fire_on_english.)
+        "This tool aids the reconciliation process.",
+        "We took an orthodox approach to the valuation.",
+    ],
+)
+def test_art9_precision_does_not_flag_ordinary_bank_text(analyzer, base_config, text):
+    hits = _art9(analyzer, base_config, text)
+    assert not hits, f"Art.9 over-flagged {text!r}: {[(f.entity_type, f.value) for f in hits]}"
+
+
+@pytest.mark.parametrize(
+    "text,needle",
+    [
+        # spaCy claims the WHOLE phrase as one ORGANIZATION, i.e. a LONGER span that
+        # CONTAINS the Art. 9 hit. _resolve_overlaps sorted by span length before
+        # score, so the Art. 9 finding was dropped as "fully contained" and the value
+        # was filed under Organizations & places -- whose action is PSEUDONYMIZE, a
+        # reversible, mapping-backed [ORG_n]. That is verbatim the leak Art. 9
+        # detection exists to close.
+        ("Krankenkasse Barmer", "Barmer"),
+        ("Gewerkschaft ver.di", "ver.di"),
+        ("Versichert bei der AOK Bayern", "AOK"),
+    ],
+)
+def test_art9_is_not_swallowed_by_a_longer_generic_span(analyzer, base_config, text, needle):
+    """LEAK: special-category data must not lose its class to a longer generic
+    ORGANIZATION/LOCATION span that merely contains it."""
+    hits = _art9(analyzer, base_config, text)
+    assert any(needle in f.value for f in hits), (
+        f"Art.9 value swallowed by a generic span in {text!r}: "
+        f"{[(f.entity_type, f.value) for f in _findings(analyzer, base_config, text)]}"
+    )
+    # ...and the surviving set must still be non-overlapping, or apply splices the
+    # text twice and produces a garbled token.
+    spans = sorted((f.start, f.end) for f in _findings(analyzer, base_config, text))
+    assert all(a[1] <= b[0] for a, b in zip(spans, spans[1:])), f"overlapping spans: {spans}"
+
+
+def test_art9_stays_in_the_review_tier(analyzer, base_config):
+    """Art. 9 detection is contextual, not checksummed, so it must land BELOW the
+    auto-accept bar: over-flagging religion/health is as damaging as missing it,
+    and the reviewer is the only thing that can tell them apart."""
+    high = float(base_config.get("tiers", {}).get("high", 0.9))
+    for text in ("Diagnose: Diabetes mellitus", "Konfession: rk", "Gewerkschaft: ver.di"):
+        for f in _art9(analyzer, base_config, text):
+            assert f.score < high, f"Art.9 finding auto-accepted: {f.entity_type} {f.value} {f.score}"
+
+
+# --- C2: standalone (context-free) Sozialversicherungsnummer -----------------
+
+
+def test_sv_nummer_detected_in_a_bare_cell(analyzer, base_config):
+    """The SV recognizer was context-gated, so a bare SV number in its own
+    spreadsheet column -- exactly how an HR workbook stores it -- was missed
+    entirely. The check digit makes a standalone match safe."""
+    typed = _types(analyzer, base_config, "65170839J003")
+    assert any(et == "DE_SV_NUMMER" for et, _v in typed), f"bare SV-Nummer leaked: {typed}"
+
+
+def test_sv_nummer_bare_is_auto_accept_tier(analyzer, base_config):
+    """A checksum-validated SV number is near-certainly real -> high tier."""
+    hits = [f for f in _findings(analyzer, base_config, "65170839J003") if f.entity_type == "DE_SV_NUMMER"]
+    assert hits and hits[0].validated is True and hits[0].score >= 0.9
+
+
+def test_sv_nummer_failed_checksum_still_surfaces(analyzer, base_config):
+    """A checksum-failing SV number is usually a TYPO in a real one, not a false
+    positive -- it must stay visible for review, not be silently dropped."""
+    hits = [f for f in _findings(analyzer, base_config, "65170839J004") if f.entity_type == "DE_SV_NUMMER"]
+    assert hits, "checksum-failed SV-Nummer dropped instead of demoted"
+    assert hits[0].validated is False
+
+
+# --- C3: a checksum-FAILED structured ID must keep its data class ------------
+
+
+def _classes_for(analyzer, base_config, text):
+    cfg = {**base_config, "languages": ["de"]}
+    unit = TextUnit("u1", text)
+    findings = detect_unit(analyzer, unit, cfg)
+    return findings, {g.key for g in build_scan_result(findings, [unit], cfg).groups}
+
+
+@pytest.mark.parametrize(
+    "entity_type,value",
+    [
+        # The IBAN case was xfail: spaCy claims the IDENTICAL span as NER_MISC at
+        # its flat 0.85 and beat the 0.4-demoted IBAN_CODE on score. core's overlap
+        # resolution now prefers the CHECKSUM-TESTED recognizer on an equal-length
+        # span, so this passes -- the marker is gone rather than left to xpass
+        # silently (see test_core.test_resolve_overlaps_checksum_tested_id_beats_...).
+        ("IBAN_CODE", "DE89370400440532013001"),  # mod-97 fails on the last digit
+        ("CREDIT_CARD", "4111 1111 1111 1112"),  # Luhn fails on the last digit
+    ],
+)
+def test_checksum_failed_id_keeps_its_financial_data_class(analyzer, base_config, entity_type, value):
+    """LEAK: Presidio's own recognizers score a failed checksum to 0 and then
+    DROP the result (`if score > MIN_SCORE`), so a typo'd/OCR'd IBAN or card
+    never reached `_refine`. It lost its Financial-IDs class entirely -- landing
+    either in "Other named entities" (if spaCy happened to tag it) or in the
+    informational possible-miss bucket the review UI never applies. A failed
+    checksum is a typo in a REAL id, not a false positive: it must stay
+    classified and reviewable."""
+    findings, classes = _classes_for(analyzer, base_config, value)
+    hits = [f for f in findings if f.entity_type == entity_type]
+    assert hits, f"checksum-failed {entity_type} dropped: {[(f.entity_type, f.value) for f in findings]}"
+    assert hits[0].validated is False
+    assert taxonomy.FINANCIAL_IDS.key in classes, f"lost its data class, groups={classes}"
+
+
+# --- C4: German compound / abbreviated / prepositional street names ----------
+
+
+@pytest.mark.parametrize(
+    "text,needle",
+    [
+        ("Rudolf-Breitscheid-Str. 12", "Rudolf-Breitscheid-Str."),
+        ("Zum Alten Forsthaus 4a", "Zum Alten Forsthaus"),
+        ("Am Wall 3", "Am Wall"),
+        ("Kirchstr.7", "Kirchstr."),
+        # The whole range must be covered -- "Hauptstraße 12" left "14" in place.
+        ("Hauptstraße 12-14", "12-14"),
+        ("Unter den Linden 5", "Unter den Linden"),
+        ("50667 Köln-Ehrenfeld", "Köln-Ehrenfeld"),
+        ("D-50667 Köln", "50667 Köln"),
+    ],
+)
+def test_german_address_variants_detected(analyzer, base_config, text, needle):
+    typed = _types(analyzer, base_config, text)
+    assert any(et == "DE_ADDRESS" and needle in v for et, v in typed), f"address leak in {text!r}: {typed}"
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "Im Jahr 2024 wurden die Gebühren angepasst",
+        "Im Anhang 2024 finden Sie die Aufstellung",
+    ],
+)
+def test_prepositional_address_does_not_match_prose(analyzer, base_config, text):
+    typed = _types(analyzer, base_config, text)
+    assert not any(et == "DE_ADDRESS" for et, _v in typed), f"address over-flagged {text!r}: {typed}"
+
+
+# --- C5: date-of-birth formats ----------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "text,needle",
+    [
+        ("geb. 31.12.80", "31.12.80"),
+        ("Geburtsdatum: 1980-12-31", "1980-12-31"),
+        ("Müller, *1980", "1980"),
+        ("*31.12.1980", "31.12.1980"),
+        ("Jahrgang 1980", "1980"),
+        ("31.12.1980", "31.12.1980"),
+        ("geboren am 3. Mai 1980", "3. Mai 1980"),
+    ],
+)
+def test_date_of_birth_variants_detected(analyzer, base_config, text, needle):
+    """A DOB is a strong quasi-identifier; the German model emits no DATE at all,
+    so anything the DATE_TIME pattern misses leaks silently."""
+    typed = _types(analyzer, base_config, text)
+    assert any(et == "DATE_TIME" and needle in v for et, v in typed), f"DOB leak in {text!r}: {typed}"
+
+
+# --- C6: the recall harness must measure the BARE cell bare ------------------
+
+
+# --- R2/P3: a LABEL:VALUE Art. 9 hit must claim to a BOUNDARY -----------------
+
+
+@pytest.mark.parametrize(
+    "text,label",
+    [
+        # A free-text Diagnose/Bemerkung cell: the old fixed 40-char cap cut
+        # MID-TOKEN and left the tail of the sensitive note in the document
+        # ("[X]nz mit begleitender [X] und Schlafstoerung").
+        (
+            "Diagnose: Verdacht auf chronische Niereninsuffizienz mit begleitender "
+            "Depression und Schlafstoerung",
+            "Diagnose: ",
+        ),
+        ("Krankenkasse: AOK Bayern zahlt den Beitrag ab Januar 2024 nicht mehr", "Krankenkasse: "),
+        ("Konfession: evangelisch-lutherisch seit der Taufe im Mai neunzehnhundert", "Konfession: "),
+        ("Gewerkschaft: Vereinte Dienstleistungsgewerkschaft Bezirk Nordrhein seit 2004", "Gewerkschaft: "),
+    ],
+)
+def test_art9_label_value_claims_to_a_boundary_not_a_char_count(analyzer, base_config, text, label):
+    """FALSELY-CLEAN OUTPUT: the label:value patterns capped the claimed value at
+    40 (health) / 30 (religion) characters and cut mid-word, so a long free-text
+    cell was only PARTIALLY redacted and the tail of the sensitive note survived
+    into the "anonymized" file. The value must run to a real boundary -- end of
+    cell / sentence / line -- never to a character count."""
+    hits = _art9(analyzer, base_config, text)
+    assert hits, f"no Art.9 finding at all in {text!r}"
+    assert any(f.start == len(label) and f.end == len(text) for f in hits), (
+        f"value truncated -- residual would remain: {[(f.value, f.start, f.end) for f in hits]}"
+    )
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        # A negation or a placeholder is not special-category data; claiming it
+        # produced meaningless one-way-anonymized findings and pure reviewer noise.
+        "Partei: keine",
+        "Konfession: -",
+        "Diagnose: k.A.",
+        "Gewerkschaft: nein",
+        "Krankenkasse: unbekannt",
+        "Religion: keine Angabe",
+    ],
+)
+def test_art9_label_value_ignores_negations_and_placeholders(analyzer, base_config, text):
+    hits = _art9(analyzer, base_config, text)
+    assert not hits, f"placeholder claimed as Art.9 data in {text!r}: {[(f.entity_type, f.value) for f in hits]}"
+
+
+# --- R2/P4: German exports transliterate umlauts (ae/oe/ue) -------------------
+
+
+@pytest.mark.parametrize(
+    "text,needle",
+    [
+        ("arbeitsunfaehig", "arbeitsunfaehig"),
+        ("Arbeitsunfaehigkeit seit Mai", "Arbeitsunfaehigkeit"),
+        ("erwerbsunfaehig", "erwerbsunfaehig"),
+        ("berufsunfaehig", "berufsunfaehig"),
+        ("Der Kunde ist juedisch", "juedisch"),
+        ("Mitglied bei Die Gruenen", "Gruenen"),
+        ("Religionszugehoerigkeit: islamisch", "islamisch"),
+    ],
+)
+def test_art9_transliterated_umlauts_are_detected(analyzer, base_config, text, needle):
+    """The word lists were UMLAUT-ONLY, so the ae/oe/ue spelling that German
+    system exports routinely use (this repo's own fixtures say "Mueller") was
+    missed entirely -- a pure transliteration gap, not a vocabulary one."""
+    hits = _art9(analyzer, base_config, text)
+    assert any(needle in f.value for f in hits), f"transliterated Art.9 term missed in {text!r}: {hits}"
+
+
+# --- R2/P5: Art. 9 recall gaps (no-colon labels, and 3 missing categories) ----
+
+
+@pytest.mark.parametrize(
+    "text,needle",
+    [
+        # Word/PDF prose carries no ':' -- only the Excel handler synthesises one.
+        ("Pflegegrad 3 wurde bewilligt", "3"),
+        ("GdB 50 festgestellt", "50"),
+        ("Krankenkasse TK", "TK"),
+        ("Reha beantragt", "Reha"),
+        ("Kirchensteuermerkmal ev", "ev"),
+    ],
+)
+def test_art9_label_without_a_colon_is_detected(analyzer, base_config, text, needle):
+    hits = _art9(analyzer, base_config, text)
+    assert any(needle in f.value for f in hits), f"Art.9 leak in colon-free prose {text!r}: {hits}"
+
+
+@pytest.mark.parametrize(
+    "text,needle",
+    [
+        # Racial/ethnic origin, sex life/orientation and genetic/biometric data are
+        # Art. 9 categories that had NO detection at all.
+        ("Herkunft: tuerkisch", "tuerkisch"),
+        ("Staatsangehoerigkeit: syrisch", "syrisch"),
+        ("Staatsangehörigkeit: tunesisch", "tunesisch"),
+        ("Der Kunde ist homosexuell", "homosexuell"),
+        ("Sexuelle Orientierung: bisexuell", "bisexuell"),
+        ("Gentest liegt vor", "Gentest"),
+        ("Fingerabdruck hinterlegt", "Fingerabdruck"),
+    ],
+)
+def test_art9_origin_orientation_and_genetic_data_detected(analyzer, base_config, text, needle):
+    hits = _art9(analyzer, base_config, text)
+    assert any(needle in f.value for f in hits), f"Art.9 category with no detection at all: {text!r} -> {hits}"
+
+
+# --- R2/P9-en: German word lists must not fire on an ENGLISH document ---------
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "The Great Depression started in 1929.",
+        "Diabetes research fund performance",
+        "The AOK index of the region",
+    ],
+)
+def test_german_art9_wordlists_do_not_fire_on_english(analyzer, base_config, text):
+    """PRECISION: Art. 9 findings are ONE-WAY anonymized (irreversible). German
+    word lists firing on ordinary English financial vocabulary destroys text in
+    an English document with no way back."""
+    cfg = {**base_config, "languages": ["en"]}
+    hits = [
+        f
+        for f in detect_unit(analyzer, TextUnit("u1", text), cfg)
+        if f.entity_type.startswith("DE_")
+    ]
+    assert not hits, f"German recognizer fired on English text {text!r}: {[(f.entity_type, f.value) for f in hits]}"
+
+
+# --- R2/P6: the prepositional address pattern vs German bank boilerplate ------
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "Zum Stichtag 31.12.2024 betrug der Saldo",
+        "In der Anlage 3 finden Sie die Aufstellung",
+        "Zum Beispiel 3 Positionen wurden geprueft",
+        "Am Ende 3 Positionen",
+    ],
+)
+def test_prepositional_address_does_not_match_bank_boilerplate(analyzer, base_config, text):
+    """'Zum Stichtag' appears in essentially every German bank statement. A
+    hand-maintained prose-exclusion list was not converging, so the pattern needs
+    a positive signal: an address occupies a delimited segment, prose does not."""
+    typed = _types(analyzer, base_config, text)
+    assert not any(et == "DE_ADDRESS" for et, _v in typed), f"address over-flagged {text!r}: {typed}"
+
+
+def test_stichtag_date_is_not_swallowed_by_a_bogus_address(analyzer, base_config):
+    """The bogus 'Zum Stichtag 31.12.2024' address CROSSED the DATE_TIME finding
+    and swallowed it in overlap resolution, so the date lost its own class."""
+    typed = _types(analyzer, base_config, "Zum Stichtag 31.12.2024 betrug der Saldo")
+    assert ("DATE_TIME", "31.12.2024") in typed, typed
+
+
+# --- R2/P8: the CREDIT_CARD fallback must not claim internal reference runs ---
+
+
+def test_bare_16_digit_reference_is_not_claimed_as_a_card(analyzer, base_config):
+    """Roughly 15-20% of all 16-digit numbers carry a card-shaped prefix. As an
+    unconditional fallback that was an ACTIONABLE finding which no configuration
+    could filter (validated=False bypasses the confidence threshold), with a
+    ONE-WAY default action -- so bulk-accepting Financial IDs destroyed internal
+    16-digit reference numbers with no way back."""
+    typed = _types(analyzer, base_config, "Vorgangsnummer 4123456789012345 im System")
+    assert not any(et == "CREDIT_CARD" for et, _v in typed), f"internal reference claimed as a card: {typed}"
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "Kreditkarte 4123456789012345 wurde belastet",  # Luhn-INVALID, label-anchored
+        "4123 4567 8901 2345",  # Luhn-INVALID, written in card groups
+    ],
+)
+def test_checksum_failed_card_is_still_caught_when_it_looks_like_a_card(analyzer, base_config, text):
+    typed = _types(analyzer, base_config, text)
+    assert any(et == "CREDIT_CARD" for et, _v in typed), f"card number leaked: {typed}"
+
+
+# --- R2/P10: report typography must not read as a date of birth --------------
+
+
+@pytest.mark.parametrize("text", ["* 2024 Prognose", "Umsatz * 2019 nach Segment"])
+def test_footnote_asterisk_is_not_a_birth_date(analyzer, base_config, text):
+    """The genealogical birth marker is written tight ("*1980"); a spaced '*' is a
+    footnote marker, which appears all over a report's typography."""
+    typed = _types(analyzer, base_config, text)
+    assert not any(et == "DATE_TIME" for et, _v in typed), f"footnote marker read as a DOB: {typed}"
+
+
+# --- R2/P1: the non-validating IBAN fallback must not eat the next word ------
+
+
+@pytest.mark.parametrize(
+    "text,iban",
+    [
+        # Every country whose IBAN length is a multiple of 4 exposed the bug: the
+        # fallback's optional trailing group could start with a SPACE, so it ate the
+        # first character(s) of the next word.
+        ("IBAN AT611904300234573201 Betrag 100 EUR", "AT611904300234573201"),  # AT = 20
+        ("Konto BE68539007547034 Ueberweisung", "BE68539007547034"),  # BE = 16
+        ("IBAN SE4550000000058398257466 Empfaenger", "SE4550000000058398257466"),  # SE = 24
+        # A NUMBER following the IBAN is the case that matters most and the one an
+        # earlier repair missed: narrowing the trailing group to digits while LEAVING
+        # the optional space kept the defect alive in its worst form, because what
+        # follows an IBAN on a German transfer line is the AMOUNT, not a word. The
+        # tail then ate the amount and applying the finding DELETED it from the
+        # document. Keep both shapes parameterised -- testing only the word case is
+        # what let the incomplete fix through.
+        ("IBAN AT611904300234573201 100 EUR", "AT611904300234573201"),
+        ("Konto BE68539007547034 100 EUR", "BE68539007547034"),
+        ("Betrag zu IBAN LU280019400644750000 25 Euro", "LU280019400644750000"),  # LU = 20
+        ("IBAN AT611904300234573201 12 EUR", "AT611904300234573201"),
+        # A German IBAN (22) has a 2-char remainder, so the tail is genuinely needed.
+        ("IBAN DE89370400440532013000 ist das Konto", "DE89370400440532013000"),
+        ("IBAN DE89 3704 0044 0532 0130 00 ist das Konto", "DE89 3704 0044 0532 0130 00"),
+    ],
+)
+def test_iban_span_never_bleeds_into_the_following_word(analyzer, base_config, text, iban):
+    """CORRUPTION + demotion regression: the fallback IBAN pattern claimed
+    '<IBAN> B' of 'AT61... Betrag'. That longer bogus span beat presidio's correct
+    one in overlap resolution, iban_valid() then failed on the polluted string and
+    a CHECKSUM-VALID IBAN was demoted to 0.4/validated=False -- dropping it out of
+    the auto-accept tier AND splicing one character out of the following word when
+    the redaction was applied ('Betrag' -> 'etrag')."""
+    hits = [f for f in _findings(analyzer, base_config, text) if f.entity_type == "IBAN_CODE"]
+    assert hits, f"IBAN not detected at all in {text!r}"
+    assert hits[0].value == iban, f"span bled into the next word: {hits[0].value!r}"
+    assert hits[0].validated is True, "a checksum-VALID IBAN was demoted"
+    assert hits[0].score >= 0.9, f"valid IBAN fell out of the auto-accept tier: {hits[0].score}"
+    end = text.index(iban) + len(iban)
+    assert all(f.end <= end or f.start >= end for f in _findings(analyzer, base_config, text)), (
+        "a finding straddles the end of the IBAN -- applying it would corrupt the next word"
+    )
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "ISIN DE0007164600 Stueckzahl 100",
+        "Wertpapierkennnummer DE000BAY0017 Bestand",
+        # A length FLOOR alone does not close this: with a space-absorbing trailing
+        # group the 12-char ISIN simply reached the floor by swallowing the position
+        # QUANTITY that follows it -- and 'ISIN <id> <quantity>' is the standard row
+        # of a depot statement, so this was the common case, not an edge case.
+        # Applying such a finding deleted the quantity from the statement.
+        "ISIN DE0007164600 100 Stueck",
+        "ISIN DE0007164600 1000 Stueck",
+        "DE0007164600 250",
+        "Depot: DE000BAY0017 500 Stueck",
+    ],
+)
+def test_securities_identifier_is_not_claimed_as_an_iban(analyzer, base_config, text):
+    """A 12-character ISIN is IBAN-SHAPED but can never be an IBAN (the shortest
+    IBAN is 15). Claiming it flagged every securities position in a depot
+    statement as a Financial ID."""
+    typed = _types(analyzer, base_config, text)
+    assert not any(et == "IBAN_CODE" for et, _v in typed), f"ISIN claimed as an IBAN: {typed}"
+
+
+def test_same_iban_with_and_without_a_trailing_amount_is_one_finding(analyzer, base_config):
+    """Referential-consistency regression. While the fallback span could absorb a
+    following number, ONE account number produced TWO findings -- the polluted
+    'AT61...3201 100' on a transfer line and the clean 'AT61...3201' elsewhere --
+    so the same account was pseudonymized to [IBAN_1] in one place and [IBAN_2] in
+    another, breaking precisely the cross-document consistency the mapping exists
+    to provide."""
+    text = (
+        "Ueberweisung an IBAN AT611904300234573201 100 EUR.\n"
+        "Das Konto AT611904300234573201 wurde geschlossen."
+    )
+    ibans = {f.value for f in _findings(analyzer, base_config, text) if f.entity_type == "IBAN_CODE"}
+    assert ibans == {"AT611904300234573201"}, f"one account number split into {ibans}"
+
+
+def test_bare_cell_probe_carries_no_filler_context():
+    """The harness prepended neutral filler prose to EVERY probe, so the
+    "bare_cell" stratum -- a lone value in a spreadsheet cell, the hardest and
+    most common shape in the user's real workbooks -- was never measured bare.
+    Every bare_cell number previously reported was therefore optimistic."""
+    from anonymizer import evaluation
+
+    assert evaluation.probe_text("bare_cell", "Anna", "Müller") == "Müller"
+    assert evaluation.FILLER in evaluation.probe_text("prose_oblique", "Anna", "Müller")

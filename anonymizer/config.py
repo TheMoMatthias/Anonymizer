@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import os
 import shutil
 import tempfile
@@ -128,10 +129,10 @@ def load_config() -> dict:
 
 
 def _ensure_defaults(cfg: dict) -> bool:
-    """Additively upgrades an existing user config with any shipped defaults it
-    is missing -- new top-level keys (tiers, sensitivity), new entities/custom
-    recognizers, and new allow-list terms. NEVER overwrites a value the user
-    already has (their customization wins). Returns True if anything changed."""
+    """Upgrades an existing user config to the shipped defaults: new top-level
+    keys (tiers, sensitivity), new allow-list terms, new entities, and new OR
+    improved shipped recognizers (see merge_new_recognizers -- a recognizer the
+    user has edited is never touched). Returns True if anything changed."""
     shipped = yaml.safe_load(DEFAULT_CONFIG_PATH.read_text(encoding="utf-8")) or {}
     changed = False
 
@@ -140,7 +141,11 @@ def _ensure_defaults(cfg: dict) -> bool:
             cfg[key] = shipped[key]
             changed = True
 
-    if merge_new_recognizers(cfg) > 0:
+    # The provenance record can change without any recognizer content changing
+    # (first run after the upgrade path landed); that still has to be SAVED, or
+    # every launch would re-run the legacy adoption from scratch.
+    state_before = dict(cfg.get(SHIPPED_STATE_KEY, {}))
+    if merge_new_recognizers(cfg) > 0 or cfg.get(SHIPPED_STATE_KEY, {}) != state_before:
         changed = True
 
     existing_allow = set(cfg.get("allow_list", []))
@@ -174,23 +179,104 @@ def save_config(config: dict) -> None:
         raise
 
 
+# --- shipped-recognizer upgrade path ----------------------------------------
+# The problem this solves: a detection improvement that only ever lands in the
+# SHIPPED yaml never reaches a machine that already has a config.yaml -- i.e.
+# every deployed one. Blind overwrite is not an option either: the Settings tab
+# lets a colleague retune a shipped recognizer, and losing that silently is just
+# as bad. So each shipped recognizer group carries PROVENANCE: the fingerprint of
+# the definition we last installed. Content == recorded fingerprint means "we put
+# it there and nobody has touched it" -> safe to upgrade. Anything else is a user
+# edit and is left exactly as it is.
+SHIPPED_STATE_KEY = "shipped_recognizers"
+
+# Configs written BEFORE provenance existed carry no marker. They are adopted
+# (and upgraded) only if their content matches a definition this repo actually
+# shipped -- these are the fingerprints of every custom-recognizer name group in
+# the git history of default_recognizers.yaml, so an untouched old install is
+# recognised while an edited one is not. This table is a ONE-TIME migration aid
+# and never needs to grow: from this version on every install records its own
+# provenance in SHIPPED_STATE_KEY. (Regenerate with the same fingerprint function
+# over `git log --follow` of the yaml if it ever does need extending.)
+_LEGACY_SHIPPED_FINGERPRINTS = frozenset({
+    "612abbb4e9d5007e", "f1ae5575052d7c5d",  # BANK_INTERNAL_REF
+    "5f605f9a776842a2", "e77fc41eace79aa8",  # BIC_CODE
+    "682472c0a361d498",  # DATE_TIME
+    "db4f735304e73761", "e752006af4313edd",  # DE_ADDRESS
+    "07ca7620c01f37a2", "a18f54c3e72c78ba", "db7d7b5586dc7fff",  # DE_DEPOTNUMMER
+    "1846f5e06ed8af08", "695ce4a307149f22", "b93d6bf6f8fa8d58",  # DE_KONTONUMMER
+    "0c6192e54630fe2f", "2441faf78ee02b26",  # DE_KUNDENNUMMER
+    "3e600a14afb82421",  # DE_PHONE
+    "4bbfc707d5c7e6a4", "a18841b52657e530",  # DE_STEUER_ID
+    "d1cccfc8e28d9e58", "fb39f0f2f868c484",  # DE_SV_NUMMER
+})
+
+
+def recognizer_fingerprint(group: list[dict]) -> str:
+    """Content fingerprint of all recognizer entries sharing one name. Fingerprints
+    the GROUP, not a single entry: DE_HEALTH_DATA and DE_UNION_PARTY each ship a
+    case-sensitive twin under the same name, and the previous dedupe-by-name meant
+    the second one could never be merged at all."""
+    blob = yaml.safe_dump(group, sort_keys=True, allow_unicode=True).encode("utf-8")
+    return hashlib.sha256(blob).hexdigest()[:16]
+
+
+def _group_by_name(recognizers: list[dict]) -> dict[str, list[dict]]:
+    groups: dict[str, list[dict]] = {}
+    for rec in recognizers:
+        groups.setdefault(rec["name"], []).append(rec)
+    return groups
+
+
 def merge_new_recognizers(cfg: dict) -> int:
-    """Adds any shipped custom recognizer (by name) not already present in
-    cfg. Never touches an existing entry, even if the shipped version has
-    since changed -- a colleague's own customization always wins."""
+    """Brings the user's config up to date with the shipped recognizers.
+
+    Adds anything missing, UPGRADES a shipped group the user has not modified,
+    and leaves every user edit (and every recognizer they added themselves)
+    untouched. Returns the number of recognizer entries added or updated, plus
+    newly added entity settings.
+
+    Entity SETTINGS (default_action / confidence_threshold) are only ever added
+    when missing, never updated: those are the knobs the Settings tab exists to
+    turn, so an existing value is by definition the user's decision."""
     shipped = yaml.safe_load(DEFAULT_CONFIG_PATH.read_text(encoding="utf-8")) or {}
-    existing_names = {r["name"] for r in cfg.get("custom_recognizers", [])}
-    added = 0
-    for rec in shipped.get("custom_recognizers", []):
-        if rec["name"] not in existing_names:
-            cfg.setdefault("custom_recognizers", []).append(rec)
-            existing_names.add(rec["name"])
-            added += 1
+    user_recognizers = cfg.setdefault("custom_recognizers", [])
+    state = cfg.setdefault(SHIPPED_STATE_KEY, {})
+    user_groups = _group_by_name(user_recognizers)
+    changed = 0
+
+    for name, shipped_group in _group_by_name(shipped.get("custom_recognizers", [])).items():
+        shipped_fp = recognizer_fingerprint(shipped_group)
+        current = user_groups.get(name)
+        if not current:
+            user_recognizers.extend(shipped_group)
+            state[name] = shipped_fp
+            changed += len(shipped_group)
+            continue
+        current_fp = recognizer_fingerprint(current)
+        if current_fp == shipped_fp:
+            state[name] = shipped_fp  # already current -- just record provenance
+            continue
+        recorded = state.get(name)
+        untouched = (
+            recorded == current_fp if recorded is not None else current_fp in _LEGACY_SHIPPED_FINGERPRINTS
+        )
+        if not untouched:
+            continue  # the user's own version -- theirs always wins
+        # Replace the whole group in place, keeping its position in the list so the
+        # Settings tab does not reshuffle under the user.
+        at = user_recognizers.index(current[0])
+        for entry in current:
+            user_recognizers.remove(entry)
+        user_recognizers[at:at] = shipped_group
+        state[name] = shipped_fp
+        changed += len(shipped_group)
+
     for entity_type, settings in shipped.get("entities", {}).items():
         if entity_type not in cfg.get("entities", {}):
             cfg.setdefault("entities", {})[entity_type] = settings
-            added += 1
-    return added
+            changed += 1
+    return changed
 
 
 def app_data_dir() -> Path:

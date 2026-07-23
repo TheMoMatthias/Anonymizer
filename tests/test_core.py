@@ -130,6 +130,35 @@ def test_resolve_overlaps_crossing_spans_merge_not_leak():
     assert "Klaus Mueller" in covered.value  # value re-sliced from text to cover both
 
 
+def test_resolve_overlaps_art9_outranks_a_longer_generic_span():
+    """LEAK: spaCy claims 'Krankenkasse Barmer' as one ORGANIZATION -- a LONGER
+    span CONTAINING the Art. 9 health hit. Sorting by span length first dropped
+    the Art. 9 finding as "fully contained", so union membership / a health
+    insurer was filed under Organizations & places and PSEUDONYMIZED into a
+    reversible [ORG_n]. Special-category sensitivity must outrank raw span
+    length -- while still merging to the union, so nothing is left uncovered."""
+    text = "Krankenkasse Barmer zahlt."
+    org = Finding("ORGANIZATION", "Krankenkasse Barmer", 0.85, "", "u1", 0, 19)
+    health = Finding("DE_HEALTH_DATA", "Barmer", 0.86, "", "u1", 13, 19)
+    kept = _resolve_overlaps([org, health], text)
+    assert len(kept) == 1
+    assert kept[0].entity_type == "DE_HEALTH_DATA", "Art.9 lost its class to a longer ORG span"
+    assert (kept[0].start, kept[0].end) == (0, 19), "the generic span's extra range must stay covered"
+
+
+def test_resolve_overlaps_checksum_tested_id_beats_ner_on_an_identical_span():
+    """LEAK: a checksum-FAILED IBAN (demoted to 0.4) lost the IDENTICAL span to
+    spaCy's NER_MISC at its flat 0.85, so a typo'd/OCR'd IBAN lost its Financial
+    IDs class and its "unverified" chip. On an identical span there is no
+    coverage argument either way, so the recognizer that actually ran a checksum
+    on the string wins."""
+    text = "DE89370400440532013001"
+    misc = Finding("NER_MISC", text, 0.85, "", "u1", 0, 22)
+    iban = Finding("IBAN_CODE", text, 0.4, "", "u1", 0, 22, validated=False)
+    kept = _resolve_overlaps([misc, iban], text)
+    assert len(kept) == 1 and kept[0].entity_type == "IBAN_CODE"
+
+
 def test_checksum_failed_steuer_id_still_surfaces(analyzer, base_config):
     """Regression (LEAK): a checksum-FAILED Steuer-ID was demoted to 0.4 then
     dropped by its 0.6 threshold, vanishing from the actionable set. A typo'd/OCR'd

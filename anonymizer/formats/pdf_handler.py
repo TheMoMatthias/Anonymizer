@@ -126,6 +126,17 @@ def _field_and_annot_texts(page) -> list[tuple[str, str]]:
     return out
 
 
+def _link_uris(page) -> list[dict]:
+    """Link annotations carrying an external URI. The TARGET of a link is not in
+    the content stream, so page.get_text() -- and therefore the scan, the reviewer's
+    decisions and the output re-scan -- never saw it, yet "mailto:hans.mueller@
+    bank.de" is exactly where a customer's identity sits in a bank PDF."""
+    try:
+        return [ln for ln in page.get_links() if ln.get("kind") == fitz.LINK_URI and (ln.get("uri") or "").strip()]
+    except Exception:  # noqa: BLE001 -- a malformed link must not crash extraction
+        return []
+
+
 def extract_text_units(path: Path) -> list[TextUnit]:
     doc = fitz.open(path)
     units: list[TextUnit] = []
@@ -136,6 +147,8 @@ def extract_text_units(path: Path) -> list[TextUnit]:
                 units.append(TextUnit(id=f"page{i}", text=text))
             for j, (kind, value) in enumerate(_field_and_annot_texts(page)):
                 units.append(TextUnit(id=f"page{i}|{kind}|{j}", text=value))
+            for j, link in enumerate(_link_uris(page)):
+                units.append(TextUnit(id=f"page{i}|link|{j}", text=link["uri"]))
     finally:
         doc.close()
     return units
@@ -151,6 +164,8 @@ def scan(path: Path, analyzer, config) -> list:
                 findings.extend(detect_unit(analyzer, TextUnit(id=f"page{i}", text=text), config))
             for j, (kind, value) in enumerate(_field_and_annot_texts(page)):
                 findings.extend(detect_unit(analyzer, TextUnit(id=f"page{i}|{kind}|{j}", text=value), config))
+            for j, link in enumerate(_link_uris(page)):
+                findings.extend(detect_unit(analyzer, TextUnit(id=f"page{i}|link|{j}", text=link["uri"]), config))
     finally:
         doc.close()
     return findings
@@ -197,6 +212,14 @@ def apply(path: Path, out_path: Path, decisions: dict, analyzer, config, mapping
                     if new != content:
                         a.set_info(content=new)
                         a.update()
+            # Link TARGETS: the URI is a separate annotation object, invisible to
+            # both the content stream and apply_redactions, so it must be rewritten
+            # explicitly -- otherwise mailto:<name>@bank.de survives a "verified" file.
+            for link in _link_uris(page):
+                new = _redact_value(link["uri"], analyzer, config, decisions, mapping_store)
+                if new != link["uri"]:
+                    link["uri"] = new
+                    page.update_link(link)
 
             # 2) Body text -> redaction rects from detected offsets.
             if text.strip():

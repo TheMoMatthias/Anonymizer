@@ -11,7 +11,13 @@ from ..core import detect_unit
 from ..models import TextUnit
 from pptx.oxml.ns import qn
 
-from .run_replace import XmlRunAdapter, apply_findings_to_runs, runs_text_and_spans
+from .run_replace import (
+    XmlRunAdapter,
+    apply_aux_parts,
+    apply_findings_to_runs,
+    aux_text_units,
+    runs_text_and_spans,
+)
 
 
 class _BreakRun:
@@ -98,6 +104,9 @@ def extract_text_units(path: Path) -> list[TextUnit]:
         if text.strip():
             units.append(TextUnit(id=f"p{i}", text=text))
     units.extend(_extract_comment_units(path))
+    # Surfaces python-pptx's shape walk never reaches: external hyperlink TARGETS,
+    # chart part text, and a chart's embedded source workbook (see run_replace).
+    units.extend(aux_text_units(path))
     return units
 
 
@@ -136,6 +145,7 @@ def apply(path: Path, out_path: Path, decisions: dict, analyzer, config, mapping
         apply_findings_to_runs(runs, findings, decisions, mapping_store)
     prs.save(out_path)
     _apply_comments(out_path, analyzer, config, decisions, mapping_store)
+    apply_aux_parts(out_path, analyzer, config, decisions, mapping_store)
 
 
 def _apply_comments(path: Path, analyzer, config, decisions: dict, mapping_store) -> None:

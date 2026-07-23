@@ -3,7 +3,7 @@ import zipfile
 from pptx import Presentation
 
 from anonymizer.formats import pptx_handler
-from anonymizer.pipeline import apply_document, scan_document
+from anonymizer.pipeline import _output_text_blob, apply_document, scan_document
 
 _MODERN_COMMENT = (
     '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
@@ -97,6 +97,47 @@ def test_pptx_line_break_does_not_misalign_redaction(tmp_path, analyzer, base_co
         for para in sh.text_frame.paragraphs for run in para.runs
     )
     assert "DE89370400440532013000" not in body
+
+
+def test_pptx_chart_text_does_not_survive(tmp_path, analyzer, base_config, mapping_db_path):
+    """FALSE-CLEAN (B1c): a chart's title and its cached category labels live in
+    ppt/charts/chart1.xml (and the embedded source workbook), which python-pptx's
+    shape walk never reaches. The value was therefore never scanned, never
+    removed and never re-checked -- apply reported the file verified while the
+    IBAN was still sitting in the chart."""
+    from pptx import Presentation as _P
+    from pptx.chart.data import CategoryChartData
+    from pptx.enum.chart import XL_CHART_TYPE
+    from pptx.util import Inches
+
+    iban = "DE89370400440532013000"
+    prs = _P()
+    slide = prs.slides.add_slide(prs.slide_layouts[6])  # blank
+    data = CategoryChartData()
+    data.categories = [f"Konto {iban}", "Sammelkonto"]
+    data.add_series("Umsatz", (1.0, 2.0))
+    graphic_frame = slide.shapes.add_chart(
+        XL_CHART_TYPE.COLUMN_CLUSTERED, Inches(1), Inches(1), Inches(6), Inches(4), data
+    )
+    chart = graphic_frame.chart
+    chart.has_title = True
+    chart.chart_title.text_frame.text = f"Depot {iban}"
+    path = tmp_path / "chart.pptx"
+    prs.save(path)
+
+    grouped = scan_document(path, analyzer, base_config).all_actionable()
+    assert any(iban in g.value.replace(" ", "") for g in grouped), "chart text must be surfaced for review"
+    for g in grouped:
+        g.action = "anonymize"
+    out_path, _ = apply_document(path, grouped, analyzer, base_config, mapping_db_path)
+
+    with zipfile.ZipFile(out_path) as zf:
+        leaking = [n for n in zf.namelist() if iban.encode() in zf.read(n)]
+    assert leaking == [], f"IBAN survived in chart parts: {leaking}"
+    # The chart's source data is a WHOLE OOXML package nested inside a compressed
+    # part, so the byte check above cannot see into it -- _output_text_blob now
+    # descends, which is what makes the backstop able to fail loud on it.
+    assert iban not in _output_text_blob(out_path), "IBAN survived in the embedded chart workbook"
 
 
 def test_pptx_para_run_text_preserves_line_break_boundary():

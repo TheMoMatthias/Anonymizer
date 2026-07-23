@@ -5,10 +5,22 @@ from nicegui import ui
 from .. import audit as audit_mod
 from .. import config as config_mod
 from .. import ocr as ocr_mod
-from ..mapping import MappingStore
+from ..mapping import MappingError, MappingStore
 from . import theme
 
 ACTIONS = ["pseudonymize", "anonymize", "skip"]
+
+
+def _notify_mapping_error(exc: MappingError) -> None:
+    """Surface a mapping-store failure to the operator.
+
+    Every MappingError is deliberately fail-loud, but a loud failure that reaches
+    no human is not fail-loud: this ships as an air-gapped kiosk, so a traceback
+    in a server log nobody reads is indistinguishable from "nothing happened".
+    The toast is the only channel there is, so it carries the store's own message
+    verbatim -- those messages say what to do next (wait for the running save,
+    restore the credential)."""
+    ui.notify(str(exc), type="negative", timeout=10000)
 
 
 def build() -> None:
@@ -26,7 +38,16 @@ def build() -> None:
         # otherwise persist a stale (missing a just-typed deny term = a leak next scan).
         for hook in flush_hooks:
             hook()
-        config_mod.save_config(cfg)
+        try:
+            config_mod.save_config(cfg)
+        except Exception as exc:  # noqa: BLE001
+            # save_config also writes the ENCRYPTED allow/deny sidecar, so it can
+            # fail on the credential store. NiceGUI routes a handler exception to
+            # app.handle_exception and carries on, so without this the operator got
+            # NO toast and walked away believing a just-added deny term was
+            # persisted -- a leak on the next scan.
+            ui.notify(f"Settings were NOT saved: {exc}", type="negative", timeout=10000)
+            return
         ui.notify("Settings saved. Restart the app to apply detection changes.", type="positive")
 
     ui.button("Save settings", icon="save", on_click=save).props("color=primary")
@@ -200,12 +221,29 @@ def _mapping_admin() -> None:
         with ui.row().classes("items-center gap-2"):
             ui.icon("key", size="1.2rem").style(f"color:{theme.WARNING}")
             ui.label("Pseudonym mapping (sensitive)").classes("az-h2")
-        with MappingStore() as store:
-            count = store.entry_count()
-        ui.label(
-            f"{count} stored mapping(s). This is the reversible re-identification store — handle with care. "
-            "All actions here are written to the audit log."
-        ).classes("az-muted text-xs mb-2")
+        # The store takes an EXCLUSIVE lock for its whole lifetime and gives up
+        # after a bounded wait, so simply opening Settings while an apply is
+        # running (minutes, same process via run.io_bound) raises here -- at PAGE
+        # BUILD time. Unhandled, that aborted the render and left a half-drawn
+        # page with no message at all. Degrade to a visible error instead: the
+        # rest of the card still renders, and every action below re-opens the
+        # store and reports its own failure.
+        count: int | None = None
+        try:
+            with MappingStore() as store:
+                count = store.entry_count()
+        except MappingError as exc:
+            _notify_mapping_error(exc)
+            ui.label(str(exc)).classes("text-xs mb-2").style(f"color:{theme.NEGATIVE}")
+            ui.label(
+                "The mapping could not be opened, so the stored-mapping count is unknown. If a document "
+                "is currently being saved, wait for it to finish and reopen this page."
+            ).classes("az-muted text-xs mb-2")
+        else:
+            ui.label(
+                f"{count} stored mapping(s). This is the reversible re-identification store — handle with care. "
+                "All actions here are written to the audit log."
+            ).classes("az-muted text-xs mb-2")
 
         erase_input = ui.input(label="Placeholder to erase (e.g. PERSON_3)").props("dense outlined").classes("w-72")
 
@@ -213,8 +251,12 @@ def _mapping_admin() -> None:
             token = (erase_input.value or "").strip().strip("[]")
             if not token:
                 return
-            with MappingStore() as store:
-                ok = store.erase(token)
+            try:
+                with MappingStore() as store:
+                    ok = store.erase(token)
+            except MappingError as exc:
+                _notify_mapping_error(exc)  # nothing was erased -- never imply it was
+                return
             audit_mod.log_event("mapping.erase", token if ok else f"{token} (not found)")
             ui.notify(f"Erased {token}." if ok else f"No mapping for {token}.", type="positive" if ok else "warning")
             erase_input.value = ""
@@ -231,17 +273,35 @@ def _mapping_admin() -> None:
                         on_yes()
 
                     ui.button("Confirm", on_click=go).props("color=negative")
+            # NiceGUI parents every dialog on client.layout, not on the slot it was
+            # written in, so one built per click would live for the whole session.
+            dlg.on_value_change(lambda e: dlg.delete() if not e.value else None)
             dlg.open()
 
         def do_reset() -> None:
-            with MappingStore() as store:
-                store.reset()
-            audit_mod.log_event("mapping.reset", f"{count} entries wiped")
-            ui.notify("Mapping reset. New tokens will restart from 1.", type="positive")
+            try:
+                with MappingStore() as store:
+                    # NOT restart_numbering=True: a number already printed in an
+                    # archived document must never be re-issued to someone else.
+                    store.reset()
+            except MappingError as exc:
+                _notify_mapping_error(exc)  # nothing was wiped -- never imply it was
+                return
+            audit_mod.log_event("mapping.reset", f"{count if count is not None else 'unknown'} entries wiped")
+            ui.notify(
+                "Mapping reset. Numbering deliberately continues, so a number already printed in an "
+                "archived document is never re-issued to someone else.",
+                type="positive",
+                timeout=8000,
+            )
 
         def do_rotate() -> None:
-            with MappingStore() as store:
-                store.rotate_key()
+            try:
+                with MappingStore() as store:
+                    store.rotate_key()
+            except MappingError as exc:
+                _notify_mapping_error(exc)
+                return
             audit_mod.log_event("mapping.rotate_key")
             ui.notify("Encryption key rotated.", type="positive")
 
@@ -253,7 +313,8 @@ def _mapping_admin() -> None:
                 on_click=lambda: confirm(
                     "Reset all mappings?",
                     "Every pseudonym is deleted. Already-anonymized documents can no longer be re-identified. "
-                    "This cannot be undone.",
+                    "Numbering deliberately continues where it left off, so a number already printed in an "
+                    "archived document is never handed to a different person. This cannot be undone.",
                     do_reset,
                 ),
             ).props("flat")

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import re
 import shutil
 import subprocess
 import tempfile
@@ -16,7 +17,7 @@ from .. import profiles as profiles_mod
 from ..actions import reidentify_text
 from ..core import build_preview
 from ..engine import build_analyzer
-from ..mapping import MappingStore
+from ..mapping import MappingError, MappingStore
 from ..models import FileJob
 from ..pipeline import SUPPORTED_EXTENSIONS, ProcessingError, apply_document, scan_document, sniff_language
 from . import review, settings_page, theme
@@ -356,9 +357,9 @@ def _render_queue(container, state: PageState, select_job) -> None:
                             icon="save",
                             on_click=lambda: state.save_all(),  # type: ignore[attr-defined]
                         ).props("dense color=primary").classes("text-xs")
-                    ui.button("Clear", icon="clear_all", on_click=lambda: _clear(state)).props("flat dense").classes(
-                        "text-xs"
-                    )
+                    ui.button("Clear", icon="clear_all", on_click=lambda: _confirm_clear(state)).props(
+                        "flat dense"
+                    ).classes("text-xs")
             for i, job in enumerate(state.jobs):
                 selected = i == state.selected
                 border = f"border-left:3px solid {theme.PRIMARY};" if selected else "border-left:3px solid transparent;"
@@ -459,14 +460,62 @@ def _render_work(container, state: PageState) -> None:
             )
 
 
+# Mirrors xlsx_handler._COLUMN_BLACKOUT_ACTIONS -- the ONLY policy values `apply`
+# acts on. Anything else (notably "none") leaves the column to per-value review.
+_COLUMN_BLACKOUT_ACTIONS = ("pseudonymize", "anonymize")
+
+
+def _autodispose(dialog):
+    """Delete a dialog once it closes.
+
+    NiceGUI parents every dialog on `client.layout`, not on the slot it was
+    written in, so a dialog built per click is never reclaimed by the surrounding
+    re-render. This app runs as a single long-lived native-webview session (a full
+    working day of triage), so per-click dialogs accumulate for the whole run."""
+    dialog.on_value_change(lambda e: dialog.delete() if not e.value else None)
+    return dialog
+
+
 def _preview_dialog(job: FileJob) -> None:
     groups = build_preview(job.scan.groups)
+    # Whole-column policies are applied at APPLY time by the xlsx handler, not
+    # through the per-value decisions build_preview walks -- so they used to be
+    # invisible here, leaving the reviewer's single highest-impact decision
+    # unpreviewable. Worse, a workbook whose per-value decisions were all "skip"
+    # previewed as "nothing selected for redaction" while the save was about to
+    # black out an entire column. A preview that contradicts the save is worse
+    # than no preview at all -- which cuts BOTH ways, so only the policy values
+    # `apply` actually acts on are listed: rendering a "none" entry as a blackout
+    # would have the preview positively assert that every non-empty cell of a
+    # column Save does not touch is replaced, i.e. OVER-promise redaction.
+    policies = {
+        key: action
+        for key, action in ((job.config or {}).get("column_policies") or {}).items()
+        if action in _COLUMN_BLACKOUT_ACTIONS
+    }
+    columns = {c.key: c for c in (job.scan.columns or [])}
     with ui.dialog() as dialog, ui.element("div").classes("az-card").style("max-width:720px;width:92vw"):
         ui.label("Preview — what Save will change").classes("az-h2")
-        if not groups:
+        if not groups and not policies:
             ui.label("Nothing selected for redaction (all set to skip).").classes("az-muted text-sm mt-2")
         else:
             with ui.column().classes("w-full gap-3 az-scroll mt-2"):
+                if policies:
+                    ui.label("Whole-column policies").classes("az-kicker mt-1")
+                    ui.label(
+                        "Every non-empty cell in these columns is replaced — including cells where nothing "
+                        "was detected — and that overrides the per-value decisions below for those cells."
+                    ).classes("az-muted text-xs")
+                    for key, action in sorted(policies.items()):
+                        col = columns.get(key)
+                        with ui.row().classes("az-row items-center gap-2 w-full py-1"):
+                            title = f"{key} · {col.header}" if col is not None and col.header else key
+                            ui.label(title).classes("az-mono text-sm flex-grow truncate").tooltip(
+                                col.sample if col is not None and col.sample else title
+                            )
+                            ui.label("every non-empty cell").classes("az-muted text-xs")
+                            ui.icon("arrow_forward", size="1rem").classes("az-muted")
+                            theme.chip(action, theme.ACTION_COLORS.get(action, theme.SECONDARY))
                 for pg in groups:
                     ui.label(pg.display).classes("az-kicker mt-1")
                     for r in pg.rows:
@@ -476,7 +525,7 @@ def _preview_dialog(job: FileJob) -> None:
                             theme.chip(r.token, theme.ACTION_COLORS.get(r.action, theme.SECONDARY))
         with ui.row().classes("w-full justify-end mt-3"):
             ui.button("Close", on_click=dialog.close).props("flat")
-    dialog.open()
+    _autodispose(dialog).open()
 
 
 async def _ask_language(n: int) -> str:
@@ -567,6 +616,38 @@ async def _save_job(state: PageState, job: FileJob) -> None:
     state.refresh()  # type: ignore[attr-defined]
 
 
+def _confirm_clear(state: PageState) -> None:
+    """Gate the queue wipe behind a confirmation.
+
+    "Clear" sits one flat button away from "Save all", and clearing throws away
+    every review decision in the queue -- potentially an hour of triage over
+    thousands of findings on a database workbook. There is nothing to undo with
+    afterwards (the decisions live only in the in-memory ScanResult), so the click
+    itself has to be the gate."""
+    if not state.jobs:
+        _clear(state)  # nothing to lose -- don't nag
+        return
+    unsaved = sum(1 for j in state.jobs if j.status != "done")
+    with ui.dialog() as dlg, ui.element("div").classes("az-card").style("max-width:460px"):
+        ui.label("Clear the queue?").classes("az-h2")
+        message = f"This removes all {len(state.jobs)} file(s) from the queue."
+        if unsaved:
+            message += (
+                f" {unsaved} of them are not saved yet — their review decisions are discarded and "
+                "cannot be recovered."
+            )
+        ui.label(message).classes("az-muted text-sm my-2")
+
+        def confirm() -> None:
+            dlg.close()
+            _clear(state)
+
+        with ui.row().classes("w-full justify-end gap-2"):
+            ui.button("Cancel", on_click=dlg.close).props("flat")
+            ui.button("Clear queue", on_click=confirm).props("color=negative")
+    _autodispose(dlg).open()
+
+
 def _clear(state: PageState) -> None:
     for job in state.jobs:
         _discard_working_copy(job)  # remove staged raw-PII copies, not user originals
@@ -588,6 +669,49 @@ def settings_page_route() -> None:
             ui.button("Back", icon="arrow_back", on_click=lambda: ui.navigate.to("/")).props("flat dense")
     with ui.column().classes("w-full max-w-5xl mx-auto gap-4 p-4"):
         settings_page.build()
+
+
+# Counting pseudonym-shaped tokens must use a SUPERSET of `actions.TOKEN_RE`, never
+# TOKEN_RE itself. TOKEN_RE's label class is [A-Z0-9_], so a token minted from a
+# non-ASCII label -- `[PRÜFUNG_1]` from a German spreadsheet header -- does not match
+# it. Counting with TOKEN_RE therefore made the ONE case that actually produces an
+# unreversible document the case the warning could not see: a text of nothing but
+# such tokens reported "nothing to restore", and a mixed text reported a full green
+# success over a restore that left live unreversible tokens behind. Minting these is
+# now blocked upstream, but re-identification exists to serve documents ALREADY
+# archived, so the counter must still recognise them.
+_SHAPED_PLACEHOLDER_RE = re.compile(r"\[[^\[\]]*_\d+\]")
+
+
+def _reidentify_notice(source: str, restored: int) -> tuple[str, str]:
+    """The toast for a re-identify run: (message, notify type).
+
+    A restore that reversed nothing is a FAILURE, not a neutral outcome. The old
+    `positive if n else info` reported "Restored 0 value(s)." as a friendly info
+    toast while the user was still holding a document full of [PERSON_1] tokens --
+    silent data loss dressed as success. So the source text is counted for
+    pseudonym-SHAPED tokens and any shortfall is named as a warning.
+
+    Over-warning is the safe direction here and is deliberate: a bracketed
+    reference that was never one of our tokens ("Anlage [ABS_12]") raises a
+    warning that the message itself accounts for, whereas under-warning hands the
+    user an incompletely restored document with a green tick."""
+    shaped = len(_SHAPED_PLACEHOLDER_RE.findall(source))
+    unrestored = shaped - restored
+    if unrestored > 0:
+        return (
+            f"Restored {restored} of {shaped} placeholder(s) — {unrestored} could NOT be restored and are "
+            "still in the text. Those tokens have no entry in this mapping (it was reset or erased, this is "
+            "a different machine's mapping, the token was never reversible, or it was never one of ours). "
+            "Do not treat the result as complete.",
+            "warning",
+        )
+    if shaped:
+        return f"Restored {restored} value(s).", "positive"
+    # One-way tokens ([PERSON], [NOTIZEN_2_REDACTED]) are deliberately absent from
+    # the count, so say REVERSIBLE rather than claiming the text holds no
+    # placeholder at all -- the user can see the brackets on screen.
+    return "No reversible placeholder tokens found in this text — nothing to restore.", "info"
 
 
 @ui.page("/reidentify")
@@ -622,12 +746,23 @@ def reidentify_route() -> None:
 
                 def run_it() -> None:
                     dlg.close()
-                    with MappingStore() as store:
-                        restored, n = reidentify_text(text, store)
+                    try:
+                        with MappingStore() as store:
+                            restored, n = reidentify_text(text, store)
+                    except MappingError as exc:
+                        # The store is exclusive-locked for its whole lifetime, so
+                        # opening this while a document is being saved fails after a
+                        # bounded wait. Unhandled it was an invisible traceback on a
+                        # kiosk; the user must be told nothing was restored.
+                        ui.notify(str(exc), type="negative", timeout=10000)
+                        return
                     audit_mod.log_event("reidentify", f"{n} token(s) un-masked")
                     result_box.value = restored
                     result_box.visible = True
-                    ui.notify(f"Restored {n} value(s).", type="positive" if n else "info")
+                    message, kind = _reidentify_notice(text, n)
+                    # A warning here is the user's ONLY signal that the restore is
+                    # incomplete, so give them time to read it.
+                    ui.notify(message, type=kind, timeout=12000 if kind == "warning" else 5000)
 
                 with ui.dialog() as dlg, ui.element("div").classes("az-card").style("max-width:460px"):
                     ui.label("Re-identify this text?").classes("az-h2")

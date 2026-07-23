@@ -18,10 +18,11 @@ from . import theme
 
 ACTIONS = ["pseudonymize", "anonymize", "skip"]
 
-# Compact labels + the Quasar brand colour each action lights up in. A segmented
-# toggle (not a dropdown) keeps every row's decision visible at a glance and one
-# click to change -- with a column of dropdowns you cannot scan what will happen
-# to each value without opening them one by one.
+# Compact labels + the Quasar brand colour each action lights up in. A PER-VALUE
+# row uses a segmented toggle (not a dropdown): it shows that row's live decision
+# at a glance and takes one click to change -- with a column of dropdowns you
+# cannot scan what will happen to each value without opening them one by one.
+# A BULK control is never a toggle; it is a row of buttons (see _bulk_buttons).
 _ACTION_LABELS = {"pseudonymize": "Pseudonym", "anonymize": "Anonymize", "skip": "Skip"}
 _ACTION_QCOLOR = {"pseudonymize": "primary", "anonymize": "negative", "skip": "grey-7"}
 
@@ -49,6 +50,27 @@ def _action_toggle(initial: str):
     return tog, paint
 
 
+def _bulk_buttons(apply: Callable[[str], None]) -> None:
+    """A bulk control is an ACTION, never a stateful value.
+
+    Every bulk control here used to be a segmented ui.toggle seeded with the
+    current DOMINANT action -- and picking the value it was already showing did
+    nothing at all. Two layers swallow it: Quasar's QBtnToggle emits
+    `update:modelValue` only when the clicked value DIFFERS from the displayed one
+    (`set2()` in quasar.umd.js; a non-clearable toggle drops the click entirely),
+    and NiceGUI's BindableProperty returns before running any change handler when
+    the assignment is unchanged (binding.py). So the reviewer saw "Pseudonym"
+    highlighted, clicked it to push it across the class/tier/overflow, and every
+    row that DIFFERED silently kept its old action -- a document shipped in the
+    clear while the screen said it was covered. A button carries no value, so it
+    fires on every click.
+    """
+    for action in ACTIONS:
+        ui.button(_ACTION_LABELS[action], on_click=lambda a=action: apply(a)).props(
+            f"flat dense no-caps color={_ACTION_QCOLOR[action]}"
+        ).classes("text-xs px-1")
+
+
 def _class_card(dcg, on_change: Callable, expanded: set, rerender: Callable) -> None:
     review_items = dcg.review_items
     auto_items = dcg.high_tier_items
@@ -59,6 +81,16 @@ def _class_card(dcg, on_change: Callable, expanded: set, rerender: Callable) -> 
     shown_auto = auto_items if cap is None else auto_items[:cap]
     over_auto = auto_items[len(shown_auto):]
 
+    selects: list = []
+
+    def bulk_apply(action: str) -> None:
+        for g in dcg.items:  # EVERY value in the class, incl. capped-out overflow + auto
+            g.action = action
+        for g, tog, paint in selects:  # sync only the toggles actually on screen
+            tog.set_value(action)
+            paint()
+        on_change()
+
     with ui.element("div").classes("az-card w-full"):
         # Header: category + bulk action for the whole class.
         with ui.row().classes("items-center gap-3 w-full"):
@@ -68,7 +100,12 @@ def _class_card(dcg, on_change: Callable, expanded: set, rerender: Callable) -> 
                     theme.sensitivity_chip(dcg.sensitivity)
                 caption = f"{dcg.count} occurrence(s)"
                 if review_items:
-                    caption += f" · {len(review_items)} to review"
+                    # "uncertain", not "to review": this counts values BELOW the
+                    # high-confidence bar, and nothing in the model records that a
+                    # value has been looked at -- so it never drops as the reviewer
+                    # works, and calling it a to-do would make the card contradict
+                    # its own decided rows.
+                    caption += f" · {len(review_items)} uncertain"
                 if auto_items:
                     caption += f" · {len(auto_items)} auto-accepted"
                 ui.label(caption).classes("az-muted text-xs")
@@ -79,20 +116,7 @@ def _class_card(dcg, on_change: Callable, expanded: set, rerender: Callable) -> 
             ui.label(f"Set all {len(dcg.items)}:").classes("az-muted text-xs").tooltip(
                 "Applies to every value in this category, including hidden overflow and auto-accepted ones."
             )
-            bulk, bulk_paint = _action_toggle(_dominant_action(dcg.items))
-
-        selects: list = []
-
-        def bulk_apply() -> None:
-            bulk_paint()
-            for g in dcg.items:  # EVERY value in the class, incl. capped-out overflow + auto
-                g.action = bulk.value
-            for g, tog, paint in selects:  # sync only the toggles actually on screen
-                tog.set_value(bulk.value)
-                paint()
-            on_change()
-
-        bulk.on_value_change(bulk_apply)
+            _bulk_buttons(bulk_apply)
 
         # Review-tier items first (the ones that actually need attention), capped.
         if review_items:
@@ -120,14 +144,13 @@ def _overflow_row(items: list, key: str, expanded: set, rerender: Callable, on_c
     with ui.row().classes("az-row items-center gap-3 w-full py-1 px-1"):
         ui.label(f"+ {len(items)} more value(s) not shown").classes("az-muted text-xs flex-grow")
         ui.label("set these to:").classes("az-muted text-xs")
-        tog = ui.toggle(_ACTION_LABELS, value=_dominant_action(items)).props("dense unelevated no-caps")
 
-        def set_overflow(_e=None, items=items, t=tog) -> None:
-            for g in items:
-                g.action = t.value
+        def set_overflow(action: str, items=items) -> None:
+            for g in items:  # the whole summarized overflow, none of it on screen
+                g.action = action
             on_change()
 
-        tog.on_value_change(set_overflow)
+        _bulk_buttons(set_overflow)
 
         def show_all(k=key) -> None:
             expanded.add(k)
@@ -167,13 +190,6 @@ def _capture_row(g: GroupedFinding, on_change: Callable) -> list:
     return captured
 
 
-def _dominant_action(items: list[GroupedFinding]) -> str:
-    counts: dict[str, int] = {}
-    for g in items:
-        counts[g.action] = counts.get(g.action, 0) + 1
-    return max(counts, key=counts.get) if counts else "pseudonymize"
-
-
 def render_review(container, result: ScanResult, on_change: Callable, column_policies: dict | None = None) -> None:
     container.clear()
     with container:
@@ -181,20 +197,28 @@ def render_review(container, result: ScanResult, on_change: Callable, column_pol
             ui.label("No sensitive data detected in this document.").classes("az-muted")
             return
 
-        _stat_bar(result)
+        refresh_stats = _stat_bar(result)
+
+        def decided() -> None:
+            """A decision changed in place. The header is derived from the live
+            decisions, so it has to be redrawn here: the per-class bulk and the
+            per-value toggles deliberately do NOT re-render (a class can hold
+            thousands of live toggles), so nothing else would refresh it."""
+            refresh_stats()
+            on_change()
 
         # Whole-column policies (spreadsheets) -- the fastest lever at scale: one
         # decision per column instead of thousands per value.
         if result.columns and column_policies is not None:
             _columns_panel(result, column_policies, container, on_change)
 
-        # Global bulk actions.
+        # Global bulk actions. Uses _bulk_buttons like every other bulk surface:
+        # four bulk controls speaking two vocabularies ("skip" here vs "Skip"
+        # there) is a misreading waiting to happen on the one screen whose whole
+        # point is that the reviewer must not misread a control.
         with ui.row().classes("items-center gap-2 w-full"):
             ui.label("Apply to everything:").classes("az-muted text-xs")
-            for action in ACTIONS:
-                ui.button(
-                    action, on_click=lambda a=action: _set_all(result, a, container, on_change, column_policies)
-                ).props("flat dense").classes("text-xs")
+            _bulk_buttons(lambda a: _set_all(result, a, container, on_change, column_policies))
 
         # By-confidence bulk bands: accept high, review medium, glance-and-decide low.
         _tier_bands(result, container, on_change, column_policies)
@@ -211,7 +235,11 @@ def render_review(container, result: ScanResult, on_change: Callable, column_pol
 
         with ui.column().classes("w-full gap-3 az-scroll pr-1"):
             for dcg in result.groups:
-                _class_card(dcg, on_change, result._expanded_classes, rerender)
+                # `decided`, not `on_change`: these paths mutate without re-rendering.
+                # The bulk paths above (global / tier band) re-render the whole screen,
+                # which rebuilds the header anyway -- and a stale `decided` captured by
+                # the PREVIOUS render would try to redraw a row that no longer exists.
+                _class_card(dcg, decided, result._expanded_classes, rerender)
 
             if result.possible_misses:
                 _possible_misses_card(result.possible_misses)
@@ -281,12 +309,11 @@ def _tier_bands(result: ScanResult, container, on_change: Callable, column_polic
                 continue
             with ui.row().classes("items-center gap-1"):
                 ui.label(f"{label} ({len(gs)})").classes("az-muted text-xs")
-                tog = ui.toggle(_ACTION_LABELS, value=_dominant_action(gs)).props("dense unelevated no-caps")
 
-                def apply(_e=None, tier=tier, t=tog) -> None:
-                    _set_all_tier(result, tier, t.value, container, on_change, column_policies)
+                def apply(action: str, tier=tier) -> None:
+                    _set_all_tier(result, tier, action, container, on_change, column_policies)
 
-                tog.on_value_change(apply)
+                _bulk_buttons(apply)
 
 
 def _set_all(result: ScanResult, action: str, container, on_change: Callable, column_policies: dict | None = None) -> None:
@@ -306,21 +333,54 @@ def _set_all_tier(
     on_change()
 
 
-def _stat_bar(result: ScanResult) -> None:
-    """"To review" is the reviewer's actual workload, so it is the hero; the
-    other three are context and are demoted."""
-    s = result.stats
-    with ui.row().classes("az-card w-full items-center justify-around gap-4"):
-        _stat(s.get("needs_review", 0), "to review", theme.WARNING, hero=True)
-        _stat(s.get("auto_accept", 0), "auto-accepted", theme.PRIMARY)
-        _stat(s.get("distinct_findings", 0), "distinct findings")
-        _stat(s.get("possible_misses", 0), "possible misses", theme.SECONDARY)
+def _stat_bar(result: ScanResult) -> Callable[[], None]:
+    """The uncertain findings are what the reviewer's attention is for, so that
+    tile is the hero; the other three are context and are demoted. Returns a
+    redraw callback.
+
+    The numbers are derived from the LIVE findings, never from the frozen scan
+    stats dict. "auto-accepted" is a decision word: read once at render time it
+    kept advertising values as accepted after the reviewer had bulk-set them to
+    skip -- and the header is the last thing they read before pressing Save.
+
+    The hero tile is labelled "uncertain", NOT "to review". It counts findings
+    below the high-confidence bar, which is a property of DETECTION, not of the
+    reviewer's progress -- no per-item "reviewed" flag exists anywhere in the
+    model. Worded as a to-do it kept advertising outstanding workload after every
+    one of those values had been bulk-decided, i.e. the header contradicted the
+    list right underneath it.
+    """
+    row = ui.row().classes("az-card w-full items-center justify-around gap-4")
+
+    def draw() -> None:
+        row.clear()
+        items = result.all_actionable()
+        # A pre-decided value the reviewer has since skipped is no longer accepted.
+        accepted = sum(1 for g in items if g.tier == "high" and g.action != "skip")
+        uncertain = sum(1 for g in items if g.tier != "high")
+        with row:
+            _stat(
+                uncertain,
+                "uncertain",
+                theme.WARNING,
+                hero=True,
+                tip="Findings below the high-confidence bar — worth a look. This is a detection count, "
+                "so it does not fall as you decide them.",
+            )
+            _stat(accepted, "auto-accepted", theme.PRIMARY)
+            _stat(len(items), "distinct findings")
+            _stat(len(result.possible_misses), "possible misses", theme.SECONDARY)
+
+    draw()
+    return draw
 
 
-def _stat(n: int, label: str, color: str | None = None, *, hero: bool = False) -> None:
-    with ui.element("div").classes("az-stat" + (" az-stat-hero" if hero else "")):
+def _stat(n: int, label: str, color: str | None = None, *, hero: bool = False, tip: str | None = None) -> None:
+    with ui.element("div").classes("az-stat" + (" az-stat-hero" if hero else "")) as tile:
         ui.label(str(n)).classes("n").style(f"color:{color}" if color else "")
         ui.label(label).classes("l")
+    if tip:
+        tile.tooltip(tip)
 
 
 def _possible_misses_card(misses: list[GroupedFinding]) -> None:

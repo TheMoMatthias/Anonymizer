@@ -103,6 +103,41 @@ def de_steuer_id_valid(value: str) -> bool:
     return check == int(digits[10])
 
 
+# German Sozialversicherungsnummer (DRV Versicherungsnummer), 12 characters:
+#   BB TTMMJJ A SS P
+#   Bereichsnummer(2) Geburtsdatum(6, TTMMJJ) Anfangsbuchstabe(1) Serie(2) Prüfziffer(1)
+_SV_RE = re.compile(r"(\d{2})(\d{6})([A-Z])(\d{2})(\d)")
+# Official DRV weighting, applied to the 12 digits you get after replacing the
+# letter with its two-digit ordinal (A=01 ... Z=26). Twelve weights, not ten --
+# the letter expands to TWO digits, which is easy to miss and yields a validator
+# that rejects every real number.
+_SV_WEIGHTS = (2, 1, 2, 5, 7, 1, 2, 1, 2, 1, 2, 1)
+
+
+def de_sv_nummer_valid(value: str) -> bool:
+    """German social-security number checksum (mod 10 over the digit sums of the
+    weighted digits), plus the two structural rules that make a CONTEXT-FREE
+    match safe: the embedded DDMMYY must be a possible date, and the
+    Bereichsnummer must be in the issued 02-89 band. Together these are what let
+    a bare SV number in its own spreadsheet column be trusted without a nearby
+    "SV-Nummer" label -- which is the only shape it has in an HR workbook."""
+    compact = re.sub(r"[\s.\-/]", "", value).upper()
+    m = _SV_RE.fullmatch(compact)
+    if not m:
+        return False
+    bereich, birth, letter, serial, check = m.groups()
+    if not 2 <= int(bereich) <= 89:
+        return False
+    day, month = int(birth[:2]), int(birth[2:4])
+    if not (1 <= day <= 31 and 1 <= month <= 12):
+        return False
+    # Letter -> two digits, giving the 12-digit body the weights apply to.
+    body = bereich + birth + f"{ord(letter) - 64:02d}" + serial
+    # Quersumme of each product: products are at most 63, so divmod(_, 10) is it.
+    total = sum(sum(divmod(int(d) * w, 10)) for d, w in zip(body, _SV_WEIGHTS))
+    return total % 10 == int(check)
+
+
 # entity_type -> validator callable. BIC_CODE is deliberately NOT here: putting
 # it in VALIDATORS would let _refine promote any BIC-shaped word with a valid
 # country-code substring (DOKUMENT -> "ME", Anfragen -> "AG") to auto-accept,
@@ -112,6 +147,7 @@ VALIDATORS = {
     "IBAN_CODE": iban_valid,
     "CREDIT_CARD": luhn_valid,
     "DE_STEUER_ID": de_steuer_id_valid,
+    "DE_SV_NUMMER": de_sv_nummer_valid,
 }
 
 

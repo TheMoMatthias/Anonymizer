@@ -78,6 +78,54 @@ _ANCHORED_NAME_PATTERNS = [
     Pattern(name="labelled_name", regex=rf"(?<=\b{_NAME_LABELS}\s*:\s*){_NAME}", score=0.70),
 ]
 
+# German system exports routinely transliterate umlauts (this repo's own fixtures
+# say "Mueller", not "Müller"), and a word-list recognizer written with umlauts
+# only silently misses every one of those spellings -- measured: 'arbeitsunfaehig',
+# 'Arbeitsunfaehigkeit', 'erwerbsunfaehig', 'berufsunfaehig' and 'juedisch' all
+# returned nothing while their umlaut spellings were caught. Hand-listing both
+# spellings of every term does not converge, so a recognizer opts in with
+# `umlaut_variants: true` and every umlaut in its patterns is expanded here.
+_UMLAUT_VARIANTS = {
+    "ä": "(?:ä|ae)", "ö": "(?:ö|oe)", "ü": "(?:ü|ue)", "ß": "(?:ß|ss)",
+    "Ä": "(?:Ä|Ae)", "Ö": "(?:Ö|Oe)", "Ü": "(?:Ü|Ue)",
+}
+
+
+def _expand_umlauts(pattern: str) -> str:
+    """Rewrites every umlaut in a regex as an (umlaut|transliteration) alternation.
+
+    Refuses to touch a pattern with an umlaut inside a CHARACTER CLASS: splicing
+    a group into `[a-zäöü]` would produce `[a-zä(?:ö|oe)ü]`, a regex that still
+    compiles and silently matches the wrong thing -- a redaction tool must not
+    have a way to fail quietly, so this fails loud at analyzer-build time instead.
+    """
+    out: list[str] = []
+    in_class = False
+    escaped = False
+    for ch in pattern:
+        if escaped:
+            out.append(ch)
+            escaped = False
+            continue
+        if ch == "\\":
+            out.append(ch)
+            escaped = True
+            continue
+        if ch == "[" and not in_class:
+            in_class = True
+        elif ch == "]" and in_class:
+            in_class = False
+        if ch in _UMLAUT_VARIANTS:
+            if in_class:
+                raise ValueError(
+                    f"umlaut_variants cannot expand {ch!r} inside a character class: {pattern!r}. "
+                    "Write the class with both spellings explicitly, or drop the flag."
+                )
+            out.append(_UMLAUT_VARIANTS[ch])
+            continue
+        out.append(ch)
+    return "".join(out)
+
 
 def build_analyzer(config: dict) -> AnalyzerEngine:
     """Builds the Presidio analyzer (spaCy NLP engine + recognizers). Detection
@@ -106,15 +154,33 @@ def build_analyzer(config: dict) -> AnalyzerEngine:
         for cls in _PORTABLE_PATTERN_RECOGNIZERS:
             analyzer.registry.add_recognizer(cls(supported_language=lang))
 
-    # Custom recognizers: register for EVERY supported language so a scan in any
-    # single language still catches the German bank identifiers (a German ID can
-    # appear in an otherwise-English document).
+    # Custom recognizers: by DEFAULT registered for every supported language, so a
+    # scan in any single language still catches the German bank identifiers (a
+    # German ID can appear in an otherwise-English document).
+    #
+    # A recognizer may opt OUT of that with `languages: [de]`. Cross-registration is
+    # right for STRUCTURAL patterns (an IBAN is an IBAN in any prose) but wrong for
+    # NATURAL-LANGUAGE word lists: the German Art. 9 lists fired on ordinary English
+    # financial vocabulary ("The Great Depression started in 1929" -> health data),
+    # and an Art. 9 finding is ONE-WAY anonymized, so that irreversibly destroyed
+    # text in an English document. The cost of the opt-out is the mirror case -- a
+    # German Art. 9 term inside a document routed to English is not seen -- which is
+    # the cheaper error: a missed German word in an English document still faces the
+    # completeness scan, while a wrongly one-way-redacted English word is gone.
     for rec_cfg in config.get("custom_recognizers", []):
-        patterns = [Pattern(name=rec_cfg["name"], regex=p["regex"], score=p["score"]) for p in rec_cfg["patterns"]]
+        regexes = [p["regex"] for p in rec_cfg["patterns"]]
+        if rec_cfg.get("umlaut_variants"):
+            regexes = [_expand_umlauts(r) for r in regexes]
+        patterns = [
+            Pattern(name=rec_cfg["name"], regex=regex, score=p["score"])
+            for regex, p in zip(regexes, rec_cfg["patterns"])
+        ]
         kwargs = {}
         if rec_cfg.get("case_sensitive"):
             kwargs["global_regex_flags"] = _CASE_SENSITIVE_FLAGS
-        for lang in languages:
+        only = rec_cfg.get("languages")
+        targets = [lang for lang in languages if not only or lang in only]
+        for lang in targets:
             analyzer.registry.add_recognizer(
                 PatternRecognizer(
                     supported_entity=rec_cfg["name"],

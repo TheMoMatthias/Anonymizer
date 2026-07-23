@@ -54,6 +54,34 @@ def test_pdf_annotation_content_is_scanned(tmp_path, analyzer, base_config):
     assert any(_IBAN in g.value for g in grouped), "annotation IBAN was not scanned"
 
 
+def test_pdf_link_target_uri_does_not_survive(tmp_path, analyzer, base_config, mapping_db_path):
+    """FALSE-CLEAN (B1b, PDF): a link annotation's TARGET URI is not in the content
+    stream, so get_text() -- and therefore the scan, the decisions and the output
+    re-scan -- never saw it. mailto:hans.mueller@bank.de shipped inside a document
+    the tool reported as verified."""
+    doc = fitz.open()
+    page = doc.new_page()
+    page.insert_text((72, 72), "Bitte nehmen Sie Kontakt mit uns auf.")
+    page.insert_link(
+        {"kind": fitz.LINK_URI, "from": fitz.Rect(70, 60, 300, 80), "uri": "mailto:hans.mueller@bank.de"}
+    )
+    path = tmp_path / "link.pdf"
+    doc.save(path)
+    doc.close()
+
+    grouped = scan_document(path, analyzer, base_config).all_actionable()
+    assert any("hans.mueller@bank.de" in g.value for g in grouped), "link target must be surfaced for review"
+    for g in grouped:
+        g.action = "anonymize"
+    out_path, _ = apply_document(path, grouped, analyzer, base_config, mapping_db_path)
+
+    out = fitz.open(out_path)
+    uris = [link.get("uri", "") for pg in out for link in pg.get_links()]
+    out.close()
+    assert not any("hans.mueller@bank.de" in (u or "") for u in uris), f"link target leaked: {uris}"
+    assert "hans.mueller@bank.de" not in _output_text_blob(out_path)
+
+
 def test_pdf_mixed_image_page_refused_without_ocr(tmp_path, analyzer, base_config, monkeypatch):
     """A PDF with a text page AND a scanned (large-image, no-text) page must fail
     loud when OCR is unavailable, not scan only the text page and ship the image

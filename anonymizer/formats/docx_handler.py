@@ -11,13 +11,78 @@ from lxml import etree
 from .. import xmlsafe
 from ..core import detect_unit
 from ..models import TextUnit
-from .run_replace import XmlRunAdapter, apply_findings_to_runs, runs_text_and_spans
+from .run_replace import (
+    XmlRunAdapter,
+    apply_aux_parts,
+    apply_findings_to_runs,
+    aux_text_units,
+    redact_text,
+    runs_text_and_spans,
+)
 
 W_NS = "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
 W = f"{{{W_NS}}}"
 EXTRA_PARTS = ["word/footnotes.xml", "word/endnotes.xml", "word/comments.xml"]
 
 EXTENSIONS = (".docx", ".doc")
+
+# --- Word FIELD CODES --------------------------------------------------------
+#
+# A field code is neither a w:t run nor a relationship, so python-docx's object
+# model never yields it and the scan never surfaced it -- the exact false-clean
+# condition: a value that enters no decision set can never be re-checked by the
+# literal backstop either. This is what mail-merge and template documents produce,
+# i.e. the common case in a bank:
+#
+#   { HYPERLINK "mailto:hans.mueller@bank.de" }   -> w:instrText runs
+#   { DOCPROPERTY "Kunde Hans Mueller" }          -> w:fldSimple/@w:instr
+#
+_INSTR_TEXT = f"{W}instrText"
+_FLD_SIMPLE = f"{W}fldSimple"
+_FLD_CHAR = f"{W}fldChar"
+_INSTR_ATTR = f"{W}instr"
+# A field's instruction can be SPLIT across several w:instrText runs mid-URL, so
+# consecutive ones are joined; a w:fldChar (field begin/separate/end), a w:t or a
+# new paragraph ends the run of them, so two unrelated fields never glue together
+# into a phantom value.
+_FIELD_BREAK_TAGS = frozenset({_FLD_CHAR, f"{W}t", f"{W}p"})
+
+
+def _is_word_xml_part(name: str) -> bool:
+    """Every Word part that can hold a field code -- document, headers/footers,
+    foot/endnotes, comments, glossary -- but not the _rels sidecars."""
+    return name.startswith("word/") and name.endswith(".xml") and "/_rels/" not in name
+
+
+def _field_instr_groups(tree):
+    """Groups of consecutive `w:instrText` elements forming ONE field instruction,
+    in document order."""
+    group: list = []
+    for el in tree.iter():
+        if el.tag == _INSTR_TEXT:
+            group.append(el)
+        elif el.tag in _FIELD_BREAK_TAGS and group:
+            yield group
+            group = []
+    if group:
+        yield group
+
+
+def _field_code_units(path: Path) -> list[TextUnit]:
+    with zipfile.ZipFile(path, "r") as zf:
+        contents = {n: zf.read(n) for n in zf.namelist() if _is_word_xml_part(n)}
+    units: list[TextUnit] = []
+    for name, blob in contents.items():
+        tree = xmlsafe.fromstring(blob)
+        for i, group in enumerate(_field_instr_groups(tree)):
+            text = "".join((e.text or "") for e in group)
+            if text.strip():
+                units.append(TextUnit(id=f"field:{name}:{i}", text=text))
+        for i, el in enumerate(tree.iter(_FLD_SIMPLE)):
+            instr = el.get(_INSTR_ATTR) or ""
+            if instr.strip():
+                units.append(TextUnit(id=f"fldsimple:{name}:{i}", text=instr))
+    return units
 
 
 def _para_run_elements(p_elem):
@@ -120,6 +185,10 @@ def extract_text_units(path: Path) -> list[TextUnit]:
         text = "".join((t.text or "") for t in p.iter(f"{W}t"))
         if text.strip():
             units.append(TextUnit(id=f"extra:{part}:{i}", text=text))
+    # Surfaces python-docx's object model never exposes: field codes (above),
+    # external hyperlink TARGETS and chart part text (see run_replace).
+    units.extend(_field_code_units(path))
+    units.extend(aux_text_units(path))
     return units
 
 
@@ -141,6 +210,51 @@ def apply(path: Path, out_path: Path, decisions: dict, analyzer, config, mapping
         apply_findings_to_runs(runs, findings, decisions, mapping_store)
     doc.save(out_path)
     _apply_extra_parts(out_path, analyzer, config, decisions, mapping_store)
+    _apply_field_codes(out_path, analyzer, config, decisions, mapping_store)
+    apply_aux_parts(out_path, analyzer, config, decisions, mapping_store)
+
+
+def _apply_field_codes(path: Path, analyzer, config, decisions: dict, mapping_store) -> None:
+    """Redacts Word field-code instructions in the already-written output. They
+    survive python-docx's save untouched -- which is exactly why they leaked."""
+    with zipfile.ZipFile(path, "r") as zf:
+        names = zf.namelist()
+        contents = {n: zf.read(n) for n in names}
+
+    any_changed = False
+    for name in names:
+        if not _is_word_xml_part(name):
+            continue
+        tree = xmlsafe.fromstring(contents[name])
+        part_changed = False
+        for group in _field_instr_groups(tree):
+            runs = [XmlRunAdapter(e) for e in group]
+            text = runs_text_and_spans(runs)[0]
+            if not text.strip():
+                continue
+            findings = detect_unit(analyzer, TextUnit(id="tmp", text=text), config)
+            if not findings:
+                continue
+            apply_findings_to_runs(runs, findings, decisions, mapping_store)
+            part_changed = True
+        for el in tree.iter(_FLD_SIMPLE):
+            # The instruction is an ATTRIBUTE, so there is no run to splice --
+            # redact the whole string and write it back.
+            instr = el.get(_INSTR_ATTR)
+            if not instr or not instr.strip():
+                continue
+            new = redact_text(instr, analyzer, config, decisions, mapping_store)
+            if new != instr:
+                el.set(_INSTR_ATTR, new)
+                part_changed = True
+        if part_changed:
+            contents[name] = etree.tostring(tree, xml_declaration=True, encoding="UTF-8", standalone=True)
+            any_changed = True
+
+    if any_changed:
+        with zipfile.ZipFile(path, "w", zipfile.ZIP_DEFLATED) as zf:
+            for n in names:
+                zf.writestr(n, contents[n])
 
 
 def _apply_extra_parts(path: Path, analyzer, config, decisions: dict, mapping_store) -> None:

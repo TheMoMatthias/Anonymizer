@@ -72,9 +72,12 @@ def _deny_list_findings(text: str, deny_list: list[str]) -> list[tuple[int, int,
 
 
 def _refine(finding: Finding) -> Finding:
-    """Applies checksum validation: a validated structured ID is promoted to the
-    auto-accept tier; a checksum-failing one is zeroed so the threshold filter
-    drops it from the actionable set (it re-surfaces as a possible-miss)."""
+    """Applies checksum validation. A validated structured ID is promoted to the
+    auto-accept tier; a checksum-FAILING one is DEMOTED to a review-tier score --
+    never dropped. A typo'd or OCR'd IBAN, card or tax ID is still an identifying
+    string, so it stays in the actionable set with validated=False, which the
+    review UI shows as an "unverified" chip and which makes detect_unit skip the
+    score-threshold gate for it."""
     verdict = validators.validate(finding.entity_type, finding.value)
     finding.validated = verdict
     if verdict is True:
@@ -93,13 +96,27 @@ def _resolve_overlaps(findings: list[Finding], text: str) -> list[Finding]:
     or spaCy's city-only LOCATION inside a full DE_ADDRESS) would otherwise
     corrupt the output or silently drop a redaction.
 
-    We keep the LONGER span first, then the higher score: for a redaction tool,
-    covering MORE of a value is always safer than covering less, so the full
-    address wins over the bare city and the complete phone wins over a fragment.
-    On an exact tie (same span and score, e.g. DE_ADDRESS vs spaCy LOCATION on one
-    PLZ+city) we prefer the specific pattern recognizer over the generic NER label
-    and then break ties by entity type, so the result is deterministic. Touching
-    spans (end == next start) do not overlap.
+    Priority order (highest first):
+      1. GDPR Art. 9 SPECIAL-CATEGORY types, ahead of span length. Everything else
+         being equal, covering MORE text is safer -- but not when it costs the
+         value its data CLASS: spaCy claims "Krankenkasse Barmer" / "Gewerkschaft
+         ver.di" as one long ORGANIZATION containing the Art. 9 hit, so
+         length-first dropped the Art. 9 finding as "fully contained" and filed a
+         health insurer / union membership under Organizations & places, whose
+         action is PSEUDONYMIZE -- a reversible, mapping-backed [ORG_n]. Winning
+         costs no coverage: a crossing/containing generic span is still MERGED
+         into the winner below, so the union is redacted either way, one-way.
+      2. The LONGER span: the full address wins over the bare city, the complete
+         phone over a fragment.
+      3. A CHECKSUM-TESTED id (validated is not None) over an untested one. This
+         only ever decides an equal-length contest, where there is no coverage
+         argument either way: a checksum-FAILED IBAN demoted to 0.4 used to lose
+         its IDENTICAL span to spaCy's NER_MISC at its flat 0.85, and a typo'd or
+         OCR'd IBAN lost both its Financial-IDs class and its "unverified" chip.
+      4. The higher score, then the specific pattern recognizer over the generic
+         NER label (e.g. DE_ADDRESS vs spaCy LOCATION on one PLZ+city), then the
+         entity type, so the result is deterministic.
+    Touching spans (end == next start) do not overlap.
 
     Overlap handling is UNION-MERGE, not drop-the-loser: a finding fully CONTAINED
     by a kept span adds nothing and is dropped, but a CROSSING (partial) overlap is
@@ -115,7 +132,9 @@ def _resolve_overlaps(findings: list[Finding], text: str) -> list[Finding]:
     ordered = sorted(
         findings,
         key=lambda f: (
+            not taxonomy.is_special_category(f.entity_type),  # Art. 9 first
             -(f.end - f.start),
+            f.validated is None,  # a checksum-tested id wins an equal-length tie
             -f.score,
             f.entity_type in _NER_ENTITIES,  # specific pattern recognizers win ties
             f.entity_type,

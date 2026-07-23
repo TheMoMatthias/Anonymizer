@@ -87,6 +87,16 @@ _ENTITY_TO_CLASS: dict[str, DataClass] = {
     "NER_MISC": OTHER_ENTITIES,
     "DATE_TIME": DATES_OTHER,
     "NRP": SPECIAL_CATEGORY,  # nationality / religion / political group -- GDPR Art. 9
+    # German Art. 9 recognizers. NRP only exists in the ENGLISH spaCy model, so
+    # before these the special-category class could never fire on a German
+    # document: health, religion and union/party data leaked with no trace.
+    "DE_HEALTH_DATA": SPECIAL_CATEGORY,
+    "DE_RELIGION": SPECIAL_CATEGORY,
+    "DE_UNION_PARTY": SPECIAL_CATEGORY,
+    # Sex life / sexual orientation. Genetic and biometric data deliberately have
+    # no separate type: they are emitted as DE_HEALTH_DATA (health data in
+    # substance, identical one-way action).
+    "DE_SEX_LIFE": SPECIAL_CATEGORY,
     POSSIBLE_MISS: UNMATCHED,
 }
 
@@ -96,6 +106,14 @@ def data_class_for(entity_type: str) -> DataClass:
     to OTHER_ENTITIES (medium, review-tier) -- NOT the low, profile-skippable
     DATES_OTHER, so a colleague's newly-added recognizer is never silently skipped."""
     return _ENTITY_TO_CLASS.get(entity_type, OTHER_ENTITIES)
+
+
+def is_special_category(entity_type: str) -> bool:
+    """True for GDPR Art. 9 special-category entity types. Derived from the class
+    map (not a second hand-kept list) so a new Art. 9 recognizer inherits the
+    protection by being mapped to SPECIAL_CATEGORY -- see core._resolve_overlaps,
+    where Art. 9 sensitivity has to outrank raw span length."""
+    return _ENTITY_TO_CLASS.get(entity_type) is SPECIAL_CATEGORY
 
 
 def tier_for(score: float, high: float = 0.9, medium: float = 0.5) -> str:

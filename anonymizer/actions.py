@@ -6,13 +6,17 @@ for pseudonymized values (consistent across documents via the mapping), and a
 bare `[PERSON]` / `[IBAN]` for one-way anonymized values. Brackets make it
 obvious to a downstream AI that the token is a placeholder, and let us find and
 reverse pseudonyms unambiguously.
+
+The two forms share one namespace, so they must never be confusable: a pseudonym
+is exactly `[<LABEL>_<digits>]`, and a one-way token is never allowed to take that
+shape (see `one_way_token`).
 """
 
 from __future__ import annotations
 
 import re
 
-from .mapping import MappingStore
+from .mapping import MappingStore, UnreversibleTokenError
 
 # entity_type -> short, human-readable token label. Keeps tokens compact
 # ([IBAN_1] rather than [IBAN_CODE_1]) while staying unambiguous.
@@ -45,11 +49,87 @@ TOKEN_LABELS = {
 # (e.g. a second BIC recognizer, DE_BIC2) renders [DE_BIC2_1], which a
 # digit-less label class would silently fail to match -- leaving the placeholder
 # unrestored with no error.
+# The label class is ASCII on purpose, and this pattern is the SINGLE authority on
+# what a pseudonym may look like: _assert_pseudonym_round_trips tests every
+# candidate against TOKEN_RE itself before it is minted, so the mint rule can never
+# drift from what re-identification actually accepts.
 TOKEN_RE = re.compile(r"\[([A-Z0-9_]+?)(?:_(\d+))?\]")
+
+# A label that already ends in _<digits> is indistinguishable from "some other
+# label plus a pseudonym number". Column policies derive the label from the
+# spreadsheet HEADER (xlsx_handler._column_entity_type: "Notizen 2" -> NOTIZEN_2,
+# "Person 1" -> PERSON_1), so a bare one-way token [NOTIZEN_2] collided with the
+# pseudonym NOTIZEN_2 minted for a pseudonymized "Notizen" column: re-identifying
+# that document replaced a ONE-WAY redacted cell with another row's REAL value.
+# One-way tokens for such labels therefore carry an explicit terminator, which can
+# never be parsed as label+number. Unambiguous labels (the overwhelming majority --
+# PERSON, IBAN, PROJEKT) keep the plain, readable [LABEL] form.
+_NUMBERED_TAIL_RE = re.compile(r"_\d+$")
+ONE_WAY_SUFFIX = "_REDACTED"
 
 
 def token_label(entity_type: str) -> str:
     return TOKEN_LABELS.get(entity_type, entity_type)
+
+
+def _assert_pseudonym_round_trips(placeholder: str, entity_type: str) -> None:
+    """Refuses to render a PSEUDONYM that reidentify_text could never find again.
+
+    Labels are not ours to choose: they come from config-defined entity names and
+    from spreadsheet HEADERS (xlsx_handler._column_entity_type). A header like
+    'Prüfung' has to reach us transliterated (PRUEFUNG) to be usable at all: left
+    as-is it minted PRÜFUNG_1, wrote [PRÜFUNG_1] into the document, and TOKEN_RE --
+    whose label class is [A-Z0-9_] -- could never match it again. The document was
+    permanently unreversible and the interface reported
+    "Restored 0 value(s)." as a cheerful *info* toast. This is the backstop under
+    that fix: the check is performed with TOKEN_RE ITSELF, so it can never drift
+    from what re-identification actually accepts, and it fires at MINT time --
+    while the operator can still fix the header -- instead of years later when
+    someone needs the original value back.
+
+    The test is deliberately made against `[<label>_1]`: if that round-trips, so
+    does every `[<label>_<n>]`, and validating BEFORE the mint keeps an unusable
+    row out of the mapping entirely.
+
+    Widening TOKEN_RE to accept umlauts was rejected. It would fix this one path
+    while leaving the class of bug open: an ASCII-only token is the only shape
+    that survives the round trip through everything a document passes through --
+    Unicode normalisation (a composed 'Ü' can come back decomposed as 'U'+U+0308
+    and stop matching), Python's own case mapping ('ß'.upper() is 'SS', so the
+    label is not even stable under the .upper() that produces it), and non-UTF-8
+    exports. It would also make the token pattern match arbitrary non-ASCII words
+    in bracketed prose, giving re-identification new false positives on documents
+    it must not touch. The right answer is: keep tokens ASCII, and make anything
+    else impossible to emit rather than merely unlikely.
+    """
+    token = f"[{placeholder}]"
+    match = TOKEN_RE.fullmatch(token)
+    if match is not None and match.group(2) is not None:
+        return
+    raise UnreversibleTokenError(
+        f"Refusing to write the pseudonym token '{token}' (entity type "
+        f"'{entity_type}'): re-identification could never match it again, so the "
+        "output document would be permanently unreversible. Placeholder labels "
+        "must be upper-case ASCII letters, digits and underscores only -- rename "
+        "the source column/entity type (umlauts included: use UE, OE, AE, SS) and "
+        "run again. No file was written."
+    )
+
+
+def one_way_token(entity_type: str) -> str:
+    """The rendered token for a ONE-WAY anonymized value -- guaranteed never to
+    match a pseudonym placeholder, so re-identification can never turn it back
+    into anyone's data.
+
+    Deliberately NOT subject to the round-trip check that guards pseudonyms: a
+    one-way token is not supposed to be reversible, so a label TOKEN_RE cannot
+    match (e.g. an umlaut one) fails safe here -- the token is simply left alone
+    by re-identification, which is precisely the required behaviour. Rejecting it
+    would refuse a document that is in fact perfectly correct."""
+    label = token_label(entity_type)
+    if _NUMBERED_TAIL_RE.search(label):
+        return f"[{label}{ONE_WAY_SUFFIX}]"
+    return f"[{label}]"
 
 
 def resolve_replacement(entity_type: str, value: str, action: str, mapping_store: MappingStore) -> str | None:
@@ -58,9 +138,15 @@ def resolve_replacement(entity_type: str, value: str, action: str, mapping_store
     if action == "skip":
         return None
     if action == "pseudonymize":
-        placeholder = mapping_store.get_or_create(entity_type, value, label=token_label(entity_type))
+        label = token_label(entity_type)
+        # Before the mint, so a label that can never round-trip leaves no row
+        # behind; and again after it, because get_or_create may return a LEGACY
+        # placeholder stored under a different (possibly unreversible) label.
+        _assert_pseudonym_round_trips(f"{label}_1", entity_type)
+        placeholder = mapping_store.get_or_create(entity_type, value, label=label)
+        _assert_pseudonym_round_trips(placeholder, entity_type)
         return f"[{placeholder}]"
-    return f"[{token_label(entity_type)}]"
+    return one_way_token(entity_type)
 
 
 def decisions_lookup(decisions: dict[tuple[str, str], str], entity_type: str, value: str) -> str:
@@ -75,6 +161,11 @@ def reidentify_text(text: str, mapping_store: MappingStore) -> tuple[str, int]:
 
     def repl(match: re.Match) -> str:
         nonlocal count
+        # Only a token SHAPED like a pseudonym ([LABEL_<digits>]) is ever looked
+        # up. A one-way token can carry no number, so it can never be turned back
+        # into data even if some future label happened to equal a placeholder.
+        if match.group(2) is None:
+            return match.group(0)
         placeholder = match.group(0)[1:-1]  # strip the surrounding [ ]
         original = mapping_store.reverse(placeholder)
         if original is None:

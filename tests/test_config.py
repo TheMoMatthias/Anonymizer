@@ -42,6 +42,104 @@ def test_plaintext_lists_are_migrated_out_of_config_yaml(tmp_path, monkeypatch):
     assert (base / "lists.enc").exists()
 
 
+def _shipped() -> dict:
+    return yaml.safe_load(cfg_mod.DEFAULT_CONFIG_PATH.read_text(encoding="utf-8"))
+
+
+def _shipped_group(name: str) -> list[dict]:
+    return [r for r in _shipped()["custom_recognizers"] if r["name"] == name]
+
+
+def _aged(group: list[dict]) -> list[dict]:
+    """A previously-shipped version of a recognizer group -- same name, older
+    pattern -- i.e. what sits in the config.yaml of an already-deployed machine."""
+    return [{**r, "patterns": [{"regex": r"\bOLD-VERSION\b", "score": 0.5}]} for r in group]
+
+
+def test_every_shipped_recognizer_reaches_a_fresh_config():
+    """Merge deduped by NAME, so the SECOND entry of a duplicate-named recognizer
+    (DE_HEALTH_DATA and DE_UNION_PARTY each ship a case-sensitive twin) could
+    never be merged at all -- half of the Art. 9 detection silently never
+    arrived."""
+    from collections import Counter
+
+    cfg = {"custom_recognizers": [], "entities": {}}
+    cfg_mod.merge_new_recognizers(cfg)
+    assert Counter(r["name"] for r in cfg["custom_recognizers"]) == Counter(
+        r["name"] for r in _shipped()["custom_recognizers"]
+    )
+
+
+def test_shipped_improvement_reaches_an_already_deployed_config():
+    """DEPLOYMENT BLOCKER: merge never updated an existing entry by name, so an
+    improved shipped pattern was IGNORED on any machine that already had a
+    %LOCALAPPDATA%\\Anonymizer\\config.yaml -- which is every deployed one. An
+    entry we installed and the user never touched must be upgraded."""
+    name = "DE_SV_NUMMER"
+    old = _aged(_shipped_group(name))
+    cfg = {
+        "custom_recognizers": [dict(r) for r in old],
+        # provenance: this is exactly what WE installed, unmodified since
+        cfg_mod.SHIPPED_STATE_KEY: {name: cfg_mod.recognizer_fingerprint(old)},
+        "entities": {},
+    }
+    assert cfg_mod.merge_new_recognizers(cfg) > 0
+    assert [r for r in cfg["custom_recognizers"] if r["name"] == name] == _shipped_group(name)
+
+
+def test_user_edited_recognizer_is_never_overwritten():
+    """The mirror requirement: a colleague's own tuning of a shipped recognizer
+    (and any recognizer they added themselves) must survive an upgrade."""
+    name = "DE_SV_NUMMER"
+    edited = [{**r, "patterns": [{"regex": r"\bMY-OWN\b", "score": 0.9}]} for r in _shipped_group(name)]
+    mine = {"name": "MY_ENTITY", "language": "de", "patterns": [{"regex": r"\bX\b", "score": 0.5}], "context": []}
+    cfg = {
+        "custom_recognizers": [*(dict(r) for r in edited), mine],
+        # provenance records a DIFFERENT content -> the entry has been edited since
+        cfg_mod.SHIPPED_STATE_KEY: {name: cfg_mod.recognizer_fingerprint(_aged(_shipped_group(name)))},
+        "entities": {},
+    }
+    cfg_mod.merge_new_recognizers(cfg)
+    assert [r for r in cfg["custom_recognizers"] if r["name"] == name] == edited
+    assert mine in cfg["custom_recognizers"], "a user's own recognizer must never be dropped"
+
+
+def test_legacy_entry_is_upgraded_only_when_it_matches_a_version_we_shipped(monkeypatch):
+    """A config.yaml written before provenance existed carries no marker at all.
+    It is adopted (and upgraded) ONLY if its content fingerprint matches a version
+    this repo actually shipped; anything else is assumed to be a user edit and
+    left alone. That is what lets the already-deployed machine catch up without
+    ever guessing."""
+    name = "DE_SV_NUMMER"
+    old = _aged(_shipped_group(name))
+    legacy_fp = cfg_mod.recognizer_fingerprint(old)
+
+    def _cfg():
+        return {"custom_recognizers": [dict(r) for r in old], "entities": {}}
+
+    untouched = _cfg()
+    cfg_mod.merge_new_recognizers(untouched)
+    assert [r for r in untouched["custom_recognizers"] if r["name"] == name] == old, (
+        "an unrecognized unmarked entry must be treated as a user edit"
+    )
+
+    monkeypatch.setattr(cfg_mod, "_LEGACY_SHIPPED_FINGERPRINTS", frozenset({legacy_fp}))
+    upgraded = _cfg()
+    cfg_mod.merge_new_recognizers(upgraded)
+    assert [r for r in upgraded["custom_recognizers"] if r["name"] == name] == _shipped_group(name)
+
+
+def test_upgrade_survives_a_save_load_round_trip(tmp_path, monkeypatch):
+    """The provenance has to persist in config.yaml, or every launch would re-run
+    the legacy adoption and an edit made in between would be overwritten."""
+    monkeypatch.setenv("LOCALAPPDATA", str(tmp_path))
+    cfg = cfg_mod.load_config()
+    assert cfg.get(cfg_mod.SHIPPED_STATE_KEY), "provenance not recorded on a fresh install"
+    reloaded = cfg_mod.load_config()
+    assert reloaded[cfg_mod.SHIPPED_STATE_KEY] == cfg[cfg_mod.SHIPPED_STATE_KEY]
+    assert cfg_mod.merge_new_recognizers(reloaded) == 0, "a current config must need no further merge"
+
+
 def test_undecryptable_lists_raises_and_is_not_overwritten(tmp_path, monkeypatch):
     """Regression (silent data loss): an undecryptable lists.enc used to be treated
     like 'absent' -> load/save overwrote it empty -> the deny list was permanently,

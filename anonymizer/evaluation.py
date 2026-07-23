@@ -108,6 +108,22 @@ CONTEXTS = {
     "signature": _signature,
 }
 
+# Contexts measured WITHOUT the neutral filler prose.
+#
+# "bare_cell" has to mean BARE. The harness used to prepend FILLER to every
+# probe, including this one -- which handed a WikiNER-trained model two sentences
+# of German prose that a lone spreadsheet cell does not have, and made the
+# hardest and most common shape in the user's real workbooks score like prose.
+# Every bare_cell figure reported before this was optimistic.
+_NO_FILLER_CONTEXTS = frozenset({"bare_cell"})
+
+
+def probe_text(context: str, given: str, surname: str) -> str:
+    """The exact text one probe feeds the pipeline. Separate from the measuring
+    loop so the "is the bare case actually bare" property is directly testable."""
+    line = CONTEXTS[context](given, surname)
+    return line if context in _NO_FILLER_CONTEXTS else f"{FILLER} {line}"
+
 # Structured identifiers: these have checksums or hard patterns, so they should
 # score near 1.0. A dip here is a much louder alarm than a dip on names.
 STRUCTURED_PROBES: dict[str, tuple[str, str]] = {
@@ -119,6 +135,17 @@ STRUCTURED_PROBES: dict[str, tuple[str, str]] = {
     "PLZ_CITY": ("50667 Köln", "Wohnort ist {v} laut Unterlagen."),
     "BIC": ("COBADEFFXXX", "Zahlung an BIC: {v} veranlassen."),
     "DATE_DOB": ("15.03.1980", "Geburtsdatum: {v} des Kunden."),
+    "SV_NUMMER": ("65170839J003", "Die Versicherungsnummer {v} ist hinterlegt."),
+    # HELD-OUT Art. 9 values. These deliberately do NOT appear in the recognizers'
+    # word lists: probing with "evangelisch" / "schwerbehindert" -- both literal
+    # entries in the very alternation this measures -- only proved the list
+    # contains its own contents, which is tuning the recognizer to the benchmark.
+    # A held-out value can only be found through the generic LABEL:VALUE
+    # mechanism, so the number means something. The BARE row is expected to miss
+    # them, and that miss is the honest finding: an unlabelled free-text health or
+    # religion value that is not on the list is not detected.
+    "ART9_RELIGION": ("neuapostolisch", "Konfession: {v} laut Stammdaten."),
+    "ART9_HEALTH": ("Bandscheibenvorfall", "Diagnose: {v} laut Attest."),
 }
 
 
@@ -159,11 +186,11 @@ def measure_isolated(analyzer, config: dict) -> list[StratumResult]:
     cfg = {**config, "languages": ["de"]}
     results: list[StratumResult] = []
     for stratum, surnames in SURNAME_STRATA.items():
-        for ctx_name, builder in CONTEXTS.items():
+        for ctx_name in CONTEXTS:
             r = StratumResult(stratum=stratum, context=ctx_name)
             for i, surname in enumerate(surnames):
                 given = GIVEN_NAMES[i % len(GIVEN_NAMES)]
-                text = f"{FILLER} {builder(given, surname)}"
+                text = probe_text(ctx_name, given, surname)
                 findings = detect_unit(analyzer, TextUnit("u1", text), cfg)
                 r.total += 1
                 if _found(findings, surname):
@@ -175,18 +202,25 @@ def measure_isolated(analyzer, config: dict) -> list[StratumResult]:
 
 
 def measure_structured(analyzer, config: dict) -> list[StratumResult]:
+    """Every identifier is measured TWICE: once inside a sentence that carries
+    the recognizer's context word, and once BARE -- alone in a cell, no label
+    anywhere, which is the shape a "database" workbook actually stores. The
+    in-context row flatters every context-gated recognizer; the bare row is the
+    one that predicts what leaks out of the user's real files."""
     cfg = {**config, "languages": ["de"]}
     results: list[StratumResult] = []
-    for label, (value, template) in STRUCTURED_PROBES.items():
-        r = StratumResult(stratum="structured", context=label, total=1)
-        findings = detect_unit(analyzer, TextUnit("u1", template.format(v=value)), cfg)
-        # Compare space-insensitively: a recognizer may claim a reformatted span.
-        flat = {f.value.replace(" ", "") for f in findings}
-        if any(value.replace(" ", "") in f for f in flat):
-            r.found = 1
-        else:
-            r.missed.append(value)
-        results.append(r)
+    for stratum, bare in (("structured", False), ("structured_bare", True)):
+        for label, (value, template) in STRUCTURED_PROBES.items():
+            r = StratumResult(stratum=stratum, context=label, total=1)
+            text = value if bare else template.format(v=value)
+            findings = detect_unit(analyzer, TextUnit("u1", text), cfg)
+            # Compare space-insensitively: a recognizer may claim a reformatted span.
+            flat = {f.value.replace(" ", "") for f in findings}
+            if any(value.replace(" ", "") in f for f in flat):
+                r.found = 1
+            else:
+                r.missed.append(value)
+            results.append(r)
     return results
 
 

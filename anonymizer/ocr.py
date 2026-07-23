@@ -19,9 +19,13 @@ global install.
 
 from __future__ import annotations
 
+import contextlib
 import os
 import shutil
 import sys
+import tempfile
+import threading
+import time
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -109,6 +113,58 @@ def reset_resolution() -> None:
     _resolved_cmd = None
 
 
+# tempfile.tempdir is process-global, so the redirect below is serialized. Page
+# OCR is already sequential within a document; the lock only stops a concurrent
+# caller from observing a foreign temp root.
+_temp_lock = threading.Lock()
+_STALE_TEMP_SECONDS = 3600
+
+
+@contextlib.contextmanager
+def _private_temp():
+    """Keeps rendered page images out of the SYSTEM temp directory.
+
+    pytesseract hands pages to tesseract through files and takes the output back
+    through more files, all created via `tempfile` -- i.e. in the shared system
+    temp. On a bank workstation that means a pixel-perfect copy of a sensitive
+    scanned page (the very thing being anonymized) lands in a location other
+    users and other tools can read, and survives indefinitely if the process
+    dies mid-run. Redirect `tempfile` into a private directory under the app's
+    own data folder for the duration of the call, and delete it unconditionally.
+
+    Leftovers from a previously killed run are swept on entry, but only once
+    they are older than an hour, so a second Anonymizer instance cannot delete
+    a directory the first one is still using.
+    """
+    with _temp_lock:
+        root = _temp_root()
+        root.mkdir(parents=True, exist_ok=True)
+        _sweep_stale(root)
+        previous = tempfile.tempdir
+        with tempfile.TemporaryDirectory(dir=str(root), prefix="ocr-") as scratch:
+            tempfile.tempdir = scratch
+            try:
+                yield
+            finally:
+                tempfile.tempdir = previous
+
+
+def _temp_root() -> Path:
+    from .config import app_data_dir
+
+    return app_data_dir() / "ocr-temp"
+
+
+def _sweep_stale(root: Path) -> None:
+    cutoff = time.time() - _STALE_TEMP_SECONDS
+    for leftover in root.glob("ocr-*"):
+        try:
+            if leftover.stat().st_mtime < cutoff:
+                shutil.rmtree(leftover, ignore_errors=True)
+        except OSError:  # noqa: PERF203 -- a vanished entry is exactly what we wanted
+            continue
+
+
 @dataclass
 class WordBox:
     text: str
@@ -131,7 +187,8 @@ def ocr_page(page, zoom: float = RENDER_ZOOM):
 
     pix = page.get_pixmap(matrix=fitz.Matrix(zoom, zoom), alpha=False)
     img = Image.open(io.BytesIO(pix.tobytes("png")))
-    data = pytesseract.image_to_data(img, lang=OCR_LANGS, output_type=pytesseract.Output.DICT)
+    with _private_temp():  # page images never touch the shared system temp
+        data = pytesseract.image_to_data(img, lang=OCR_LANGS, output_type=pytesseract.Output.DICT)
 
     parts: list[str] = []
     boxes: list[WordBox] = []

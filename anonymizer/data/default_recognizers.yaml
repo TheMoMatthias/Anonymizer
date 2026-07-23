@@ -75,6 +75,30 @@ entities:
   NRP:
     default_action: anonymize
     confidence_threshold: 0.5
+  # GDPR Art. 9 special-category data, GERMAN. NRP above only exists in the
+  # English spaCy model, so on a German document the Art. 9 class could never
+  # fire at all. One-way anonymize (never pseudonymize: a stable [RELIGION_3]
+  # token would still let a reader group people by belief), and thresholds sit
+  # at the review bar -- these are contextual, not checksummed, so a human
+  # confirms every one.
+  DE_HEALTH_DATA:
+    default_action: anonymize
+    confidence_threshold: 0.5
+  DE_RELIGION:
+    default_action: anonymize
+    confidence_threshold: 0.5
+  DE_UNION_PARTY:
+    default_action: anonymize
+    confidence_threshold: 0.5
+  # Sex life / sexual orientation -- its own Art. 9 category. It gets its own
+  # entity type rather than being folded into DE_HEALTH_DATA because it is not
+  # health data and a reviewer must be able to see (and decide on) it as what it
+  # is. Genetic/biometric data IS folded into DE_HEALTH_DATA, deliberately: it is
+  # health data in substance, carries the identical one-way action, and a separate
+  # bucket holding two findings a year would only fragment the review.
+  DE_SEX_LIFE:
+    default_action: anonymize
+    confidence_threshold: 0.5
   BIC_CODE:
     default_action: pseudonymize
     confidence_threshold: 0.5
@@ -128,13 +152,90 @@ custom_recognizers:
       - regex: '\b\d{2}\s?\d{3}\s?\d{3}\s?\d{3}\b'
         score: 0.6
     context: ["steuer"]
+  # Sozialversicherungsnummer. NOT context-gated: in an HR/database workbook the
+  # SV number sits alone in its own column with no label anywhere near it, and a
+  # context-gated recognizer missed exactly that shape. It is safe standalone
+  # because validators.de_sv_nummer_valid checks the DRV check digit AND the
+  # embedded birth date -- a validated match is promoted to 0.98 by core._refine,
+  # a failing one demoted to 0.4 and surfaced for review (a failed check digit is
+  # a typo in a real number far more often than a false positive).
+  # The trailing '\d{2}[ ]?\d' (not '\d{3}') accepts the "65 170839 J 00 3"
+  # spelling that separates the serial from the check digit.
   - name: DE_SV_NUMMER
     language: de
     case_sensitive: true
     patterns:
-      - regex: '\b\d{2}[ ]?\d{6}[ ]?[A-Z][ ]?\d{3}\b'
+      - regex: '\b\d{2}[ ]?\d{6}[ ]?[A-Z][ ]?\d{2}[ ]?\d\b'
         score: 0.6
     context: ["versicherungsnummer", "sv-nummer", "rentenversicherung"]
+  # Checksum-FALLBACK recognizers for IBAN and card numbers.
+  # Presidio's own IbanRecognizer/CreditCardRecognizer score a failed checksum to
+  # zero and then DROP the result (`if score > MIN_SCORE`), so a typo'd or OCR'd
+  # IBAN never reached core._refine at all: it lost its Financial-IDs data class
+  # and fell into the informational possible-miss bucket, which the review UI
+  # never applies. A failed checksum is a typo in a REAL identifier far more
+  # often than a false positive, so these plain (non-validating) patterns keep it
+  # visible and CLASSIFIED; _refine then demotes it to 0.4 + validated=False, and
+  # the valid ones are still claimed by Presidio's higher-scoring recognizer.
+  # The card patterns are gated on real issuer prefixes (Visa/MC/Discover/Amex)
+  # rather than "any 16-digit run": a bank workbook is full of long digit runs.
+  #
+  # Each IBAN pattern is an alternation of a FULLY COMPACT and a FULLY SPACED
+  # branch. That structure is the whole point, and it is load-bearing:
+  #  * A single branch with an optional separator -- '(?:[ ]?[A-Z0-9]{4}){3,7}'
+  #    followed by a '(?:[ ]?...)?' remainder -- lets the remainder START WITH A
+  #    SPACE and so absorb the NEXT token whenever the IBAN's length is a multiple
+  #    of four (AT/BE/ES/LU/PL/SE, all fully consumed by the 4-char groups). The
+  #    longer bogus span then beats presidio's correct one in overlap resolution,
+  #    iban_valid() fails on the polluted string, and a CHECKSUM-VALID IBAN is
+  #    demoted to 0.4 -- dropping out of the auto-accept tier into a band a
+  #    reviewer can bulk-skip -- while apply splices the absorbed characters out
+  #    of the document. Narrowing the remainder to digits does NOT fix this: on a
+  #    German transfer line the next token is the AMOUNT, so "AT61...3201 100"
+  #    was claimed whole and applying it DELETED the amount. It also split one
+  #    account number into two pseudonyms ([IBAN_1] here, [IBAN_2] where the same
+  #    IBAN appears without a trailing number), breaking the referential
+  #    consistency the mapping exists to provide.
+  #    Requiring the separator style to be consistent across the WHOLE match
+  #    removes the ambiguity: a compact IBAN cannot reach past its own last
+  #    character, and a spaced one still ends in its genuine spaced remainder
+  #    group (the German 22-char form ends in a 2-digit group).
+  #  * The {3,7} floor puts the minimum at 16 characters, plus one exact-15 branch
+  #    for Norway (the shortest real IBAN). A lower floor turned every 12-char
+  #    ISIN/WKN in a depot statement ("DE0007164600") into a Financial ID -- and
+  #    with a space-absorbing remainder it reached the floor by eating the
+  #    position quantity that follows it, deleting that too.
+  # This is the checksum-FAILED fallback only; presidio's own validating
+  # recognizer claims every well-formed IBAN in full, at a higher score.
+  - name: IBAN_CODE
+    language: de
+    case_sensitive: true
+    patterns:
+      - regex: '(?<![A-Za-z0-9])(?:[A-Z]{2}\d{2}(?:[A-Z0-9]{4}){3,7}\d{0,3}|[A-Z]{2}\d{2}(?: [A-Z0-9]{4}){3,7}(?: \d{1,3})?)(?![A-Za-z0-9])'
+        score: 0.5
+      - regex: '(?<![A-Za-z0-9])(?:[A-Z]{2}\d{2}(?:[A-Z0-9]{4}){2}\d{3}|[A-Z]{2}\d{2}(?: [A-Z0-9]{4}){2} \d{3})(?![A-Za-z0-9])'
+        score: 0.5
+  # The card fallback needs one of TWO positive signals -- card GROUPING (spaces or
+  # dashes every four digits) or an explicit card label. A bare, unlabelled,
+  # compact 16-digit run is NOT enough: roughly 15-20% of all 16-digit numbers
+  # carry a card-shaped prefix (4xxx, 51-55, 6011, 65xx), and a bank workbook is
+  # full of 16-digit internal reference numbers. As a checksum-FAILED finding it
+  # would also bypass the confidence-threshold gate in core.detect_unit, so no
+  # configuration could filter it out, while its default action is `anonymize` --
+  # ONE-WAY. A reviewer bulk-accepting the Financial-IDs class would have destroyed
+  # every one of those references with no way back.
+  # What this gives up: a Luhn-FAILING card written compactly with no label nearby.
+  # Presidio's own recognizer still claims every Luhn-VALID card in that shape, and
+  # the completeness scan still surfaces the digit run as a possible miss.
+  - name: CREDIT_CARD
+    language: de
+    patterns:
+      - regex: '\b(?:4\d{3}|5[1-5]\d{2}|6(?:011|5\d{2}))[ -]\d{4}[ -]\d{4}[ -]\d{4}\b'
+        score: 0.5
+      - regex: '\b3[47]\d{2}[ -]\d{6}[ -]\d{5}\b'
+        score: 0.5
+      - regex: '(?<=\b(?:Kreditkartennummer|Kreditkarte|Kartennummer|Mastercard|Maestro|Karte|Visa|Amex|PAN)\b[\s:=.#/-]{0,4})(?:(?:4\d{3}|5[1-5]\d{2}|6(?:011|5\d{2}))\d{12}|3[47]\d{13})\b'
+        score: 0.5
   - name: DE_KONTONUMMER
     language: de
     patterns:
@@ -187,9 +288,46 @@ custom_recognizers:
     language: de
     case_sensitive: true
     patterns:
-      - regex: '\b[A-ZÄÖÜ][\wäöüß.\-]*(?:stra(?:ße|sse)|str\.|weg|allee|platz|gasse|ring|damm|ufer)\s+\d{1,4}\s?[a-z]?\b'
-        score: 0.6
-      - regex: '\b\d{5}\s+[A-ZÄÖÜ][a-zäöüß.\-]+\b'
+      # Street + house number. Three fixes over the original, each a measured miss:
+      #  * the suffix must accept a CAPITALIZED abbreviation -- with a
+      #    case-sensitive recognizer, a lowercase-only `str\.` cannot match
+      #    "Rudolf-Breitscheid-Str. 12", i.e. most compound German street names;
+      #  * `\s*` (not `\s+`) so "Kirchstr.7" without a space is covered;
+      #  * an optional second number so a RANGE is fully covered -- stopping at
+      #    "Hauptstraße 12" left the "14" of "12-14" sitting in the document.
+      # 0.86 is deliberately sandwiched between spaCy's FLAT 0.85 NER confidence
+      # and the 0.9 auto-accept bar (same trick as DE_PHONE below). A street with
+      # a house number is a far stronger signal than a generic LOCATION/MISC
+      # guess covering the identical characters, and on an identical span the
+      # higher score wins: at 0.6 a bare "Kirchstr.7" in a spreadsheet cell was
+      # claimed by spaCy's MISC and filed under "Other named entities" instead of
+      # Contact details. The tier is unchanged (0.6 and 0.86 are both "review").
+      - regex: '\b\p{Lu}[\p{L}\d.\-]*(?:[Ss]tra(?:ße|sse)|[Ss]tr\.|[Ww]eg|[Aa]llee|[Pp]latz|[Gg]asse|[Rr]ing|[Dd]amm|[Uu]fer|[Cc]haussee|[Ss]teig|[Pp]romenade|[Aa]nger)\s*\d{1,4}\s?[a-z]?(?:\s?[-/]\s?\d{1,4}\s?[a-z]?)?'
+        score: 0.86
+      # Prepositional street names carry NO street word at all ("Am Wall 3",
+      # "Zum Alten Forsthaus 4a", "Unter den Linden 5"), so the pattern above can
+      # never see them. With nothing but "preposition + capitalized word + number"
+      # to go on, a hand-maintained list of prose head nouns was never going to
+      # converge -- it missed the single highest-frequency phrase in the domain,
+      # and "Zum Stichtag 31.12.2024 betrug der Saldo" (on essentially every German
+      # bank statement) was claimed as an address AND swallowed the DATE_TIME
+      # finding it crossed. So the pattern now needs a POSITIVE structural signal:
+      # an address occupies a whole delimited SEGMENT -- it starts a line or follows
+      # a comma/semicolon/label-colon, and it ends at a comma, a sentence end or the
+      # end of the line. German prose ("... 3 finden Sie", "... 3 Positionen")
+      # continues past the number and is therefore excluded by construction.
+      # KNOWN LIMIT, accepted: a prepositional address buried mid-sentence ("wohnt
+      # Am Wall 3 in Bremen") is no longer claimed. That shape has no signal that
+      # separates it from prose at all; the labelled and cell/line-delimited forms
+      # -- which is how a spreadsheet, a form and an address block actually store
+      # it -- are covered. The exclusion list is kept as cheap belt-and-braces for
+      # the delimited case (a cell reading "Im Anhang 2").
+      - regex: '(?:^|(?<=[,;:]\s{0,2}))(?:Am|An\s+de[rm]|Auf\s+de[rm]|Bei\s+der|Beim|Hinter\s+de[rm]|Im|In\s+de[rnm]|Unter\s+den|Vor\s+dem|Zum|Zur)\s+(?!(?:Jahr|Rahmen|Anhang|Auftrag|Anschluss|Übrigen|Wesentlichen|Folgenden|Vergleich|Durchschnitt|Gegensatz|Zusammenhang|Zeitraum|Monat|Quartal|Namen|Sinne|Falle|Zuge|Ergebnis|Betrag|Konto|Depot|Anhänge|Stichtag|Zeitpunkt|Beispiel|Anlage|Ende|Schnitt)\b)\p{Lu}[\p{L}\-]+(?:\s+\p{Lu}[\p{L}\-]+){0,2}\s*(?!(?:19|20)\d{2}\b)\d{1,3}\s?[a-z]?(?=\s*(?:[,;]|\.(?:\s|$)|$))'
+        score: 0.55
+      # PLZ + city. \p{L} (not [a-zäöüß]) so a hyphenated or non-ASCII district is
+      # kept: the ASCII-lowercase tail stopped at the capital E and redacted
+      # "50667 Köln" out of "50667 Köln-Ehrenfeld", leaving the district behind.
+      - regex: '\b(?:D-)?\d{5}\s+\p{Lu}[\p{L}.\-]{1,30}'
         score: 0.5
     context: ["adresse", "anschrift", "wohnhaft", "straße", "plz", "postleitzahl", "wohnort"]
   # Bare numeric customer number (Kundennummer 4830123). Context-gated like the
@@ -209,4 +347,182 @@ custom_recognizers:
     patterns:
       - regex: '\b(0?[1-9]|[12]\d|3[01])\.(0?[1-9]|1[0-2])\.(19|20)\d{2}\b'
         score: 0.5
+      # Long-form German date -- how a Geburtsdatum is written in prose.
+      - regex: '\b(0?[1-9]|[12]\d|3[01])\.\s?(?:Januar|Februar|März|April|Mai|Juni|Juli|August|September|Oktober|November|Dezember)\s+(19|20)\d{2}\b'
+        score: 0.6
+      # Genealogical birth marker ("*1980", "*31.12.1980"), routine in customer
+      # master data and previously invisible: nothing claimed the bare year.
+      # The marker must be written TIGHT. Allowing a space after it ("* 2024")
+      # made every footnote marker in a report's typography a date of birth
+      # ("* 2024 Prognose" -> DATE_TIME), and those default to pseudonymize.
+      - regex: '\*(?:(0?[1-9]|[12]\d|3[01])\.(0?[1-9]|1[0-2])\.)?(19|20)\d{2}\b'
+        score: 0.6
+      # A bare YEAR is only a date of birth when a label says so, so it is claimed
+      # ONLY behind one -- flagging every 19xx/20xx would bury the reviewer.
+      # KNOWN over-flag, accepted: "Jahrgang" is also a fund VINTAGE ("Jahrgang
+      # 2019 des Fonds"). Nothing in the text separates the two, "Jahrgang <year>"
+      # is a real German date-of-birth spelling, and a DATE_TIME finding is a
+      # low-sensitivity, REVERSIBLE pseudonym -- so the recall side wins here.
+      - regex: '(?<=\b(?:geb\.|geboren|Geburtsjahr|Jahrgang|Jg\.)\s{0,3})(19|20)\d{2}\b'
+        score: 0.6
     context: ["geboren", "geburtsdatum", "geb", "geb.", "datum", "vom", "stand"]
+  # --- GDPR Art. 9 special-category data (German) ---------------------------
+  # Art. 9 data is the most damaging thing in the file to leak AND the most
+  # damaging to over-flag, so detection is split deliberately:
+  #   * a LABEL:VALUE anchor claims the VALUE and never the label -- the column
+  #     header "Diagnose" is not the sensitive datum, the cell next to it is;
+  #   * a short list of unambiguous VALUE words for the bare-cell shape, in their
+  #     BARE form only. Inflected forms are what appear in organisation names
+  #     ("Katholische Kirchengemeinde", "Evangelische Bank"), and matching those
+  #     would drag a church's ORG name into Art. 9 and one-way anonymize it.
+  # Every score is 0.86: above spaCy's FLAT 0.85 NER confidence and below the 0.9
+  # auto-accept bar. Both halves matter. Below 0.85 the Art. 9 finding loses the
+  # identical span to a generic ORGANIZATION/LOCATION guess -- measured: "ver.di",
+  # "IG Metall" and "Barmer" were all filed under Organizations & places, whose
+  # profile action is PSEUDONYMIZE, so union membership and a health insurer
+  # would have been replaced by a stable, mapping-reversible [ORG_n] token
+  # instead of being one-way anonymized. At 0.9 or above they would auto-accept,
+  # which is equally wrong: over-flagging religion or health is as damaging as
+  # missing it, so a human confirms every hit.
+  # These recognizers carry NO `context:` list on purpose: the label is already
+  # inside the pattern, so a context word would double-count the same evidence
+  # and push a routine "Konfession: rk" to 1.0 -- straight past the reviewer.
+  # DELIBERATELY NOT MATCHED: a bare "Kirchensteuer" amount column, which a
+  # German bank workbook prints on every single row. The euro figure does imply
+  # church membership, but one finding per row is unreviewable noise -- use a
+  # whole-column policy on that column instead. Only the explicit
+  # Kirchensteuer*MERKMAL* (which holds the confession code) is claimed.
+  #
+  # Three properties every Art. 9 recognizer below carries, each closing a
+  # measured defect:
+  #   * `languages: [de]` -- these are NATURAL-LANGUAGE word lists, unlike the
+  #     structural ID patterns, and cross-registering them onto English scans made
+  #     "The Great Depression started in 1929" and "Diabetes research fund" into
+  #     health data. An Art. 9 finding is ONE-WAY anonymized, so that irreversibly
+  #     destroyed text in an English document.
+  #   * `umlaut_variants: true` -- German exports routinely transliterate
+  #     (arbeitsunfaehig, juedisch, Staatsangehoerigkeit). The umlaut-only lists
+  #     missed every one of those spellings; engine._expand_umlauts rewrites each
+  #     umlaut as an (umlaut|ae/oe/ue) alternation so both spellings are covered
+  #     without hand-listing them.
+  #   * the LABEL:VALUE value runs to a BOUNDARY (end of cell / sentence / line),
+  #     never to a fixed character count. The old 40-char (health) / 30-char
+  #     (religion) caps cut MID-TOKEN, so a long free-text Diagnose cell was only
+  #     PARTIALLY redacted -- "[X]nz mit begleitender [X] und Schlafstoerung" --
+  #     which is a falsely-clean output, the one thing this tool must never emit.
+  #     A '.' only ends the value when it ends a SENTENCE (followed by whitespace
+  #     or the end), so "ver.di" and "k.A." stay intact. Negations and placeholders
+  #     ("keine", "-", "k.A.", "unbekannt") are excluded: a one-way-anonymized
+  #     "keine" is meaningless and is pure reviewer noise.
+  - name: DE_HEALTH_DATA
+    language: de
+    languages: [de]
+    umlaut_variants: true
+    patterns:
+      # The value pattern must START on a non-space: a leading '\s{0,3}' inside the
+      # lookbehind can match empty, so a plain '[^\n;,.]+' matched " rk" WITH the
+      # separating space and the whole finding (and its pseudonym key) carried it.
+      - regex: '(?<=\b(?:Schwerbehindertenausweis|Krankenversicherungsnummer|Krankenversicherung|Krankenversicherer|Berufsunfähigkeit|Gesundheitszustand|Gesundheitsdaten|Arbeitsunfähigkeit|Erwerbsminderung|Grad der Behinderung|Behinderungsgrad|Schwerbehinderung|Rehabilitation|Krankschreibung|Schwangerschaft|Krankenkasse|Pflegekasse|Arztbericht|Behandlung|Impfstatus|Genanalyse|Pflegestufe|Pflegegrad|Erkrankung|Blutgruppe|Medikation|Krankheit|Diagnose|Therapie|Gentest|Attest|Befund|Reha|GdB)\s{0,3}[:=]\s{0,3})(?=[^\n;]*[\p{L}\d])(?!(?:keine?(?:\s+Angaben?)?|nein|nichts|ohne|unbekannt|entfällt|nicht\s+(?:angegeben|bekannt|zutreffend|erhoben)|null|leer|n\.?\s?a\.?|k\.?\s?a\.?)(?![\p{L}\d])[\s.,;]*$)[^\s\n;](?:(?:(?!\.(?:\s|$))[^\n;])*[^\s\n;.,])?'
+        score: 0.86
+      # Words that state a health FACT about a person (not a column label): these
+      # are the datum itself even standing alone in a cell. Pure LABEL nouns
+      # (Diagnose, Krankenkasse, Pflegegrad) are deliberately absent -- they take
+      # a value, and redacting the column header helps nobody.
+      # The genetic/biometric terms live here rather than in their own entity type:
+      # they are health data in substance and carry the identical one-way action.
+      # Deliberately NOT listed: "biometrisch"/"Gesichtserkennung"/"Biometrie" --
+      # a bank's IT-security prose is full of them and they say nothing about a
+      # PERSON, so one-way redacting them would be pure destruction.
+      - regex: '\b(?:arbeitsunfähigkeit|arbeitsunfähig|krankgeschrieben|krankschreibung|krankmeldung|schwerbehindertenausweis|schwerbehinderung|schwerbehindert|erwerbsminderung|erwerbsunfähig|berufsunfähigkeit|berufsunfähig|pflegebedürftig|schwangerschaft|schwanger|mutterschutz|dialyse|chemotherapie|psychotherapie|krebserkrankung|diabetes|epilepsie|depression|burnout|rehabilitation|reha|genomanalyse|genanalyse|gentest|erbkrankheit|erbgut|dna-analyse|dna-test|vaterschaftstest|fingerabdruck|iris-scan|retinascan)\b'
+        score: 0.86
+      # Naming a person's health insurer is health data. Only unambiguous names --
+      # the short abbreviations (TK, BKK, IKK) are far too collision-prone to
+      # match bare; they are claimed only behind an explicit label, below.
+      - regex: '\b(?:AOK|Barmer|DAK-Gesundheit|DAK|Knappschaft|KKH|Techniker Krankenkasse|Debeka|Signal Iduna)\b'
+        score: 0.86
+      # LABEL VALUE with NO colon. Word/PDF prose never carries one (only the Excel
+      # handler synthesises "Header: value"), so "Pflegegrad 3 wurde bewilligt" and
+      # "GdB 50 festgestellt" -- both named verbatim in the original finding -- were
+      # invisible. Only a NUMBER is claimed, which is what makes a colon-free anchor
+      # safe: an arbitrary following word would swallow ordinary prose.
+      - regex: '(?<=\b(?:Grad der Behinderung|Behinderungsgrad|Pflegestufe|Pflegegrad|GdB)\s{1,3})\d{1,3}\b'
+        score: 0.86
+  # CASE-SENSITIVE half. HIV/AIDS: a case-insensitive "aids" would flag the
+  # ordinary English verb. The insurer ABBREVIATIONS: "TK"/"BKK"/"IKK" collide
+  # with too much to match bare, but directly behind "Krankenkasse" they are
+  # unambiguous -- and "Krankenkasse TK" is exactly how a colon-free prose line or
+  # a two-column form writes it.
+  - name: DE_HEALTH_DATA
+    language: de
+    languages: [de]
+    case_sensitive: true
+    patterns:
+      - regex: '\b(?:AIDS|Aids|HIV)\b'
+        score: 0.86
+      - regex: '(?<=\b(?:Krankenversicherung|Krankenversicherer|Krankenkasse|Pflegekasse)\s{1,3})(?:AOK|BARMER|Barmer|Knappschaft|Debeka|VIACTIV|pronova|KKH|DAK|BKK|IKK|GEK|HEK|SBK|BIG|TK|hkk)\b'
+        score: 0.86
+  - name: DE_RELIGION
+    language: de
+    languages: [de]
+    umlaut_variants: true
+    patterns:
+      - regex: '(?<=\b(?:Kirchensteuerabzugsmerkmal|Konfessionszugehörigkeit|Religionszugehörigkeit|Religionsgemeinschaft|Glaubensgemeinschaft|Kirchensteuermerkmal|KiSt-Merkmal|Konfession|Religion|Glaube)\s{0,3}[:=]\s{0,3})(?=[^\n;]*[\p{L}\d])(?!(?:keine?(?:\s+Angaben?)?|nein|nichts|ohne|unbekannt|entfällt|nicht\s+(?:angegeben|bekannt|zutreffend|erhoben)|null|leer|n\.?\s?a\.?|k\.?\s?a\.?)(?![\p{L}\d])[\s.,;]*$)[^\s\n;](?:(?:(?!\.(?:\s|$))[^\n;])*[^\s\n;.,])?'
+        score: 0.86
+      # A BARE "orthodox" is deliberately absent: "orthodox" is an ordinary English
+      # adjective, and although these recognizers no longer run on English scans a
+      # German document quoting it would still be one-way redacted for nothing. The
+      # compounded forms are unambiguous, and a bare "orthodox" cell value is still
+      # caught by the Konfession/Religion label pattern above.
+      - regex: '\b(?:evangelisch-lutherisch|römisch-katholisch|(?:griechisch|russisch|serbisch|syrisch)-orthodox|konfessionslos|Kirchenaustritt|altkatholisch|freikirchlich|hinduistisch|buddhistisch|israelitisch|evangelisch|moslemisch|lutherisch|muslimisch|katholisch|reformiert|islamisch|jüdisch)\b'
+        score: 0.86
+      # Colon-free "Kirchensteuermerkmal ev". The value is restricted to the ELStAM
+      # confession CODES, which is what makes a colon-free anchor safe here: an
+      # arbitrary following word would claim "Religion spielt keine Rolle" -> "spielt".
+      - regex: '(?<=\b(?:Kirchensteuerabzugsmerkmal|Religionszugehörigkeit|Kirchensteuermerkmal|KiSt-Merkmal|Konfession|Religion)\s{1,3})(?:ev|rk|lt|rf|ak|is|ib|jd|jh|il|na|vd|fa|fb|fg|fm|fr|fs)\b'
+        score: 0.86
+  # Racial / ethnic origin -- an Art. 9 category with NO detection at all before.
+  # It emits the EXISTING NRP entity type (nationality / religious or political
+  # group), which is already mapped to the special-category data class and already
+  # one-way anonymized; NRP is produced only by the ENGLISH spaCy model, so on a
+  # German document nothing ever filled it.
+  - name: NRP
+    language: de
+    languages: [de]
+    umlaut_variants: true
+    patterns:
+      - regex: '(?<=\b(?:Staatsangehörigkeit|Staatsbürgerschaft|Volkszugehörigkeit|Nationalität|Herkunftsland|Geburtsland|Ethnie)\s{0,3}[:=]\s{0,3})(?=[^\n;]*[\p{L}\d])(?!(?:keine?(?:\s+Angaben?)?|nein|nichts|ohne|unbekannt|entfällt|nicht\s+(?:angegeben|bekannt|zutreffend|erhoben)|null|leer|n\.?\s?a\.?|k\.?\s?a\.?)(?![\p{L}\d])[\s.,;]*$)[^\s\n;](?:(?:(?!\.(?:\s|$))[^\n;])*[^\s\n;.,])?'
+        score: 0.86
+      # "Herkunft" is NOT in the list above on purpose: in a bank it far more often
+      # means the origin of FUNDS ("Herkunft: Erbschaft"), which is not Art. 9 data
+      # and must not be one-way destroyed. Behind it, only a nationality-shaped
+      # adjective is claimed.
+      - regex: '(?<=\b(?:Herkunft|Abstammung|Muttersprache)\s{0,3}[:=]\s{0,3})\p{L}{3,25}sch(?:e[rnms]?)?\b'
+        score: 0.86
+  # Sex life / sexual orientation -- likewise no detection at all before.
+  - name: DE_SEX_LIFE
+    language: de
+    languages: [de]
+    umlaut_variants: true
+    patterns:
+      - regex: '\b(?:homosexuell|heterosexuell|transsexuell|intersexuell|bisexuell|lesbisch|schwul|geschlechtsangleichung|geschlechtsumwandlung|nichtbinär)\b'
+        score: 0.86
+      - regex: '(?<=\b(?:Sexuelle Orientierung|Sexuelle Identität|Geschlechtsidentität|Sexualleben)\s{0,3}[:=]\s{0,3})(?=[^\n;]*[\p{L}\d])(?!(?:keine?(?:\s+Angaben?)?|nein|nichts|ohne|unbekannt|entfällt|nicht\s+(?:angegeben|bekannt|zutreffend|erhoben)|null|leer|n\.?\s?a\.?|k\.?\s?a\.?)(?![\p{L}\d])[\s.,;]*$)[^\s\n;](?:(?:(?!\.(?:\s|$))[^\n;])*[^\s\n;.,])?'
+        score: 0.86
+  - name: DE_UNION_PARTY
+    language: de
+    languages: [de]
+    umlaut_variants: true
+    patterns:
+      - regex: '(?<=\b(?:Gewerkschaftsmitgliedschaft|Gewerkschaftszugehörigkeit|Gewerkschaftsmitglied|Parteimitgliedschaft|Parteizugehörigkeit|Parteimitglied|Gewerkschaft|Partei)\s{0,3}[:=]\s{0,3})(?=[^\n;]*[\p{L}\d])(?!(?:keine?(?:\s+Angaben?)?|nein|nichts|ohne|unbekannt|entfällt|nicht\s+(?:angegeben|bekannt|zutreffend|erhoben)|null|leer|n\.?\s?a\.?|k\.?\s?a\.?)(?![\p{L}\d])[\s.,;]*$)[^\s\n;](?:(?:(?!\.(?:\s|$))[^\n;])*[^\s\n;.,])?'
+        score: 0.86
+  # Named unions and parties, CASE-SENSITIVE and therefore a separate recognizer:
+  # case-insensitively, "Die Linke" would match the everyday phrase "die linke
+  # Spalte" on any page. Same entity type, so it groups and acts identically.
+  - name: DE_UNION_PARTY
+    language: de
+    languages: [de]
+    umlaut_variants: true
+    case_sensitive: true
+    patterns:
+      - regex: '\b(?:ver\.di|IG\s+Metall|IG\s+BCE|IG\s+BAU|Marburger\s+Bund|Vereinigung\s+Cockpit|Piratenpartei|Freie\s+Wähler|Die\s+Linke|Die\s+Grünen|Bündnis\s+90|DGB|GEW|NGG|GdP|EVG|SPD|CDU|CSU|FDP|AfD)\b'
+        score: 0.86
