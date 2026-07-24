@@ -54,3 +54,17 @@
   zero-content shape descriptor (e.g. `[Freitext: 3 Sätze, ~140 Zeichen]`) that
   conveys format/size to a downstream LLM while withholding all original text.
   Contains no original characters, so the fail-loud verify passes by construction.
+- **GLiNER / zero-shot NER**: the offline, ONNX-quantised generalist NER model
+  (gliner_multi-v2.1) that detects entity types supplied as plain-text *labels at
+  runtime* (e.g. "internal tool", "project name") with no training or gazetteer —
+  used to recover items the spaCy model and gazetteer miss. Runs fully local.
+- **Second-pass recognizer**: the GLiNER recognizer that runs after the cheap
+  deterministic first pass (gazetteer + header→category + spaCy), registered in the
+  Presidio registry so its hits flow through the same overlap/precision/propagation.
+- **Pre-filter gate**: the cheap check that decides which cells are worth the ML
+  pass (non-empty, contains letters, length≥N, not already resolved by a
+  header/gazetteer hit) — keeps large-workbook scans tractable.
+- **Confidence override**: the rule that lets a high-confidence GLiNER label bypass
+  the German-noun/POS precision filter, so a strongly-detected German tool/project
+  name survives even when it looks like a common noun; low-confidence hits are still
+  filtered.

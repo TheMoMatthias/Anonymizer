@@ -8,7 +8,7 @@
 # lists, sensitivity, name_column_headers, user-ADDED recognizers). Without this,
 # the additive-only merge left every existing config permanently stuck on the
 # first-run defaults -- e.g. NER_MISC at 0.5 long after it shipped at 0.75.
-config_schema_version: 5
+config_schema_version: 6
 
 languages:
   - de
@@ -75,6 +75,40 @@ sensitivity: 0.0
 # documents. PERSON and structured IDs are never affected. Set false for a
 # recall-first deployment that wants every raw NER guess surfaced for review.
 corroboration_only: true
+
+# GLiNER: offline zero-shot NER model run as a SECOND-PASS recognizer, after the
+# cheap deterministic first pass (gazetteer/headers/spaCy). It recovers items
+# spaCy + gazetteer miss (prose names, orgs, and open-ended tools/projects) and,
+# being multilingual, runs language-agnostic so it catches English tool names in
+# a German document. spaCy stays for POS (the precision filters need it).
+#   - enabled:            master switch (user-owned; preserved across schema bumps)
+#   - model_path:         relative -> resolved against ANONYMIZER_GLINER_MODEL or
+#                         the package models/ dir; absolute used verbatim
+#   - onnx:               load the quantised ONNX build (small, CPU-friendly)
+#   - min_chars/min_score:cheap per-text gates before a hit is considered
+#   - confidence_override:a GLiNER hit at/above this score bypasses the German-
+#                         noun/POS precision gate (so a real German tool/project
+#                         name isn't re-dropped); lower-confidence hits still gated
+#   - cell_cap:           soft ceiling on ML-eligible cells per doc (logged, not
+#                         silently truncated) -- protects huge workbooks
+#   - labels:             {gliner phrase -> entity type} sent at inference time
+gliner:
+  enabled: false
+  model_path: gliner_multi-v2.1-onnx
+  onnx: true
+  min_chars: 3
+  min_score: 0.3
+  confidence_override: 0.85
+  cell_cap: 5000
+  labels:
+    person: PERSON
+    organization: ORGANIZATION
+    location: LOCATION
+    tool: TOOL
+    division: DIVISION
+    department: DEPARTMENT
+    licensee: LICENSEE
+    project: PROJECT
 
 # Default posture: pseudonymize (preserves relationships for downstream AI),
 # with hard one-way anonymize reserved for the highest-sensitivity identifiers

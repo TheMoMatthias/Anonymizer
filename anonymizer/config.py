@@ -135,7 +135,7 @@ def _ensure_defaults(cfg: dict) -> bool:
     shipped = yaml.safe_load(DEFAULT_CONFIG_PATH.read_text(encoding="utf-8")) or {}
     changed = False
 
-    for key in ("tiers", "sensitivity", "languages", "corroboration_only", "topical"):
+    for key in ("tiers", "sensitivity", "languages", "corroboration_only", "topical", "gliner"):
         if key not in cfg and key in shipped:
             cfg[key] = shipped[key]
             changed = True
@@ -214,6 +214,19 @@ def _resync_builtins(cfg: dict, shipped: dict) -> bool:
             **shipped_topical,
             "enabled": user_topical.get("enabled", shipped_topical.get("enabled", True)),
             "categories": merged_cats,
+        }
+
+    # GLiNER block: everything is code-owned (labels, model_path, thresholds,
+    # caps) EXCEPT the user's `enabled` toggle -- the one GLiNER setting the UI
+    # exposes. Re-syncing the rest means a shipped label-map fix or a new default
+    # reaches existing configs, while a user who turned ML detection off (or on)
+    # keeps that choice across the bump.
+    shipped_gliner = shipped.get("gliner")
+    if shipped_gliner:
+        user_gliner = cfg.get("gliner") or {}
+        cfg["gliner"] = {
+            **shipped_gliner,
+            "enabled": user_gliner.get("enabled", shipped_gliner.get("enabled", False)),
         }
 
     cfg["config_schema_version"] = shipped_ver

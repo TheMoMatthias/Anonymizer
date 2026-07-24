@@ -15,6 +15,7 @@ import re
 from . import taxonomy, validators
 from .actions import token_label
 from .engine import DEFAULT_LANGUAGES
+from .gliner_recognizer import GLINER_SOURCE
 from .models import DataClassGroup, Finding, GroupedFinding, PreviewGroup, PreviewRow, ScanResult, TextUnit
 
 CONTEXT_SNIPPET_RADIUS = 40
@@ -201,14 +202,27 @@ def _is_digit_bearing_code(entity_type: str, value: str) -> bool:
     return entity_type in _NER_ENTITIES and any(ch.isdigit() for ch in value)
 
 
-def _rejected_by_precision(entity_type, value, start, end, analyzer, lang, nlp_artifacts) -> bool:
+def _rejected_by_precision(
+    entity_type, value, start, end, analyzer, lang, nlp_artifacts, *, source="", score=0.0, trust_override=1.0
+) -> bool:
     """The single precision gate every candidate must clear -- applied
     IDENTICALLY to raw NER findings and to document-wide propagated matches, so
     propagation can no longer spread a value past the filters that would reject
     it on the direct path. Combines: lowercase/stopword noise, structural
     non-names (fragments, snake_case ids, acronyms), part-of-speech
     implausibility (verb/determiner tagged as an entity), and digit-bearing
-    codes."""
+    codes.
+
+    Confidence override: a GLiNER hit scoring at/above `trust_override` bypasses
+    the gate entirely. The gate exists to filter spaCy's flat-score NER noise
+    (verbs/determiners/common German nouns mis-tagged as entities); a model that
+    scored THIS span highly has already made that call, so re-filtering it by POS
+    would re-drop exactly the German tool/project/org names GLiNER was added to
+    catch (e.g. a project literally named "Derivatefreiheit"). Low-confidence
+    GLiNER hits still run the full gate. Default trust_override=1.0 means callers
+    that don't pass it keep byte-identical behaviour."""
+    if source == GLINER_SOURCE and score >= trust_override:
+        return False
     return (
         _is_noise_entity(entity_type, value, analyzer, lang)
         or _is_structural_nonname(entity_type, value)
@@ -417,6 +431,15 @@ def detect_unit(analyzer, unit: TextUnit, config: dict, nlp_artifacts=None) -> l
     # entities_cfg (for grouping/apply) but must NOT be requested from
     # analyzer.analyze (Presidio warns per call for an entity with no recognizer).
     _structural = set(taxonomy.TOPICAL_ENTITY_TYPES) | {taxonomy.POSSIBLE_TOPICAL}
+    # When GLiNER is enabled it BECOMES the recognizer for the propagating topical
+    # types, so they may now be requested from analyze(). DESCRIPTION stays
+    # structural (handled whole-cell at the format layer, not as a prose span) and
+    # POSSIBLE_TOPICAL is never model-emitted.
+    gliner_cfg = config.get("gliner") or {}
+    gliner_on = bool(gliner_cfg.get("enabled"))
+    gliner_override = float(gliner_cfg.get("confidence_override", 0.85))
+    if gliner_on:
+        _structural -= set(taxonomy.PROPAGATING_TOPICAL_TYPES)
     wanted_entities = [e for e in entities_cfg if e not in _structural]
 
     candidates: list[Finding] = []
@@ -460,7 +483,11 @@ def detect_unit(analyzer, unit: TextUnit, config: dict, nlp_artifacts=None) -> l
                 if trimmed:
                     start += trimmed.end()
                     value = value[trimmed.end() :]
-            if _rejected_by_precision(r.entity_type, value, start, end, analyzer, lang, nlp_artifacts):
+            r_source = (r.recognition_metadata or {}).get("recognizer_name", "")
+            if _rejected_by_precision(
+                r.entity_type, value, start, end, analyzer, lang, nlp_artifacts,
+                source=r_source, score=r.score, trust_override=gliner_override,
+            ):
                 continue
             finding = Finding(
                 entity_type=r.entity_type,
@@ -470,7 +497,7 @@ def detect_unit(analyzer, unit: TextUnit, config: dict, nlp_artifacts=None) -> l
                 unit_id=unit.id,
                 start=start,
                 end=end,
-                source=(r.recognition_metadata or {}).get("recognizer_name", ""),
+                source=r_source,
             )
             _refine(finding)
             threshold = entities_cfg.get(r.entity_type, {}).get("confidence_threshold", 0.5)

@@ -87,11 +87,15 @@ _ANCHORED_NAME_PATTERNS = [
 ]
 
 
-def build_analyzer(config: dict) -> AnalyzerEngine:
+def build_analyzer(config: dict, *, gliner_backend=None) -> AnalyzerEngine:
     """Builds the Presidio analyzer (spaCy NLP engine + recognizers). Detection
     logic itself lives in `core`; language *selection* per document lives in
     `pipeline`/`language`. This just assembles an engine that can run either
-    supported language on demand."""
+    supported language on demand.
+
+    `gliner_backend` lets a caller inject a ready GlinerBackend (tests pass a
+    deterministic fake); when None and GLiNER is enabled, the real ONNX backend
+    is loaded here and a load failure propagates -- the intended hard-fail."""
     languages = config.get("languages") or list(DEFAULT_LANGUAGES)
     unknown = [lang for lang in languages if lang not in SPACY_MODELS]
     if unknown:
@@ -147,4 +151,26 @@ def build_analyzer(config: dict) -> AnalyzerEngine:
                 global_regex_flags=_CASE_SENSITIVE_FLAGS,
             )
         )
+
+    # GLiNER second-pass recognizer (optional, config-gated). Registered per
+    # language, but the backend is language-agnostic, so in the normal
+    # single-language-narrowed scan it runs once over the full text and can catch
+    # an English tool name inside a German document. A load failure propagates
+    # (hard-fail); the message tells the user to disable ML detection in Settings.
+    gliner_cfg = config.get("gliner") or {}
+    if gliner_cfg.get("enabled"):
+        from .gliner_recognizer import GlinerRecognizer, load_gliner_backend
+
+        backend = gliner_backend if gliner_backend is not None else load_gliner_backend(gliner_cfg)
+        label_map = gliner_cfg.get("labels") or {}
+        for lang in languages:
+            analyzer.registry.add_recognizer(
+                GlinerRecognizer(
+                    backend,
+                    label_map,
+                    supported_language=lang,
+                    min_chars=int(gliner_cfg.get("min_chars", 3)),
+                    min_score=float(gliner_cfg.get("min_score", 0.3)),
+                )
+            )
     return analyzer
