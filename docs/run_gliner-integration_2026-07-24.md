@@ -1,7 +1,7 @@
 # Run-file — GLiNER second-pass ML detection
 
 **Date:** 2026-07-24
-**Status:** Phase A COMPLETE (checkpoint) → awaiting go for Phase B
+**Status:** Phase A + B COMPLETE (checkpoints) → Phase C needs a connected machine (model + measurement)
 **Grill:** 24 questions / 6 rounds (see decisions below). Research memo: `docs/research_offline-detection-models_2026-07-24.md`.
 
 ---
@@ -22,6 +22,15 @@ Delivered (all tests green: **199 passed**, 12 new in `tests/test_gliner.py`):
 2. **spaCy `lg→sm` downgrade deferred** to the packaging phase. It requires `de_core_news_sm`/`en_core_web_sm` installed (needs network, absent here) and the DEFAULT "revert sm→lg if POS degrades the German-noun tests" can't be evaluated offline. Flipping `SPACY_MODELS` without `sm` present would break every test. It's a size optimization orthogonal to the GLiNER plumbing — do it on the connected packaging machine.
 
 **Not validatable in this environment (inherent, not a gap):** real ONNX model inference — the model is fetched once on a connected machine and vendored into the air-gapped bundle (Phase C). Phase A proves the integration via the deterministic fake backend, which is exactly the seam the design put there.
+
+### Phase B — gate + language-agnostic ✅ (2026-07-24); soft-cap + description DEFERRED
+Delivered (all tests green: **201 passed**, 14 in `tests/test_gliner.py`):
+- **Cheap, stateless pre-filter gate** in `GlinerRecognizer.analyze`: skips empties, sub-`min_chars`, and no-alphabetic text (pure numbers/dates/punctuation). Parity-safe by construction (pure function of the text).
+- **Language-agnostic behavior confirmed**: a German-narrowed config still catches an English tool name via GLiNER (test). The spaCy model is chosen per detected language for POS; GLiNER runs once over the whole text regardless.
+
+**Deferred by decision (2026-07-24), both matching real-model triggers — NOT dropped:**
+- **Soft cap (content-keyed allow-set).** A parity-safe cap MUST be a set precomputed identically in scan and apply (the two passes iterate cells differently -- `_iter_cell_units` vs `ws.iter_rows()` -- so a running counter would cut different cells and break byte-for-byte parity). That machinery is real and parity-critical, and its benefit + correct cap value need real-model perf data. The shipped cheap gate already removes the bulk of ineligible cells. **Resurface:** when the real model runs on a connected machine and a large-workbook scan time is measurable.
+- **Cell-level DESCRIPTION flag.** Zero-shot "sensitive description" classification quality is unmeasurable offline (already a DEFERRED item). Structural header-driven DESCRIPTION→summarize already works. **Resurface:** once v2.1 description classification is validated on a real document (else escalate to GLiNER2 per the existing DEFERRED note).
 
 ---
 

@@ -80,10 +80,17 @@ class GlinerRecognizer(EntityRecognizer):
         return None
 
     def analyze(self, text: str, entities, nlp_artifacts=None) -> list[RecognizerResult]:
-        # Cheap text-level gate; the richer cell-level pre-filter + soft cap live
-        # in the xlsx handler (Phase B). GLiNER does its OWN tokenization, so the
-        # spaCy nlp_artifacts are intentionally unused here.
+        # Cheap, STATELESS text-level gate (parity-safe: a pure function of the
+        # text). Skips empties, too-short strings, and text with no alphabetic
+        # character at all (pure numbers/dates/punctuation) -- pointless to run a
+        # name model on. A value-level gate that can see the cell value apart from
+        # its header, plus the content-keyed soft cap, are xlsx-handler concerns
+        # (they need cross-cell state computed identically in scan and apply to
+        # preserve parity) and are deliberately NOT done here. GLiNER does its OWN
+        # tokenization, so the spaCy nlp_artifacts are intentionally unused.
         if not text or len(text.strip()) < self._min_chars:
+            return []
+        if not any(ch.isalpha() for ch in text):
             return []
         results: list[RecognizerResult] = []
         for ent in self._backend.predict(text, self._labels):

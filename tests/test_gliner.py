@@ -186,6 +186,27 @@ def test_load_backend_missing_package_raises():
     assert "ML detection" in str(exc.value)
 
 
+def test_no_alpha_text_gated(gliner_config):
+    """A cell with no alphabetic character (pure numbers/dates/punctuation) is
+    skipped before the backend runs -- the stateless cheap gate."""
+    backend = FakeBackend([("organization", "2026-07-24", 0.99)])
+    findings = _detect(gliner_config, backend, "2026-07-24 / 12:30 -- 4,50")
+    assert not any(f.source == GLINER_SOURCE for f in findings)
+
+
+def test_language_agnostic_finds_english_term_in_german_config(gliner_config):
+    """The config is narrowed to German (spaCy loads the de model for POS), yet
+    GLiNER -- being multilingual and language-agnostic -- still catches an English
+    tool name embedded in the German text. This is the 'German doc with English
+    words' fix: GLiNER runs once over the whole text regardless of the detected
+    language."""
+    assert gliner_config["languages"] == ["de"]
+    backend = FakeBackend([("tool", "DeepL Pro", 0.9)])
+    text = "Die Abteilung nutzt das externe Werkzeug DeepL Pro für Übersetzungen."
+    findings = _detect(gliner_config, backend, text)
+    assert any(f.entity_type == "TOOL" and f.value == "DeepL Pro" and f.source == GLINER_SOURCE for f in findings)
+
+
 def test_resolve_model_path_env(monkeypatch, tmp_path):
     monkeypatch.setenv("ANONYMIZER_GLINER_MODEL", str(tmp_path / "m.onnx"))
     assert resolve_model_path({"model_path": "ignored"}) == tmp_path / "m.onnx"
