@@ -38,6 +38,13 @@ TOKEN_LABELS = {
     "DATE_TIME": "DATE",
     "NER_MISC": "ENTITY",
     "DENY_LIST": "REDACTED",
+    # Topical (non-personal) categories.
+    "TOOL": "TOOL",
+    "DIVISION": "DIVISION",
+    "DEPARTMENT": "DEPT",
+    "LICENSEE": "LICENSEE",
+    "PROJECT": "PROJEKT",
+    "DESCRIPTION": "TEXT",
 }
 
 # Matches a rendered token like [PERSON_1] or [IBAN] for re-identification.
@@ -52,14 +59,40 @@ def token_label(entity_type: str) -> str:
     return TOKEN_LABELS.get(entity_type, entity_type)
 
 
+_SENTENCE_SPLIT = re.compile(r"[.!?]+")
+
+
+def _structural_summary(value: str) -> str:
+    """A zero-content SHAPE descriptor of a value: sentence/line count and
+    approximate size, NO original characters. Feeds the 'summarize' mode so a
+    downstream LLM learns the cell's format/size without its confidential
+    content -- and so the fail-loud verify (which forbids any retained original)
+    passes by construction. Deterministic (pure function of the value), so
+    scan/apply stay in parity and the per-cell caches stay valid."""
+    v = value.strip()
+    lines = [ln for ln in re.split(r"[\r\n]+", v) if ln.strip()]
+    if len(lines) >= 2:
+        return f"Liste, {len(lines)} Einträge"
+    n = max(1, len([s for s in _SENTENCE_SPLIT.split(v) if s.strip()]))
+    return f"{n} {'Satz' if n == 1 else 'Sätze'}, ~{len(v)} Zeichen"
+
+
 def resolve_replacement(entity_type: str, value: str, action: str, mapping_store: MappingStore) -> str | None:
     """Returns the replacement text for a decided action, or None if the match
-    should be left untouched (skip)."""
+    should be left untouched (skip).
+
+    Modes: skip -> leave; pseudonymize -> consistent reversible `[PERSON_1]`
+    token; redact/anonymize -> one-way `[PERSON]`; summarize -> a zero-content
+    structural placeholder `[PROJEKT: 3 Sätze, ~140 Zeichen]` (never reversible,
+    never contains original text)."""
     if action == "skip":
         return None
     if action == "pseudonymize":
         placeholder = mapping_store.get_or_create(entity_type, value, label=token_label(entity_type))
         return f"[{placeholder}]"
+    if action == "summarize":
+        return f"[{token_label(entity_type)}: {_structural_summary(value)}]"
+    # "redact" (and legacy "anonymize"): one-way bare label.
     return f"[{token_label(entity_type)}]"
 
 

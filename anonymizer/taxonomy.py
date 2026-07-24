@@ -20,6 +20,19 @@ TIER_LOW = "low"
 # Entity type used for the completeness/unmatched-risk bucket (see core.py).
 POSSIBLE_MISS = "POSSIBLE_MISS"
 
+# Topical (non-personal, organizational) category entity types. Detected
+# structurally (header->category) or by the auto-gazetteer, NOT by personal-
+# entity NER. See docs/run_topical-sensitivity_2026-07-23.md.
+TOPICAL_ENTITY_TYPES = ("TOOL", "DIVISION", "DEPARTMENT", "LICENSEE", "PROJECT", "DESCRIPTION")
+# Topical categories whose VALUES are names worth propagating document-wide (a
+# tool named in a Tools column is a tool elsewhere too). DESCRIPTION is excluded:
+# free-text descriptions are unique and whole-cell-handled, never propagated.
+PROPAGATING_TOPICAL_TYPES = ("TOOL", "DIVISION", "DEPARTMENT", "LICENSEE", "PROJECT")
+# Informational bucket: capitalized/OOV tokens that look like they COULD be an
+# internal term but weren't in a labelled column -- surfaced for promote-or-skip,
+# never auto-redacted.
+POSSIBLE_TOPICAL = "POSSIBLE_TOPICAL"
+
 
 @dataclass(frozen=True)
 class DataClass:
@@ -39,14 +52,20 @@ GOVERNMENT_IDS = DataClass("government_ids", "Government IDs", "high", 2)
 FINANCIAL_IDS = DataClass("financial_ids", "Financial IDs", "high", 3)
 CONTACT = DataClass("contact", "Contact details", "medium", 4)
 BANK_INTERNAL = DataClass("bank_internal", "Bank-internal refs", "medium", 5)
-ORG_PLACES = DataClass("org_places", "Organizations & places", "medium", 6)
+# Non-personal organizational sensitivity: internal tools, divisions,
+# departments, licensees, confidential project descriptions. Grouped so the five
+# topical categories share one review cluster (see docs/run_topical-*).
+INTERNAL_TOPICAL = DataClass("internal_topical", "Internal / topical", "medium", 6)
+ORG_PLACES = DataClass("org_places", "Organizations & places", "medium", 7)
 # spaCy's German model tags entities it cannot classify as MISC -- and real
 # names land there. They are not confidently people, so they get their own
 # review bucket rather than being forced into People (wrong) or dropped (a
 # silent leak, which is what happened before).
-OTHER_ENTITIES = DataClass("other_entities", "Other named entities", "medium", 7)
-DATES_OTHER = DataClass("dates_other", "Dates & other", "low", 8)
-UNMATCHED = DataClass("unmatched", "Possible misses (unmatched)", "low", 9)
+OTHER_ENTITIES = DataClass("other_entities", "Other named entities", "medium", 8)
+DATES_OTHER = DataClass("dates_other", "Dates & other", "low", 9)
+# Informational: possible internal/topical terms (promote-or-skip, not redacted).
+TOPICAL_CANDIDATES = DataClass("topical_candidates", "Possible internal/topical terms", "low", 10)
+UNMATCHED = DataClass("unmatched", "Possible misses (unmatched)", "low", 11)
 
 DATA_CLASSES = [
     PEOPLE,
@@ -55,9 +74,11 @@ DATA_CLASSES = [
     FINANCIAL_IDS,
     CONTACT,
     BANK_INTERNAL,
+    INTERNAL_TOPICAL,
     ORG_PLACES,
     OTHER_ENTITIES,
     DATES_OTHER,
+    TOPICAL_CANDIDATES,
     UNMATCHED,
 ]
 
@@ -87,6 +108,13 @@ _ENTITY_TO_CLASS: dict[str, DataClass] = {
     "NER_MISC": OTHER_ENTITIES,
     "DATE_TIME": DATES_OTHER,
     "NRP": SPECIAL_CATEGORY,  # nationality / religion / political group -- GDPR Art. 9
+    "TOOL": INTERNAL_TOPICAL,
+    "DIVISION": INTERNAL_TOPICAL,
+    "DEPARTMENT": INTERNAL_TOPICAL,
+    "LICENSEE": INTERNAL_TOPICAL,
+    "PROJECT": INTERNAL_TOPICAL,
+    "DESCRIPTION": INTERNAL_TOPICAL,
+    POSSIBLE_TOPICAL: TOPICAL_CANDIDATES,
     POSSIBLE_MISS: UNMATCHED,
 }
 

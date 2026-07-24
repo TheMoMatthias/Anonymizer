@@ -60,13 +60,18 @@ def sample_docx(tmp_path) -> Path:
 
 @pytest.fixture
 def sample_xlsx(tmp_path) -> Path:
+    # Row 1 is a header/schema label, never scanned as data (see
+    # xlsx_handler._iter_cell_units) -- so the actual test values live in
+    # row 2, matching how row 1 behaves in a real spreadsheet.
     wb = openpyxl.Workbook()
     ws = wb.active
     ws.title = "Main"
-    ws["A1"] = "Hans Mueller"
-    ws["A2"] = "DE89370400440532013000"
+    ws["A1"] = "Name"
+    ws["A2"] = "Hans Mueller"
+    ws["A3"] = "DE89370400440532013000"
     hidden_ws = wb.create_sheet("Hidden")
-    hidden_ws["A1"] = "Hans Mueller"
+    hidden_ws["A1"] = "Name"
+    hidden_ws["A2"] = "Hans Mueller"
     hidden_ws.sheet_state = "hidden"
     path = tmp_path / "sample.xlsx"
     wb.save(path)

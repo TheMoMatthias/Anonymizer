@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import html
 import os
 import shutil
 import subprocess
@@ -14,7 +15,7 @@ from .. import audit as audit_mod
 from .. import config as config_mod
 from .. import profiles as profiles_mod
 from ..actions import reidentify_text
-from ..core import build_preview
+from ..core import build_preview, findings_summary, write_findings_csv
 from ..engine import build_analyzer
 from ..mapping import MappingStore
 from ..models import FileJob
@@ -174,12 +175,69 @@ def warm_start() -> None:
     threading.Thread(target=_ensure_analyzer, daemon=True).start()
 
 
+def _source_signature() -> str:
+    """A short hash of the ACTUAL source content of the anonymizer package the
+    running process loaded. The git HEAD hash alone can't distinguish two
+    uncommitted working-tree states (both read as '<hash>+'), which is exactly
+    the ambiguity that made 'do you have my latest change?' unanswerable. This
+    hashes every .py file's bytes, so it changes the instant any source is
+    edited -- read it back and it pins the running code exactly."""
+    import hashlib
+
+    pkg_root = Path(__file__).resolve().parents[1]  # the `anonymizer` package dir
+    h = hashlib.sha256()
+    for py in sorted(pkg_root.rglob("*.py")):
+        try:
+            h.update(py.relative_to(pkg_root).as_posix().encode("utf-8"))
+            h.update(py.read_bytes())
+        except OSError:
+            continue
+    return h.hexdigest()[:6]
+
+
+def _build_marker() -> str:
+    """A short, VISIBLE identifier of exactly which build is running, shown in
+    the header. This exists because the two launch paths (repo `Anonymizer.bat`
+    via an editable install, vs the frozen offline bundle behind the desktop
+    shortcut) look identical but can run very different code -- so "I don't see
+    the change I was told about" is otherwise impossible to diagnose remotely.
+    Shows the git short-hash plus a source-content signature when running from a
+    checkout ("dev · a1b2c3d+ · 9f2e1c"), or the packaged version otherwise
+    ("bundle · v0.2.0 · 9f2e1c"). The signature is the reliable part: it
+    changes on every source edit, committed or not."""
+    from .. import __version__
+
+    sig = _source_signature()
+    repo_root = Path(__file__).resolve().parents[2]
+    if (repo_root / ".git").exists():
+        try:
+            out = subprocess.run(
+                ["git", "-C", str(repo_root), "rev-parse", "--short", "HEAD"],
+                capture_output=True, text=True, timeout=3, check=False,
+            )
+            head = out.stdout.strip()
+            dirty = subprocess.run(
+                ["git", "-C", str(repo_root), "status", "--porcelain"],
+                capture_output=True, text=True, timeout=3, check=False,
+            ).stdout.strip()
+            if head:
+                return f"dev · {head}{'+' if dirty else ''} · {sig}"
+        except Exception:  # noqa: BLE001 -- a marker must never break startup
+            pass
+        return f"dev · {sig}"
+    return f"bundle · v{__version__} · {sig}"
+
+
 class PageState:
     def __init__(self) -> None:
         self.jobs: list[FileJob] = []
         self.selected: int | None = None
         self.profile: str = profiles_mod.PROFILE_NAMES[0]
         self.language: str = "auto"  # "auto" | "de" | "en"
+        # Live detection-sensitivity offset for the review-screen control bar
+        # (mirrors the persisted Settings value; None until first read from
+        # config so a saved Settings sensitivity is respected as the default).
+        self.sensitivity: float | None = None
         # Wired up by main_page()/_intake_panel so the nested render helpers can
         # reach them; declared here so PageState's real interface is visible.
         self.add_files: Callable[[list[str]], Awaitable[None]] | None = None
@@ -192,6 +250,23 @@ class PageState:
         if self.selected is None or self.selected >= len(self.jobs):
             return None
         return self.jobs[self.selected]
+
+
+# The native window is single-instance (one PageState alive at a time), so a
+# module-level reference is enough for the Settings page -- a separate
+# NiceGUI route/page with no other link to the main page's state -- to reach
+# "whatever document is currently open" for the sensitivity-slider preview.
+_active_state: PageState | None = None
+
+
+def current_review_job() -> FileJob | None:
+    """The currently selected job with a completed scan, or None. Used by the
+    Settings page to preview the sensitivity slider's live effect on the
+    document actually open right now, rather than an abstract example."""
+    if _active_state is None or _active_state.selected is None:
+        return None
+    job = _active_state.current
+    return job if job is not None and job.scan is not None and job.status == "review" else None
 
 
 _STATUS_COLORS = {
@@ -209,15 +284,21 @@ def main_page() -> None:
     theme.install()
     dark = ui.dark_mode(value=True)
     state = PageState()
+    global _active_state
+    _active_state = state
 
     with ui.element("div").classes("az-header w-full"):
         with ui.row().classes("items-center justify-between px-6 py-3 w-full max-w-7xl mx-auto"):
             with ui.row().classes("items-center gap-3"):
-                ui.icon("shield_lock", size="1.6rem").style(f"color:{theme.PRIMARY}")
+                ui.icon("security", size="1.6rem").style(f"color:{theme.PRIMARY}")
                 with ui.column().classes("gap-0"):
                     ui.label("Document Anonymizer").classes("az-h1")
                     ui.label("Local · offline · bank-grade PII redaction").classes("az-kicker")
             with ui.row().classes("items-center gap-1"):
+                ui.label(_build_marker()).classes("az-muted az-mono text-xs mr-2").tooltip(
+                    "Which build is running. 'dev' = live repo code via Anonymizer.bat; "
+                    "'bundle' = the packaged offline copy (desktop shortcut). Rebuild the bundle to update it."
+                )
                 ui.button(icon="dark_mode", on_click=lambda: dark.toggle()).props("flat round dense")
                 ui.button("Re-identify", icon="lock_open", on_click=lambda: ui.navigate.to("/reidentify")).props(
                     "flat dense"
@@ -282,19 +363,25 @@ def _intake_panel(state: PageState) -> None:
         ui.label("Add documents").classes("az-h2 mb-1")
 
         async def handle_upload(e) -> None:
-            # ui.upload fires this once per file. `e.content` is a file-like of the
-            # uploaded bytes. The read AND the disk-write can be large/slow (up to
-            # the 100 MB cap), so both are kept off the event loop; ANY failure (bad
-            # name, disk full, unreadable, a device-name write that blocks) surfaces
-            # to the user -- an upload must never silently vanish.
+            # ui.upload fires this once per file. Since NiceGUI 3.0, the uploaded
+            # file lives under `e.file` (a FileUpload with `.name` and async
+            # `.read()`) rather than directly on `e`. `.read()` is already async
+            # (NiceGUI does its own non-blocking I/O internally), so it must be
+            # awaited directly -- wrapping it in run.io_bound would just return
+            # the coroutine object instead of running it. The disk-write can
+            # still be large/slow (up to the 100 MB cap), so that's kept off the
+            # event loop; ANY failure (bad name, disk full, unreadable, a
+            # device-name write that blocks) surfaces to the user -- an upload
+            # must never silently vanish.
+            name = e.file.name
             try:
-                data = await run.io_bound(e.content.read)
-                path = await run.io_bound(_persist_upload, e.name, data)
+                data = await e.file.read()
+                path = await run.io_bound(_persist_upload, name, data)
             except Exception as exc:  # noqa: BLE001
-                ui.notify(f"Couldn't add {e.name}: {exc}", type="negative", timeout=8000)
+                ui.notify(f"Couldn't add {name}: {exc}", type="negative", timeout=8000)
                 return
             if path is None:
-                ui.notify(f"Couldn't add {e.name} — unsupported or invalid filename.", type="warning")
+                ui.notify(f"Couldn't add {name} — unsupported or invalid filename.", type="warning")
                 return
             await state.add_files([str(path)])  # type: ignore[attr-defined]
 
@@ -375,6 +462,56 @@ def _render_queue(container, state: PageState, select_job) -> None:
                     theme.chip(job.status, _STATUS_COLORS.get(job.status, theme.SECONDARY))
 
 
+def _detection_control_bar(state: PageState, job: FileJob) -> None:
+    """The one place detection settings live for the file on screen: profile,
+    language, and a live sensitivity slider, with a Re-scan that applies them.
+    Previously profile/language sat only in the left intake panel (which applies
+    to files added NEXT, not the one being reviewed) and sensitivity only on the
+    separate Settings page -- so changing a setting for the current file meant
+    hunting across two places and had no obvious 'apply' action."""
+    if state.sensitivity is None:
+        state.sensitivity = float((job.config or {}).get("sensitivity", 0.0))
+    lang_labels = {"auto": "Auto-detect", "de": "German", "en": "English"}
+    with ui.element("div").classes("az-card w-full"):
+        with ui.row().classes("items-center gap-4 w-full flex-wrap"):
+            with ui.row().classes("items-center gap-2"):
+                ui.label("Profile").classes("az-muted text-xs")
+                prof = ui.select(profiles_mod.PROFILE_NAMES, value=state.profile).props("dense outlined")
+                prof.on_value_change(lambda e: setattr(state, "profile", e.value))
+            with ui.row().classes("items-center gap-2"):
+                ui.label("Language").classes("az-muted text-xs")
+                lang = ui.select(
+                    lang_labels, value=state.language if state.language in lang_labels else "auto"
+                ).props("dense outlined")
+                lang.on_value_change(lambda e: setattr(state, "language", e.value))
+            with ui.row().classes("items-center gap-2 flex-grow min-w-40"):
+                ui.label("Sensitivity").classes("az-muted text-xs").tooltip(
+                    "Higher = catch more (more to review); lower = fewer, higher-confidence hits. "
+                    "Takes effect on Re-scan."
+                )
+                sens = ui.slider(min=0.0, max=0.3, step=0.01, value=float(state.sensitivity)).classes("flex-grow")
+                sens.on_value_change(lambda e: setattr(state, "sensitivity", float(e.value or 0.0)))
+                ui.label().bind_text_from(state, "sensitivity", lambda v: f"+{float(v or 0):.2f}").classes(
+                    "az-mono text-xs w-10"
+                )
+            ui.button("Re-scan", icon="refresh", on_click=lambda: _rescan_job(state, job)).props(
+                "color=primary dense"
+            ).tooltip("Re-run detection on this file with the settings above. Resets per-value decisions.")
+        # Show the language this file was ACTUALLY scanned in -- previously the
+        # detected language was invisible, so an auto-detect mistake (a German
+        # doc scanned as English) had no on-screen signal at all.
+        scanned = (job.config or {}).get("languages") or []
+        if scanned:
+            names = {"de": "German", "en": "English"}
+            detected = names.get(scanned[0], scanned[0])
+            how = "auto-detected" if state.language == "auto" else "selected"
+            with ui.row().classes("items-center gap-2 mt-2"):
+                ui.icon("translate", size="1rem").classes("az-muted")
+                ui.label(f"Scanned in: {detected} ({how})").classes("az-muted text-xs")
+                if state.language == "auto":
+                    ui.label("— wrong? pick the language above and Re-scan.").classes("az-muted text-xs")
+
+
 def _render_work(container, state: PageState) -> None:
     container.clear()
     job = state.current
@@ -439,41 +576,111 @@ def _render_work(container, state: PageState) -> None:
             return
 
         # status == review
+        _detection_control_bar(state, job)
         review_box = ui.column().classes("w-full gap-3")
 
         def on_change() -> None:
             pass  # decisions mutate in place; preview reads them live
 
-        # Column policies live on the job's config so they flow into apply_document
-        # (via the same config the file was scanned with) and are mutated in place
-        # by the Columns panel, exactly like per-value decisions.
+        # Column + cell policies live on the job's config so they flow into
+        # apply_document (via the same config the file was scanned with) and are
+        # mutated in place by the Columns / Cells panels, like per-value decisions.
         if job.config is None:
             job.config = {}
         column_policies = job.config.setdefault("column_policies", {})
-        review.render_review(review_box, job.scan, on_change, column_policies)
+        cell_policies = job.config.setdefault("cell_policies", {})
+        review.render_review(review_box, job.scan, on_change, column_policies, cell_policies)
 
         with ui.row().classes("w-full justify-end gap-2 mt-1"):
+            ui.button("Export flagged terms", icon="download", on_click=lambda: _export_findings(job)).props(
+                "flat"
+            ).tooltip(
+                "Writes a diagnostic CSV of every flagged term (with its original value + context) to the "
+                "Anonymized folder. Contains ORIGINAL data — for tuning detection, not a safe-to-share report."
+            )
             ui.button("Preview changes", icon="visibility", on_click=lambda: _preview_dialog(job)).props("flat")
             ui.button("Save anonymized copy", icon="save", on_click=lambda: _save_job(state, job)).props(
                 "color=primary"
             )
 
 
+_PREVIEW_CAP = 200  # rendering every row of a 5,000+-finding document stalls the dialog
+
+
+def _export_findings(job: FileJob) -> None:
+    """Writes the diagnostic CSV next to where the anonymized copy would go, and
+    reports the dominant entity types inline so the reviewer gets an immediate
+    read on WHAT is being flagged without opening the file."""
+    if job.scan is None:
+        ui.notify("Nothing to export — scan a document first.", type="warning")
+        return
+    stem = Path(job.name).stem
+    csv_path = anonymized_dir() / f"{stem}_flagged.csv"
+    try:
+        n = write_findings_csv(job.scan, csv_path)
+    except Exception as exc:  # noqa: BLE001
+        ui.notify(f"Couldn't write the export: {exc}", type="negative", timeout=8000)
+        return
+    summary = findings_summary(job.scan)
+    top = ", ".join(f"{et} ×{c}" for et, c in list(summary["by_entity_type"].items())[:4])
+    ui.notify(
+        f"Exported {n} flagged term(s) to {csv_path.name}. Top types: {top or 'none'}.",
+        type="positive",
+        timeout=10000,
+    )
+    _reveal_in_explorer(csv_path)
+
+
+def _highlighted_context_html(context: str, color: str) -> str:
+    """core._snippet already wraps the matched value in literal brackets
+    ("...zeitnah, [aber] die..."); this colours that bracketed span AND keeps
+    the brackets themselves visible, so the highlight doesn't rely on colour
+    alone (a colourblind reviewer still sees exactly which substring matched).
+    All three parts are HTML-escaped -- context is sourced from the user's own
+    document and must never be interpreted as markup."""
+    if "[" not in context or "]" not in context:
+        return html.escape(context)
+    prefix, rest = context.split("[", 1)
+    matched, suffix = rest.split("]", 1)
+    return (
+        f"{html.escape(prefix)}"
+        f'<b style="color:{color}">[{html.escape(matched)}]</b>'
+        f"{html.escape(suffix)}"
+    )
+
+
 def _preview_dialog(job: FileJob) -> None:
     groups = build_preview(job.scan.groups)
+    total_rows = sum(len(pg.rows) for pg in groups)
     with ui.dialog() as dialog, ui.element("div").classes("az-card").style("max-width:720px;width:92vw"):
         ui.label("Preview — what Save will change").classes("az-h2")
         if not groups:
             ui.label("Nothing selected for redaction (all set to skip).").classes("az-muted text-sm mt-2")
         else:
+            shown = 0
             with ui.column().classes("w-full gap-3 az-scroll mt-2"):
                 for pg in groups:
+                    if shown >= _PREVIEW_CAP:
+                        break
                     ui.label(pg.display).classes("az-kicker mt-1")
                     for r in pg.rows:
-                        with ui.row().classes("az-row items-center gap-2 w-full py-1"):
-                            ui.label(r.value[:60]).classes("az-mono text-sm flex-grow truncate")
-                            ui.icon("arrow_forward", size="1rem").classes("az-muted")
-                            theme.chip(r.token, theme.ACTION_COLORS.get(r.action, theme.SECONDARY))
+                        if shown >= _PREVIEW_CAP:
+                            break
+                        shown += 1
+                        color = theme.ACTION_COLORS.get(r.action, theme.SECONDARY)
+                        with ui.column().classes("az-row gap-0 w-full py-1"):
+                            with ui.row().classes("items-center gap-2 w-full"):
+                                ui.label(r.value[:60]).classes("az-mono text-sm flex-grow truncate")
+                                ui.icon("arrow_forward", size="1rem").classes("az-muted")
+                                theme.chip(r.token, color)
+                            if r.context:
+                                ui.html(_highlighted_context_html(r.context, color)).classes(
+                                    "az-muted text-xs truncate"
+                                )
+            if total_rows > _PREVIEW_CAP:
+                ui.label(f"+ {total_rows - _PREVIEW_CAP} more not shown (preview capped for responsiveness)").classes(
+                    "az-muted text-xs mt-1"
+                )
         with ui.row().classes("w-full justify-end mt-3"):
             ui.button("Close", on_click=dialog.close).props("flat")
     dialog.open()
@@ -494,7 +701,12 @@ async def _ask_language(n: int) -> str:
 
 async def scan_all(state: PageState, refresh) -> None:
     analyzer, config = await run.io_bound(_ensure_analyzer)
-    effective = profiles_mod.apply_profile(config, state.profile)
+    # The review-screen control bar's live sensitivity overrides the persisted
+    # Settings value for GUI scans; until the user touches it (None), the saved
+    # config value stands. Initialized here so the control bar can display it.
+    if state.sensitivity is None:
+        state.sensitivity = float(config.get("sensitivity", 0.0))
+    effective = {**profiles_mod.apply_profile(config, state.profile), "sensitivity": float(state.sensitivity)}
     pending = [j for j in state.jobs if j.status == "pending"]
     # Claim them synchronously (NO await before this line runs to completion) so a
     # concurrent scan_all -- a multi-file drop fires one handle_upload, hence one
@@ -534,6 +746,23 @@ async def scan_all(state: PageState, refresh) -> None:
             job.status = "failed"
             job.error = f"Unexpected error: {exc}"
         refresh()
+
+
+async def _rescan_job(state: PageState, job: FileJob) -> None:
+    """Re-detect one already-scanned file with the profile/language selected
+    NOW (they can change after the first scan). Resets the job to pending and
+    reuses the exact scan_all path -- including its language-resolution and
+    prompt -- so a re-scan and a first scan are identical by construction.
+    Per-value decisions and column policies are discarded: detection may now
+    surface a different set, so a fresh review is the only coherent state."""
+    if job.status not in ("review", "failed"):
+        return  # mid-scan or saving -- don't interrupt
+    job.status = "pending"
+    job.scan = None
+    job.config = None
+    job.error = None
+    state.refresh()  # type: ignore[attr-defined]
+    await scan_all(state, state.refresh)  # type: ignore[attr-defined]
 
 
 async def _save_job(state: PageState, job: FileJob) -> None:

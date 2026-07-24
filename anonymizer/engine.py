@@ -68,10 +68,18 @@ _NAME = r"\p{Lu}\p{L}+(?:[-\s]\p{Lu}\p{L}+){0,2}"
 # `Herrn?` also matches the dative "Herrn" that opens a German postal address
 # block ("Herrn\n<Name>\n<Straße>") -- the single most common place a customer name
 # appears in a bank letter, and exactly the sparse-context spot spaCy misses.
-_HONORIFICS = r"(?:Herrn?|Frau|Hr\.|Fr\.|Dr\.|Prof\.)"
+# ENGLISH honorifics/labels are included too, and these patterns are registered
+# for EVERY scan language (below), so an English person's name in a
+# German-dominant document ("Mr Smith", "Client: John Baker") is still caught
+# even though only the German NER model runs -- the "layered" mixed-language
+# strategy: dominant-language NER + language-independent anchors, rather than
+# running a second full NER model (which re-tags ordinary German words as noise).
+_HONORIFICS = r"(?:Herrn?|Frau|Hr\.|Fr\.|Dr\.|Prof\.|Mr\.?|Mrs\.?|Ms\.?|Miss|Sir|Madam)"
 _NAME_LABELS = (
     r"(?:Name|Kunde|Kundin|Kontoinhaber|Sachbearbeiter|Ansprechpartner|Empfänger|"
-    r"Berater|Beraterin|Mitarbeiter|Antragsteller|Versicherungsnehmer|Vertragspartner)"
+    r"Berater|Beraterin|Mitarbeiter|Antragsteller|Versicherungsnehmer|Vertragspartner|"
+    # English labels for a mixed-language document:
+    r"Customer|Client|Contact|Beneficiary|Applicant|Representative|Attn)"
 )
 _ANCHORED_NAME_PATTERNS = [
     Pattern(name="honorific_name", regex=rf"(?<=\b{_HONORIFICS}\s+){_NAME}", score=0.75),

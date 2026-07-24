@@ -19,13 +19,14 @@ def test_apply_replaces_cells(sample_xlsx, analyzer, base_config, mapping_db_pat
 
     assert out_path.suffix == ".xlsx"
     wb = openpyxl.load_workbook(out_path)
-    assert wb["Main"]["A1"].value != "Hans Mueller"
-    assert wb["Hidden"]["A1"].value != "Hans Mueller"
+    assert wb["Main"]["A2"].value != "Hans Mueller"
+    assert wb["Hidden"]["A2"].value != "Hans Mueller"
 
 
 def test_xlsm_output_has_macros_stripped(tmp_path, analyzer, base_config, mapping_db_path):
     wb = openpyxl.Workbook()
-    wb.active["A1"] = "Hans Mueller"
+    wb.active["A1"] = "Name"
+    wb.active["A2"] = "Hans Mueller"
     path = tmp_path / "sample.xlsm"
     wb.save(path)
 

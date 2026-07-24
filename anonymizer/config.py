@@ -135,7 +135,7 @@ def _ensure_defaults(cfg: dict) -> bool:
     shipped = yaml.safe_load(DEFAULT_CONFIG_PATH.read_text(encoding="utf-8")) or {}
     changed = False
 
-    for key in ("tiers", "sensitivity", "languages"):
+    for key in ("tiers", "sensitivity", "languages", "corroboration_only", "topical"):
         if key not in cfg and key in shipped:
             cfg[key] = shipped[key]
             changed = True
@@ -149,7 +149,75 @@ def _ensure_defaults(cfg: dict) -> bool:
         cfg.setdefault("allow_list", []).extend(new_allow)
         changed = True
 
+    if _resync_builtins(cfg, shipped):
+        changed = True
+
     return changed
+
+
+def _resync_builtins(cfg: dict, shipped: dict) -> bool:
+    """One-time (per schema bump) re-sync of CODE-OWNED built-in definitions from
+    the shipped default: entity thresholds/default-actions, built-in recognizer
+    regexes, and tier boundaries. The additive-only merge above never overwrites
+    an existing value, which meant a shipped improvement (e.g. NER_MISC 0.5 ->
+    0.75, or a DE_ADDRESS regex fix) never reached a config created before it.
+    This closes that gap without clobbering USER-OWNED data every load: it runs
+    only when the user's config_schema_version is behind shipped, then records
+    the new version so a user's later tweaks survive until the next bump.
+
+    Preserved (user-owned): allow_list, deny_list, sensitivity,
+    name_column_headers, and any custom_recognizers the user ADDED (a name not
+    in the shipped set). Reset to shipped (code-owned): built-in entities,
+    built-in recognizers (by name), tiers."""
+    shipped_ver = int(shipped.get("config_schema_version", 1))
+    if int(cfg.get("config_schema_version", 1)) >= shipped_ver:
+        return False
+
+    shipped_entities = shipped.get("entities", {})
+    if shipped_entities:
+        # shipped built-ins win; keep any user-added entity types not shipped.
+        user_extra = {k: v for k, v in cfg.get("entities", {}).items() if k not in shipped_entities}
+        cfg["entities"] = {**shipped_entities, **user_extra}
+
+    if "tiers" in shipped:
+        cfg["tiers"] = shipped["tiers"]
+
+    shipped_recs = {r["name"]: r for r in shipped.get("custom_recognizers", [])}
+    if shipped_recs:
+        merged = [
+            dict(shipped_recs[r["name"]]) if r["name"] in shipped_recs else r
+            for r in cfg.get("custom_recognizers", [])
+        ]
+        have = {r["name"] for r in merged}
+        for name, rec in shipped_recs.items():
+            if name not in have:
+                merged.append(dict(rec))
+        cfg["custom_recognizers"] = merged
+
+    # Topical block: re-sync the CODE-OWNED parts (which categories exist + their
+    # header_terms) so a shipped category added after the user's config was
+    # created (e.g. DESCRIPTION) actually reaches them -- while PRESERVING the
+    # user's manual per-category `terms` and their `enabled` choice. Without this
+    # the topical block, once created, stayed frozen on its first-seen categories.
+    shipped_topical = shipped.get("topical")
+    if shipped_topical:
+        user_topical = cfg.get("topical") or {}
+        user_cats = user_topical.get("categories") or {}
+        merged_cats: dict = {}
+        for cat, spec in (shipped_topical.get("categories") or {}).items():
+            m = dict(spec)  # shipped header_terms win (code-owned)
+            m["terms"] = (user_cats.get(cat) or {}).get("terms") or spec.get("terms", [])
+            merged_cats[cat] = m
+        for cat, spec in user_cats.items():  # keep any user-ADDED categories
+            merged_cats.setdefault(cat, spec)
+        cfg["topical"] = {
+            **shipped_topical,
+            "enabled": user_topical.get("enabled", shipped_topical.get("enabled", True)),
+            "categories": merged_cats,
+        }
+
+    cfg["config_schema_version"] = shipped_ver
+    return True
 
 
 def save_config(config: dict) -> None:

@@ -16,7 +16,7 @@ from .engine import DEFAULT_LANGUAGES
 from .actions import decisions_lookup
 from .formats import docx_handler, legacy, pdf_handler, pptx_handler, xlsx_handler
 from .mapping import MappingStore
-from .models import Finding, GroupedFinding, ProcessingError, ScanResult
+from .models import Finding, GroupedFinding, ProcessingError, ScanResult, TextUnit
 from .report import write_report
 
 __all__ = ["ProcessingError"]  # re-exported for callers doing `from .pipeline import ProcessingError`
@@ -81,6 +81,39 @@ def _guard_extractable(resolved: Path, units: list) -> None:
         )
 
 
+# Language detection is regex word-counting (no NER), so it is cheap even over a
+# large sample; cap only to stay bounded on a pathologically huge document.
+_LANG_SAMPLE_MAX_CHARS = 200_000
+
+
+def _language_sample(units: list) -> str:
+    """Representative text for language detection, sampled ACROSS the whole
+    document -- not just its first units.
+
+    Sampling only `units[:80]` mis-detected a heavily-German spreadsheet as
+    English (measured: de:en marker ratio was 1:5 in the first 80 units but
+    4.7:1 across the whole file). The reason is structural: a spreadsheet's
+    first units are the header row and structured field-name cells
+    ("Project ID", "Status", "CostBlock" -- English-ish), while the German
+    prose lives in the body. A confident-but-wrong 'en' then ran the English
+    NER over German text, which tags ordinary German words as people/orgs --
+    the exact over-flagging reported. Striding across the document (to a char
+    budget) makes the body's language dominate, as it should."""
+    texts = [u.text for u in units if getattr(u, "text", "") and u.text.strip()]
+    if not texts:
+        return ""
+    if sum(len(t) for t in texts) <= _LANG_SAMPLE_MAX_CHARS:
+        return " ".join(texts)
+    step = max(1, len(texts) // 500)  # even spread, not the head
+    picked, size = [], 0
+    for t in texts[::step]:
+        picked.append(t)
+        size += len(t)
+        if size >= _LANG_SAMPLE_MAX_CHARS:
+            break
+    return " ".join(picked)
+
+
 def _narrow_language(config: dict, units: list) -> dict:
     """Collapses a multi-language config to the single detected language so only
     ONE spaCy NER model runs -- this is the fix for the English model flagging
@@ -90,8 +123,7 @@ def _narrow_language(config: dict, units: list) -> dict:
     langs = config.get("languages") or list(DEFAULT_LANGUAGES)
     if len(langs) <= 1:
         return config
-    sample = " ".join(u.text for u in units[:80])
-    lang, confident = language.detect_dominant(sample)
+    lang, confident = language.detect_dominant(_language_sample(units))
     chosen = lang if (confident and lang in langs) else langs[0]
     narrowed = dict(config)
     narrowed["languages"] = [chosen]
@@ -123,12 +155,27 @@ def _with_propagation(config: dict, units: list, analyzer) -> dict:
     # already scanned adds nothing -- skip it. In a spreadsheet the same cell text
     # recurs thousands of times, and detection (one NER pass per unit) is the whole
     # cost; deduping the pass-1 sweep by text is a large, result-preserving saving.
-    seen_text: set[str] = set()
-    for unit in units:
-        if unit.text in seen_text:
-            continue
-        seen_text.add(unit.text)
-        for f in core.detect_unit(analyzer, unit, config):
+    distinct_texts = list(dict.fromkeys(u.text for u in units))
+    languages = config.get("languages") or list(DEFAULT_LANGUAGES)
+    # Batch-NLP every distinct text in one spaCy pipe() pass rather than one
+    # analyze() call each -- this pre-pass re-runs detection over the WHOLE
+    # document just to seed propagation, so it pays the same per-call overhead
+    # scan() does; batching here is what makes a large spreadsheet's redundant
+    # first pass cheap instead of doubling the scan cost.
+    # Batch on the SAME cleaned text detect_unit will request via its own
+    # neutralize_structural_noise call (see core.py) -- batching on the raw
+    # text would precompute tokenization for a string detect_unit never uses.
+    artifacts_by_clean = (
+        core.precompute_nlp_artifacts(
+            analyzer, (core.neutralize_structural_noise(t) for t in distinct_texts), languages[0]
+        )
+        if len(languages) == 1
+        else {}
+    )
+    for text in distinct_texts:
+        unit = TextUnit(id="propagate", text=text)
+        artifacts = artifacts_by_clean.get(core.neutralize_structural_noise(text))
+        for f in core.detect_unit(analyzer, unit, config, nlp_artifacts=artifacts):
             if f.entity_type not in _PROPAGATABLE:
                 continue
             value = _HONORIFIC_PREFIX.sub("", f.value).strip()
@@ -145,6 +192,32 @@ def _with_propagation(config: dict, units: list, analyzer) -> dict:
     return {**config, "propagate": sorted(values)}
 
 
+def _with_topical_gazetteer(config: dict, resolved: Path, handler) -> dict:
+    """Merge the handler's auto-learned topical gazetteer (category, value) pairs
+    into config['propagate'], so terms confirmed in a category-labelled column
+    (a Tool/Abteilung/Lizenzgeber column) propagate document-wide carrying their
+    category -- reusing the same propagation engine as person-name spreading.
+    Called from BOTH scan and apply, so the derived set is identical (parity).
+    Also folds in any manual per-category terms from config['topical']."""
+    topical = config.get("topical") or {}
+    if not topical.get("enabled", True):
+        return config
+    pairs: set[tuple[str, str]] = set()
+    # Auto-learned header->category gazetteer is structural and currently
+    # xlsx-only (only that handler exposes it); manual per-category terms below
+    # propagate in EVERY format's text.
+    if hasattr(handler, "topical_gazetteer"):
+        pairs.update(handler.topical_gazetteer(resolved, config))
+    for cat, spec in (topical.get("categories") or {}).items():
+        for term in spec.get("terms", []) or []:
+            if term and term.strip():
+                pairs.add((cat, term.strip()))
+    if not pairs:
+        return config
+    merged = list(config.get("propagate", ())) + sorted(pairs)
+    return {**config, "propagate": merged}
+
+
 def sniff_language(path: Path, config: dict) -> tuple[str, bool]:
     """(language, confident) for the GUI's 'ask the user if unsure' flow.
     Best-effort and never raises -- an unreadable file returns an unconfident
@@ -158,7 +231,7 @@ def sniff_language(path: Path, config: dict) -> tuple[str, bool]:
             )
             handler = _handler_for(resolved)
             units = handler.extract_text_units(resolved)
-        return language.detect_dominant(" ".join(u.text for u in units[:80]))
+        return language.detect_dominant(_language_sample(units))
     except Exception:  # noqa: BLE001
         return ("de", False)
 
@@ -176,16 +249,20 @@ def scan_document(path: Path, analyzer, config: dict) -> ScanResult:
             _guard_extractable(resolved, units)
             cfg = _narrow_language(config, units)
             cfg = _with_propagation(cfg, units, analyzer)
+            cfg = _with_topical_gazetteer(cfg, resolved, handler)
             findings = handler.scan(resolved, analyzer, cfg)
-            # Column descriptors (spreadsheets only) for column-level review policy;
-            # computed here while the resolved file still exists.
-            columns = handler.column_summary(resolved, findings) if hasattr(handler, "column_summary") else []
+            # Column + cell descriptors (spreadsheets only) for the column-level
+            # policy and the per-cell exception layer; computed here while the
+            # resolved file still exists.
+            columns = handler.column_summary(resolved, findings, cfg) if hasattr(handler, "column_summary") else []
+            cells = handler.cell_summary(findings) if hasattr(handler, "cell_summary") else []
     except ProcessingError:
         raise
     except Exception as exc:  # noqa: BLE001 -- fail loud, never silently pass
         raise ProcessingError(f"Could not read '{path.name}': {exc}") from exc
     result = core.build_scan_result(findings, units, cfg)
     result.columns = columns
+    result.cells = cells
     return result
 
 
@@ -420,6 +497,7 @@ def apply_document(
             # Same derivation as scan_document, from the same units + analyzer,
             # so apply redacts exactly the set the reviewer approved.
             cfg = _with_propagation(cfg, units, analyzer)
+            cfg = _with_topical_gazetteer(cfg, resolved, handler)
             # The mapping is persisted only after verification PASSES (never on a
             # verify failure -- that would leave orphan pseudonym entries for a
             # document that was never written), and BEFORE the output is committed.

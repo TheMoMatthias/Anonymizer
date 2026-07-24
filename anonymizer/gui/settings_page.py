@@ -1,11 +1,14 @@
 from __future__ import annotations
 
-from nicegui import ui
+from pathlib import Path
+
+from nicegui import run, ui
 
 from .. import audit as audit_mod
 from .. import config as config_mod
 from .. import ocr as ocr_mod
 from ..mapping import MappingStore
+from ..pipeline import scan_document
 from . import theme
 
 ACTIONS = ["pseudonymize", "anonymize", "skip"]
@@ -48,6 +51,58 @@ def _detection_section(cfg: dict) -> None:
             ui.label().bind_text_from(cfg, "sensitivity", lambda v: f"+{float(v or 0):.2f}").classes(
                 "az-mono text-xs w-12"
             )
+        _sensitivity_preview(cfg, slider)
+
+
+# Debounce: re-scanning is real work (seconds, not instant), so a preview
+# fires only after the slider has been still for this long, not on every
+# intermediate drag tick.
+_PREVIEW_DEBOUNCE_S = 0.6
+
+
+def _sensitivity_preview(cfg: dict, slider) -> None:
+    """Live 'N findings at this setting' readout against whatever document is
+    currently open on the main page. This is a REAL re-scan (not a cheap
+    re-bucketing -- the sensitivity offset gates which candidates become
+    findings at all, during detection itself, so nothing short of re-running
+    detection reflects a changed value), debounced so dragging the slider
+    doesn't fire one per tick. Settings is a separate NiceGUI page/route with
+    no other link to the main page's job state, hence the lazy app import and
+    the current_review_job() accessor."""
+    from . import app as app_module  # local: app.py imports this module at its own top level
+
+    label = ui.label().classes("az-muted text-xs mt-1")
+    pending = {"timer": None}
+
+    def show(text: str) -> None:
+        label.text = text
+
+    async def run_preview() -> None:
+        job = app_module.current_review_job()
+        if job is None:
+            show("Open and scan a document to preview this slider's live effect on it.")
+            return
+        show(f"Re-scanning “{job.name}” at this setting…")
+        analyzer, _base_cfg = await run.io_bound(app_module._ensure_analyzer)
+        trial_cfg = {**(job.config or {}), "sensitivity": float(cfg.get("sensitivity", 0.0))}
+        try:
+            result = await run.io_bound(scan_document, Path(job.path), analyzer, trial_cfg)
+        except Exception as exc:  # noqa: BLE001 -- a preview failure must not block Settings
+            show(f"Preview failed: {exc}")
+            return
+        show(f"At this setting: {len(result.all_actionable())} finding(s) on “{job.name}” (open now).")
+
+    def debounced(_e=None) -> None:
+        if pending["timer"] is not None:
+            pending["timer"].deactivate()
+        pending["timer"] = ui.timer(_PREVIEW_DEBOUNCE_S, run_preview, once=True)
+
+    show(
+        "Open and scan a document to preview this slider's live effect on it."
+        if app_module.current_review_job() is None
+        else "Move the slider to preview its effect on the currently open document."
+    )
+    slider.on_value_change(debounced)
 
     with ui.element("div").classes("az-card w-full"):
         ui.label("Entity defaults").classes("az-h2")
@@ -130,6 +185,8 @@ def _lists_and_recognizers(cfg: dict, flush_hooks: list | None = None) -> None:
         if flush_hooks is not None:
             flush_hooks.append(sync_name_headers)
 
+    _topical_section(cfg, flush_hooks)
+
     with ui.element("div").classes("az-card w-full"):
         ui.label("Custom recognizers").classes("az-h2")
         ui.label("German bank-specific patterns Presidio doesn't ship with.").classes("az-muted text-xs mb-2")
@@ -155,6 +212,61 @@ def _lists_and_recognizers(cfg: dict, flush_hooks: list | None = None) -> None:
         with ui.row().classes("gap-2"):
             ui.button("Add recognizer", icon="add", on_click=add_recognizer).props("flat")
             ui.button("Check for new recognizers", icon="sync", on_click=check_for_new).props("flat")
+
+
+_TOPICAL_LABELS = {
+    "TOOL": "Tools / systems / software",
+    "DIVISION": "Divisions / business areas",
+    "DEPARTMENT": "Departments / teams",
+    "LICENSEE": "Licensees / vendors",
+    "PROJECT": "Project names",
+    "DESCRIPTION": "Free-text description columns",
+}
+
+
+def _topical_section(cfg: dict, flush_hooks: list | None = None) -> None:
+    """Editor for the topical (non-personal) categories: per-category MANUAL
+    terms (a name the model can't detect in prose -- 'DeepL Pro', 'Claudius' --
+    added here is redacted document-wide via propagation) and the column HEADER
+    words that assign a whole column to a category. Both take effect on the next
+    scan."""
+    topical = cfg.get("topical") or {}
+    cats = topical.get("categories") or {}
+    if not cats:
+        return
+    with ui.element("div").classes("az-card w-full"):
+        with ui.row().classes("items-center gap-2"):
+            ui.label("Internal / topical categories").classes("az-h2")
+            en = ui.switch(value=bool(topical.get("enabled", True)))
+            en.on_value_change(lambda e: topical.__setitem__("enabled", bool(e.value)))
+        ui.label(
+            "Non-personal sensitivity: tools, divisions, departments, licensees, projects, and free-text "
+            "descriptions. TERMS = names to redact everywhere (add ones the model misses in prose, e.g. an "
+            "internal tool). HEADER WORDS = column headers that put a whole column in this category. "
+            "One per line; effective on the next scan."
+        ).classes("az-muted text-xs mb-2")
+        for cat, spec in cats.items():
+            with ui.expansion(_TOPICAL_LABELS.get(cat, cat)).classes("w-full"):
+                with ui.row().classes("w-full gap-4"):
+                    with ui.column().classes("flex-grow"):
+                        ui.label("Terms (redacted document-wide)").classes("text-xs font-medium")
+                        terms_area = ui.textarea(value="\n".join(spec.get("terms", []) or [])).props(
+                            "outlined dense"
+                        ).classes("w-full")
+                    with ui.column().classes("flex-grow"):
+                        ui.label("Header words (whole-column)").classes("text-xs font-medium")
+                        head_area = ui.textarea(value="\n".join(spec.get("header_terms", []) or [])).props(
+                            "outlined dense"
+                        ).classes("w-full")
+
+                def sync(_e=None, spec=spec, ta=terms_area, ha=head_area) -> None:
+                    spec["terms"] = [ln.strip() for ln in ta.value.splitlines() if ln.strip()]
+                    spec["header_terms"] = [ln.strip() for ln in ha.value.splitlines() if ln.strip()]
+
+                terms_area.on("blur", sync)
+                head_area.on("blur", sync)
+                if flush_hooks is not None:
+                    flush_hooks.append(sync)
 
 
 def _render_recognizers(column, cfg: dict) -> None:

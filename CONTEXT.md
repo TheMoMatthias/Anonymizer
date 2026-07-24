@@ -28,3 +28,29 @@
 - **Detection profile**: a named preset ("Contracts", "Client statements",
   "HR docs") selecting which data classes are active and their default actions,
   chosen per run/batch to adapt the tool to a document type in one click.
+- **Topical category**: a non-personal sensitivity type describing organizational
+  content rather than an individual — TOOL, DIVISION, DEPARTMENT, LICENSEE,
+  PROJECT. Detected structurally/by gazetteer, not by personal-entity NER.
+- **Header→category detection**: assigning a topical category to a spreadsheet
+  column from its header text (e.g. a "Tool"/"System" header ⇒ every cell in the
+  column is a TOOL). Generalizes the existing `name_column_headers`⇒PERSON rule.
+- **Auto-gazetteer**: the set of topical terms LEARNED automatically from
+  category-labelled columns during a scan (no manual list), then matched
+  document-wide. May be supplemented by a manual list.
+- **Category propagation**: spreading an auto-gazetteer term across the whole
+  document carrying its category (a TOOL named in a Tools column is redacted as
+  TOOL wherever it recurs) — the person-name propagation engine generalized.
+- **Corroboration-only**: ORG/LOCATION/NER_MISC are surfaced only when backed by
+  more than a bare NER guess (pattern/anchor/propagation/validation/name-column);
+  a bare guess is dropped. **Corroboration bypass**: a gazetteer/header match is
+  user-confirmed sensitive and is always kept, exempt from this drop.
+- **Cell policy**: a per-cell redaction decision keyed on `Sheet!Coord` (e.g.
+  `Sheet1!A5`), the fine-grained EXCEPTION layer between the whole-column policy
+  and per-value entity replacement. Overrides the column policy for that cell.
+- **Redaction mode**: what a column/cell decision does — skip / pseudonymize
+  (consistent reversible `[TOOL_1]` token) / redact (one-way `[LABEL]`) /
+  **summarize**.
+- **Summarize mode / structural placeholder**: replacing a cell's content with a
+  zero-content shape descriptor (e.g. `[Freitext: 3 Sätze, ~140 Zeichen]`) that
+  conveys format/size to a downstream LLM while withholding all original text.
+  Contains no original characters, so the fail-loud verify passes by construction.
