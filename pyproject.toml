@@ -28,6 +28,18 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = ["pytest>=8.0"]
+# Optional ML detection (the GLiNER second-pass recognizer). Kept OUT of the base
+# install so the tool runs with ZERO ML dependencies (gliner_recognizer imports
+# these lazily). The offline bundle installs this group on a CONNECTED build
+# machine and vendors the quantised model as a drop-in. Version-pinned for
+# reproducible offline parity -- see docs/run_gliner-integration_2026-07-24.md
+# ("Pinning" decision). NOTE: confirm on the connected build machine whether an
+# onnxruntime-only install is possible or gliner still pulls torch; prefer the
+# ONNX path to keep the bundle small (the runbook covers exporting an int8 model).
+ml = [
+  "onnxruntime>=1.17,<2.0",
+  "gliner>=0.2.13,<0.3",
+]
 
 [project.scripts]
 anonymizer = "anonymizer.gui.app:main"

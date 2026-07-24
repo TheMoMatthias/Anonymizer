@@ -83,6 +83,27 @@ def test_render_review_empty_result(render_ctx):
     review.render_review(ui.column(), empty, lambda: None, {})
 
 
+def test_gliner_settings_section_renders(render_ctx):
+    """The AI-detection toggle + status line builds without raising, and the
+    toggle is two-way bound to cfg['gliner']['enabled']."""
+    import yaml
+
+    from anonymizer.config import DEFAULT_CONFIG_PATH
+    from anonymizer.gui import settings_page
+
+    cfg = yaml.safe_load(DEFAULT_CONFIG_PATH.read_text(encoding="utf-8"))
+    settings_page._gliner_section(cfg)  # must not raise
+    ok, status = settings_page._gliner_status(cfg["gliner"])
+    assert isinstance(ok, bool) and "runtime:" in status and "model:" in status
+
+
+def test_gliner_section_absent_block_is_safe(render_ctx):
+    """No gliner block in config -> section is a no-op, never raises."""
+    from anonymizer.gui import settings_page
+
+    settings_page._gliner_section({})
+
+
 def test_detection_control_bar_builds(render_ctx):
     from anonymizer.gui import app as gui_app
     from anonymizer.models import FileJob

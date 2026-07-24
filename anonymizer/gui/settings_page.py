@@ -19,6 +19,7 @@ def build() -> None:
 
     flush_hooks: list = []
     _detection_section(cfg)
+    _gliner_section(cfg)
     _ocr_section(cfg)
     _lists_and_recognizers(cfg, flush_hooks)
     _mapping_admin()
@@ -52,6 +53,55 @@ def _detection_section(cfg: dict) -> None:
                 "az-mono text-xs w-12"
             )
         _sensitivity_preview(cfg, slider)
+
+
+def _gliner_status(gliner: dict) -> tuple[bool, str]:
+    """(ok, human_status) for the AI-detection model WITHOUT loading it (loading
+    is heavy). Reports whether the ONNX runtime is importable and whether the
+    model file exists + its size -- exactly what a user needs to see before a
+    scan hard-fails on an enabled-but-missing model."""
+    import importlib.util
+
+    from ..gliner_recognizer import resolve_model_path
+
+    runtime_ok = (
+        importlib.util.find_spec("gliner") is not None and importlib.util.find_spec("onnxruntime") is not None
+    )
+    try:
+        mp = resolve_model_path(gliner)
+        model_ok = mp.exists()
+        if model_ok:
+            size_mb = sum(f.stat().st_size for f in mp.rglob("*") if f.is_file()) / 1e6 if mp.is_dir() else mp.stat().st_size / 1e6
+            model_str = f"{mp.name} ({size_mb:.0f} MB)"
+        else:
+            model_str = f"not found at {mp}"
+    except Exception as exc:  # noqa: BLE001
+        model_ok, model_str = False, f"unresolved ({exc})"
+    ok = runtime_ok and model_ok
+    return ok, f"runtime: {'installed' if runtime_ok else 'MISSING'} · model: {model_str}"
+
+
+def _gliner_section(cfg: dict) -> None:
+    """Toggle + read-only status for the GLiNER second-pass ML detector. The
+    status line tells the user, before scanning, whether an enabled model will
+    actually load (an enabled-but-missing model hard-fails the scan by design --
+    this is the escape hatch that lets them turn it off)."""
+    gliner = cfg.get("gliner")
+    if gliner is None:
+        return
+    with ui.element("div").classes("az-card w-full"):
+        with ui.row().classes("items-center gap-2"):
+            ui.label("AI detection (GLiNER)").classes("az-h2")
+            en = ui.switch(value=bool(gliner.get("enabled", False)))
+            en.bind_value(gliner, "enabled")
+        ui.label(
+            "Offline zero-shot NER that recovers names, organizations and internal tools/projects the "
+            "rule-based pass misses, and catches English terms inside German documents. Requires the "
+            "bundled model; when enabled but the model is missing, scanning stops with an error so you can "
+            "turn it back off here."
+        ).classes("az-muted text-xs mb-2")
+        ok, status = _gliner_status(gliner)
+        ui.label(status).classes(f"text-xs az-mono {'text-positive' if ok else 'text-warning'}")
 
 
 # Debounce: re-scanning is real work (seconds, not instant), so a preview

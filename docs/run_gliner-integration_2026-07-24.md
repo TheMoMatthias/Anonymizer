@@ -1,7 +1,7 @@
 # Run-file — GLiNER second-pass ML detection
 
 **Date:** 2026-07-24
-**Status:** Phase A + B COMPLETE (checkpoints) → Phase C needs a connected machine (model + measurement)
+**Status:** Phases A + B complete; Phase C offline scaffolding complete → model prep + measurement remain (connected-machine runbook below)
 **Grill:** 24 questions / 6 rounds (see decisions below). Research memo: `docs/research_offline-detection-models_2026-07-24.md`.
 
 ---
@@ -31,6 +31,21 @@ Delivered (all tests green: **201 passed**, 14 in `tests/test_gliner.py`):
 **Deferred by decision (2026-07-24), both matching real-model triggers — NOT dropped:**
 - **Soft cap (content-keyed allow-set).** A parity-safe cap MUST be a set precomputed identically in scan and apply (the two passes iterate cells differently -- `_iter_cell_units` vs `ws.iter_rows()` -- so a running counter would cut different cells and break byte-for-byte parity). That machinery is real and parity-critical, and its benefit + correct cap value need real-model perf data. The shipped cheap gate already removes the bulk of ineligible cells. **Resurface:** when the real model runs on a connected machine and a large-workbook scan time is measurable.
 - **Cell-level DESCRIPTION flag.** Zero-shot "sensitive description" classification quality is unmeasurable offline (already a DEFERRED item). Structural header-driven DESCRIPTION→summarize already works. **Resurface:** once v2.1 description classification is validated on a real document (else escalate to GLiNER2 per the existing DEFERRED note).
+
+### Phase C — offline scaffolding ✅ (2026-07-24); model/measurement steps need a connected machine
+Delivered offline (all tests green: **203 passed**, +2 GUI render tests):
+- **Settings UI**: `_gliner_section` (toggle bound to `gliner.enabled`) + `_gliner_status` read-only status line (runtime installed?, model present + size) — computed WITHOUT loading the model. Rendered under the headless client in tests.
+- **`pyproject.toml`**: `ml` optional-dependency group (`onnxruntime`, `gliner`, pinned) — kept out of the base install so the tool runs with zero ML deps.
+- **`scripts/build_offline_bundle.ps1`**: `-WithML` switch installs `.[ml]`; vendors the model from `vendor\gliner-model` or writes drop-in instructions (Tesseract pattern). **`launch.bat`**: sets `ANONYMIZER_GLINER_MODEL` when `gliner-model\` is present.
+
+## Connected-machine runbook (finishes Phase C — do on a networked build box)
+1. **Install ML deps:** `uv pip install -e ".[ml]"`. Confirm whether `gliner` pulls `torch`; if so and only ONNX is needed at runtime, prefer an `onnxruntime`-only runtime for the bundle and keep torch to the build box.
+2. **Prepare the model** (`vendor/gliner-model`): fetch `urchade/gliner_multi-v2.1`, export to ONNX and int8-quantise (per the gliner/optimum docs), and save the `from_pretrained` snapshot into `vendor/gliner-model/` with the layout the bundle README lists. Sanity check: `python -c "from anonymizer.gliner_recognizer import load_gliner_backend; b=load_gliner_backend({'model_path':'vendor/gliner-model','onnx':True}); print(b.predict('Ada arbeitet bei DeepL Pro.', ['person','tool']))"`.
+3. **spaCy lg→sm** (size): switch `engine.SPACY_MODELS` to `de_core_news_sm`/`en_core_web_sm`, update the model-wheel URLs in `pyproject.toml`, `uv sync`, then **run `pytest tests/test_precision.py tests/test_language.py`**. Per the autonomy-contract DEFAULT: if the German-noun precision tests regress, revert to `lg` and accept the size cost.
+4. **Enable by default:** flip `gliner.enabled: true` in `default_recognizers.yaml` (bundle default-on; `_resync_builtins` preserves any user's explicit choice). Optionally bump `min_score`/`confidence_override` after tuning.
+5. **Build:** `./scripts/build_offline_bundle.ps1 -WithML`.
+6. **Measure DONE-WHEN** on the real reference workbook: enable GLiNER, scan, and confirm (a) it recovers clearly-missed names/orgs, (b) total flagged ≤ ~445 baseline, (c) typical scan < 5 min, (d) scan/apply parity (`verify_output` passes). Tune `confidence_override`/thresholds/`cell_cap`.
+7. **Then implement the two deferred items** (now validatable): the content-keyed soft cap (parity-safe allow-set precomputed identically in scan+apply) and the cell-level DESCRIPTION flag — measuring both against the real doc.
 
 ---
 
