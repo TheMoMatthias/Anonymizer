@@ -8,7 +8,7 @@ from pathlib import Path
 import openpyxl
 from openpyxl.utils import column_index_from_string, get_column_letter
 
-from .. import taxonomy
+from .. import language, taxonomy
 from ..actions import decisions_lookup, resolve_replacement, token_label
 from ..core import (
     _NER_ENTITIES,
@@ -584,27 +584,97 @@ def _analyze_cell_text(text: str, header: str | None, analyzer, config, unit_id:
     return _resolve_overlaps(result, text)
 
 
+def _sheet_languages(wb, config) -> dict[str, str]:
+    """{sheet title: language} -- the language each SHEET is scanned in.
+
+    Language was decided once per DOCUMENT, which is wrong for the shape a bank
+    workbook actually has: one file with German sheets and an English client
+    register in it. Measured on the audit workbook (2026-07-26): the whole file
+    routed to German, so every `languages: [en]` recognizer stayed unregistered and
+    ten GDPR Art. 9 values on the English sheet -- health conditions, union
+    memberships, ethnic origins -- were never detected, while the German Art. 9
+    word lists ran on the English prose and claimed "The Great Depression started
+    in 1929" as health data. One decision, both failure directions.
+
+    A sheet is a coherent language unit in a way a workbook is not, so the decision
+    moves there. Only a CONFIDENT detection overrides the document language; a
+    sheet of bare numbers or names has no language signal and must not be routed on
+    a coin-flip. Pure function of the workbook's text, so scan and apply derive the
+    identical map and parity holds by construction."""
+    doc_lang = (config.get("languages") or list(DEFAULT_LANGUAGES))[0]
+    supported = set(config.get("languages") or ()) | set(DEFAULT_LANGUAGES)
+    by_sheet: dict[str, list[str]] = {}
+    for key, text, _header in _iter_cell_units(wb):
+        sheet = key.split("|", 2)[1]
+        bucket = by_sheet.setdefault(sheet, [])
+        if len(bucket) < 400:  # bounded: a language read needs a sample, not the sheet
+            bucket.append(text)
+    out: dict[str, str] = {}
+    for ws in wb.worksheets:
+        # HEADERS are part of the sample, and matter more than anything else here.
+        # _iter_cell_units deliberately skips row 1 (a schema label is not user
+        # data), but on a table the header row is the strongest language signal
+        # there is -- the body is mostly names, numbers and IBANs, which read as no
+        # language at all. Measured: without the headers the English client
+        # register was not confidently English and fell back to the document
+        # language, which is the whole failure this function exists to fix.
+        sample = " ".join([*_column_headers(ws).values(), *by_sheet.get(ws.title, [])])
+        lang, _confident = language.detect_dominant(sample) if sample.strip() else (doc_lang, False)
+        # The confidence flag is deliberately NOT required here, unlike the
+        # document-level routing it complements. A value TABLE -- surnames, IBANs,
+        # nationalities -- has almost no function words, so it is essentially never
+        # "confident" while still being clearly one language or the other: measured,
+        # the English client register reads ('en', False) and the German client
+        # table reads ('de', False), both correct in direction. Demanding confidence
+        # threw the direction away and sent every table to the document language,
+        # which is the failure this exists to fix. The document language remains the
+        # fallback for a sheet with no text at all.
+        out[ws.title] = lang if lang in supported else doc_lang
+    return out
+
+
+def _cfg_for_sheet(config: dict, sheet_langs: dict[str, str], sheet: str | None) -> dict:
+    """The config to detect a given sheet's cells with. Unknown/None sheet (defined
+    names, auxiliary parts) keeps the document-level config."""
+    lang = sheet_langs.get(sheet or "")
+    if lang is None or config.get("languages") == [lang]:
+        return config
+    return {**config, "languages": [lang]}
+
+
 def scan(path: Path, analyzer, config) -> list:
     wb = openpyxl.load_workbook(path, data_only=False)
     findings = []
+    sheet_langs = _sheet_languages(wb, config)
+    doc_lang = (config.get("languages") or list(DEFAULT_LANGUAGES))[0]
     # A "database" sheet repeats the same value thousands of times (a status, a
     # division, a city), and detection (one spaCy NER pass per cell) is the entire
     # cost. Memoize by (header, cell-text) for this scan: identical cells detect
     # once. Findings are re-stamped with each cell's unit_id (offsets/values are
     # relative to the cell text, so nothing else changes) so completeness-scan
     # coverage still maps to the right unit.
-    cache: dict[tuple[str | None, str], list] = {}
+    # Keyed by LANGUAGE too: the same string on a German and an English sheet is
+    # two different detection problems, and sharing one cache entry between them
+    # would silently give whichever sheet ran second the other one's answer.
+    cache: dict[tuple[str, str | None, str], list] = {}
     artifacts_by_key = _precompute_cell_artifacts(wb, analyzer, config)
 
-    def detect(text, header, key):
-        base = cache.get((header, text))
+    def detect(text, header, key, sheet=None):
+        lang = sheet_langs.get(sheet or "", doc_lang)
+        base = cache.get((lang, header, text))
         if base is None:
-            base = _analyze_cell_text(text, header, analyzer, config, nlp_artifacts=artifacts_by_key.get((header, text)))
-            cache[(header, text)] = base
+            # Precomputed artifacts are tied to the DOCUMENT language, so they are
+            # only reusable for sheets that share it; elsewhere detect_unit does its
+            # own NLP pass in the right language rather than reuse a mismatched one.
+            arts = artifacts_by_key.get((header, text)) if lang == doc_lang else None
+            base = _analyze_cell_text(
+                text, header, analyzer, _cfg_for_sheet(config, sheet_langs, sheet), nlp_artifacts=arts
+            )
+            cache[(lang, header, text)] = base
         return [replace(f, unit_id=key) for f in base]
 
     for key, text, header in _iter_cell_units(wb):
-        findings.extend(detect(text, header, key))
+        findings.extend(detect(text, header, key, key.split("|", 2)[1]))
     for key, text in _iter_defined_name_units(wb):
         findings.extend(detect(text, None, key))
     for key, text in _iter_sheet_name_units(wb):
@@ -808,27 +878,33 @@ def apply(path: Path, out_path: Path, decisions: dict, analyzer, config, mapping
     # cell redacts to the same string. Safe: the pseudonym mapping is value-keyed,
     # so the same value already maps to the same token whether recomputed or cached
     # (the first call creates the mapping entry; the rest reuse the string).
-    redact_cache: dict[tuple[str | None, str], str] = {}
+    # Keyed by LANGUAGE too, for the same reason scan()'s cache is: the identical
+    # string on a German and an English sheet is two different problems.
+    redact_cache: dict[tuple[str, str | None, str], str] = {}
     artifacts_by_key = _precompute_cell_artifacts(wb, analyzer, config)
+    sheet_langs = _sheet_languages(wb, config)
+    doc_lang = (config.get("languages") or list(DEFAULT_LANGUAGES))[0]
 
-    def redact(text: str, header: str | None) -> str:
-        out = redact_cache.get((header, text))
+    def redact(text: str, header: str | None, sheet: str | None = None) -> str:
+        lang = sheet_langs.get(sheet or "", doc_lang)
+        out = redact_cache.get((lang, header, text))
         if out is None:
+            arts = artifacts_by_key.get((header, text)) if lang == doc_lang else None
             out = _apply_findings_to_text(
-                text, header, analyzer, config, decisions, mapping_store,
-                nlp_artifacts=artifacts_by_key.get((header, text)),
+                text, header, analyzer, _cfg_for_sheet(config, sheet_langs, sheet),
+                decisions, mapping_store, nlp_artifacts=arts,
             )
-            redact_cache[(header, text)] = out
+            redact_cache[(lang, header, text)] = out
         return out
 
-    def redact_formula(formula: str, header: str | None) -> str:
+    def redact_formula(formula: str, header: str | None, sheet: str | None = None) -> str:
         """Redacts only the quoted string literals, right-to-left so earlier
         offsets stay valid -- the expression around them is left byte-identical."""
         result = formula
         for start, end, literal in reversed(_formula_literals(formula)):
             if not literal.strip():
                 continue
-            new_literal = redact(literal, header)
+            new_literal = redact(literal, header, sheet)
             if new_literal != literal:
                 result = result[:start] + new_literal + result[end:]
         return result
@@ -890,18 +966,18 @@ def apply(path: Path, out_path: Path, decisions: dict, analyzer, config, mapping
                 # exactly what scan() surfaced, never more (scan/apply parity).
                 text = _cell_scan_text(cell) if cell.row != 1 else None
                 if text is not None:
-                    new_value = redact(text, header)
+                    new_value = redact(text, header, sheet_key)
                     if new_value != text:
                         # A redacted numeric cell must become a string cell so
                         # the token ("[KONTO_1]") can be stored at all.
                         cell.value = new_value
                 formula = _cell_formula(cell)
                 if formula is not None:
-                    new_formula = redact_formula(formula, header)
+                    new_formula = redact_formula(formula, header, sheet_key)
                     if new_formula != formula:
                         cell.value = new_formula
                 if cell.comment is not None and cell.comment.text.strip():
-                    new_text = redact(cell.comment.text, header)
+                    new_text = redact(cell.comment.text, header, sheet_key)
                     if new_text != cell.comment.text:
                         cell.comment.text = new_text
     for name, defn in wb.defined_names.items():

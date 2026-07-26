@@ -285,3 +285,43 @@ def test_english_headers_offer_a_whole_column_policy(tmp_path, analyzer, base_co
     assert topical & {"PROJECT", "LICENSEE", "DESCRIPTION"}, (
         f"no English topical category was detected at all: {topical}"
     )
+
+
+def test_per_sheet_language_routing(tmp_path, analyzer, base_config):
+    """MEASURED GAP (2026-07-26 audit): language was decided once per DOCUMENT,
+    which is wrong for the shape a bank workbook actually has -- German sheets with
+    an English client register in the same file. The whole file routed to German,
+    so every `languages: [en]` recognizer stayed unregistered and ten GDPR Art. 9
+    values on the English sheet were never detected. One decision, and the
+    fail-loud verify could not catch it: verify only re-checks values the reviewer
+    DECIDED to remove, so what detection never found is invisible to it.
+
+    A sheet is a coherent language unit in a way a workbook is not."""
+    wb = openpyxl.Workbook()
+    de = wb.active
+    de.title = "Kundenstamm"
+    de.append(["Nachname", "Diagnose"])
+    de.append(["Mueller", "Diagnose: Diabetes mellitus Typ 2"])
+    en = wb.create_sheet("Client Register UK")
+    en.append(["Surname", "Nationality", "Medical condition", "Trade union"])
+    # Three rows, not one: a single row of proper nouns carries no language signal
+    # at all (measured: it reads as the fallback), and a one-row sheet is not the
+    # case this guards. A real register has rows.
+    en.append(["Okonkwo", "Nigerian", "chronic back pain", "UNISON"])
+    en.append(["Fitzgerald", "Irish", "diagnosed with multiple sclerosis", "Unite the Union"])
+    en.append(["Haddad", "Lebanese", "recovering from a cardiac procedure", "UNISON"])
+    p = tmp_path / "mixed_language.xlsx"
+    wb.save(p)
+
+    result = scan_document(p, analyzer, base_config)
+    vals = {g.value for g in result.all_actionable()}
+    art9 = {g.value for g in result.all_actionable()
+            if __import__("anonymizer").taxonomy.data_class_for(g.entity_type).key == "special_category"}
+
+    # The German sheet must keep working...
+    assert any("Diabetes" in v for v in art9), f"German Art.9 regressed: {vals}"
+    # ...and the English sheet must no longer be invisible.
+    for needle in ("Nigerian", "chronic back pain", "UNISON"):
+        assert any(needle in v for v in art9), (
+            f"English Art.9 {needle!r} not detected on a mixed-language workbook: {sorted(art9)}"
+        )
