@@ -297,3 +297,23 @@ source, which is the intended reading of the grill decision.
   the article and the label word. Harmless for redaction (it over-covers) but it
   makes the pseudonym token less readable.
   Both are threshold/`min_score` calibration, which the real-workbook run drives.
+
+### Where this run stopped
+
+**Stages 1 and 2 are complete** (`75fd893`, `fc42a69`, `3748c3d`, `55b24ee`);
+418 tests green, tree clean, nothing pushed. Checklist steps 0–3 done, step 4
+done except the in-app click-through.
+
+**Stage 3 is untouched** and is the natural next session: the "AI-detected" third
+state (tile + band + chip), profile-owned thresholds with the Advanced expander
+and the re-scan prompt, review-only Art. 9 ML labels, user-extendable labels,
+detection provenance in the audit log, and the spaCy `lg→sm` trial. All of it is
+specified in the DECISIONS table above and none of it is blocked.
+
+**Blocked on Moe only:** checklist step 5 — the recall/FP/scan-time measurement on
+the real reference workbook, which gates flipping `gliner.enabled` to true.
+
+**Environment note:** the project `.venv` now has the ML stack installed
+(`uv sync --extra ml --extra dev`). A bare `uv sync` prunes BOTH extras and
+removes pytest; `uv sync --extra dev` alone drops GLiNER back out, which is a
+clean way to get the 693 MB back.
