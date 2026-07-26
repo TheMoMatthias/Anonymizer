@@ -13,7 +13,16 @@ if errorlevel 1 (
 )
 
 echo [Anonymizer] Checking environment ^(first run / after an update downloads models, a few minutes^)...
-uv sync
+rem `uv sync` installs EXACTLY the declared dependencies and PRUNES anything else,
+rem including optional extras. A plain `uv sync` here therefore uninstalled the ML
+rem detection stack on every launch -- so AI detection, once switched on, would
+rem hard-fail the next time the app was started from this script. Sync the `ml`
+rem extra whenever a model pack is actually present, and stay lean otherwise so a
+rem colleague who never uses AI detection is not made to download ~700 MB of torch.
+set "AZ_EXTRAS="
+if exist "%~dp0vendor\gliner-model" set "AZ_EXTRAS=--extra ml"
+if defined ANONYMIZER_GLINER_MODEL set "AZ_EXTRAS=--extra ml"
+uv sync %AZ_EXTRAS%
 if errorlevel 1 (
     echo [Anonymizer] Environment setup failed - see the messages above.
     pause

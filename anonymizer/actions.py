@@ -51,6 +51,10 @@ TOKEN_LABELS = {
     "DE_RELIGION": "RELIGION",
     "DE_UNION_PARTY": "UNION_PARTY",
     "DE_SEX_LIFE": "SEX_LIFE",
+    # "NRP" is spaCy's internal name (nationality / religious or political group).
+    # It is meaningless to the person who RECEIVES the redacted document -- and the
+    # point of a one-way token is to say what was removed without revealing it.
+    "NRP": "ORIGIN",
     # Topical (non-personal) categories.
     "TOOL": "TOOL",
     "DIVISION": "DIVISION",
