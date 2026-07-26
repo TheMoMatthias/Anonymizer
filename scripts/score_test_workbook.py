@@ -154,21 +154,30 @@ def main(d: Path) -> int:
         return None
 
     by_class: dict[str, list[bool]] = {}
+    by_sheet: dict[str, list[bool]] = {}
     misses = []
     for s in secrets:
         g = covered(s["value"])
         ok = g is not None
         by_class.setdefault(s["data_class"], []).append(ok)
+        by_sheet.setdefault(s["sheet"], []).append(ok)
         if not ok:
             misses.append(s)
 
-    print("\n  RECALL by data class (planted -> found):")
-    for cls, hits in sorted(by_class.items()):
-        n, t = sum(hits), len(hits)
-        bar = "#" * int(20 * n / t) + "." * (20 - int(20 * n / t))
-        print(f"    {cls:18} {n:3}/{t:<3} {100*n/t:5.1f}%  {bar}")
+    def table(title, groups):
+        print(f"\n  {title}")
+        for k, hits in sorted(groups.items()):
+            n, t = sum(hits), len(hits)
+            bar = "#" * int(20 * n / t) + "." * (20 - int(20 * n / t))
+            flag = "   <-- weak" if n < t else ""
+            print(f"    {k:24} {n:3}/{t:<3} {100*n/t:5.1f}%  {bar}{flag}")
+
+    table("RECALL by data class (planted -> found):", by_class)
+    # Per-SHEET too: an aggregate hides a single language or surface failing wholesale,
+    # which is exactly how the English Art.9 gap stayed invisible before.
+    table("RECALL by sheet:", by_sheet)
     total_hit = sum(sum(h) for h in by_class.values())
-    print(f"    {'TOTAL':18} {total_hit:3}/{len(secrets):<3} {100*total_hit/len(secrets):5.1f}%")
+    print(f"\n    {'TOTAL':24} {total_hit:3}/{len(secrets):<3} {100*total_hit/len(secrets):5.1f}%")
 
     if misses:
         print(f"\n  MISSED ({len(misses)}):")
