@@ -37,6 +37,69 @@ def test_maximize_recall_anonymizes_everything():
     assert out["sensitivity"] == 0.15
 
 
+# --- profile-owned ML cutoffs -------------------------------------------------
+#
+# GLiNER confidence is governed by three interacting numbers. A reviewer moving one
+# cannot tell what the effective behaviour becomes -- and the reviewer here is a
+# colleague triaging documents, not someone tuning a model. So the profile owns them.
+
+
+def _ml_cfg(**gliner):
+    cfg = _cfg()
+    cfg["gliner"] = {"enabled": False, "model_path": "gliner-model", "min_score": 0.3,
+                     "confidence_override": 0.85, **gliner}
+    return cfg
+
+
+def test_profile_sets_the_ml_cutoffs():
+    hr = profiles.apply_profile(_ml_cfg(), "HR documents")["gliner"]
+    statements = profiles.apply_profile(_ml_cfg(), "Client statements")["gliner"]
+    assert hr["min_score"] < statements["min_score"], (
+        "HR is the Art.9 profile and must favour recall; client statements are "
+        "checksum-covered and must favour precision"
+    )
+
+
+def test_balanced_leaves_the_shipped_cutoffs_alone():
+    """"Balanced (default)" is documented as changing nothing."""
+    cfg = _ml_cfg()
+    assert profiles.apply_profile(cfg, "Balanced (default)")["gliner"] == cfg["gliner"]
+
+
+def test_profile_ml_request_is_ignored_without_a_model(monkeypatch, tmp_path):
+    """A profile may REQUEST ML, but a machine that never received the model pack
+    must not be switched into the enabled-but-missing state that hard-fails every
+    scan -- caused by a dropdown, on a document the operator just wanted to check."""
+    monkeypatch.setenv("ANONYMIZER_GLINER_MODEL", str(tmp_path / "absent"))
+    out = profiles.apply_profile(_ml_cfg(enabled=False), "HR documents")
+    assert out["gliner"]["enabled"] is False
+
+
+def test_profile_ml_request_is_honoured_when_the_model_is_there(monkeypatch, tmp_path):
+    pack = tmp_path / "gliner-model"
+    pack.mkdir()
+    monkeypatch.setenv("ANONYMIZER_GLINER_MODEL", str(pack))
+    monkeypatch.setattr("anonymizer.profiles.ml_available", lambda cfg: True)
+    out = profiles.apply_profile(_ml_cfg(enabled=False), "HR documents")
+    assert out["gliner"]["enabled"] is True
+
+
+def test_profile_never_turns_ml_off(monkeypatch):
+    """Silently disabling a capability the operator deliberately enabled is worse
+    than leaving it on -- so profiles only ever request ML ON."""
+    monkeypatch.setattr("anonymizer.profiles.ml_available", lambda cfg: False)
+    out = profiles.apply_profile(_ml_cfg(enabled=True), "Contracts")
+    assert out["gliner"]["enabled"] is True
+
+
+def test_detection_keys_separate_what_is_found_from_what_is_done():
+    """The review screen needs this split: an ACTION change can be re-applied to
+    findings already on screen, a DETECTION change cannot."""
+    assert profiles.detection_keys("HR documents") != profiles.detection_keys("Client statements")
+    # Balanced sets no detection overrides at all, so it must not look like a change.
+    assert profiles.detection_keys("Balanced (default)") == {}
+
+
 def test_nrp_is_special_category_and_never_skipped():
     """GDPR Art. 9 data (NRP) must be its own high-sensitivity class, and the
     unknown-entity fallback must NOT be the profile-skippable dates bucket."""

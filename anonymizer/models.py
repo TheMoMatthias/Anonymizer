@@ -114,6 +114,12 @@ class FileJob:
     # The exact config this file was scanned with (profile + sensitivity applied)
     # so apply re-detects with identical thresholds -- scan/apply parity.
     config: dict | None = None
+    # Which detection profile produced the findings currently on screen. Profiles
+    # now carry DETECTION settings (ML cutoffs, sensitivity), so switching one no
+    # longer just re-labels existing findings -- it changes what would be found.
+    # Kept so the review screen can say so instead of showing results that quietly
+    # disagree with the settings above them.
+    scanned_profile: str = ""
 
     @property
     def name(self) -> str:

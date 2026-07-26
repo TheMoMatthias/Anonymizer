@@ -463,6 +463,30 @@ def _render_queue(container, state: PageState, select_job) -> None:
                     theme.chip(job.status, _STATUS_COLORS.get(job.status, theme.SECONDARY))
 
 
+def _stale_profile_notice(state: PageState, job: FileJob) -> None:
+    """Says so when the selected profile would DETECT differently from the scan
+    whose findings are on screen.
+
+    Profiles used to carry only default actions, so switching one could be applied
+    to the existing findings and the screen stayed true. They now also carry
+    detection settings (ML cutoffs, sensitivity), and those cannot be applied
+    retroactively -- the findings came from a scan that used the old values. Left
+    silent, the control bar would assert a profile that demonstrably did not
+    produce the list underneath it, which is the same class of defect as a preview
+    that contradicts the save."""
+    if not job.scanned_profile or job.status != "review":
+        return
+    if profiles_mod.detection_keys(state.profile) == profiles_mod.detection_keys(job.scanned_profile):
+        return
+    with ui.row().classes("items-center gap-2 w-full mt-2"):
+        ui.icon("info", size="1.1rem").classes("az-muted")
+        ui.label(
+            f"These results were detected with “{job.scanned_profile}”. "
+            f"“{state.profile}” changes what is detected, not just what is done with it — "
+            f"Re-scan to apply it."
+        ).classes("az-muted text-xs")
+
+
 def _detection_control_bar(state: PageState, job: FileJob) -> None:
     """The one place detection settings live for the file on screen: profile,
     language, and a live sensitivity slider, with a Re-scan that applies them.
@@ -478,7 +502,17 @@ def _detection_control_bar(state: PageState, job: FileJob) -> None:
             with ui.row().classes("items-center gap-2"):
                 ui.label("Profile").classes("az-muted text-xs")
                 prof = ui.select(profiles_mod.PROFILE_NAMES, value=state.profile).props("dense outlined")
-                prof.on_value_change(lambda e: setattr(state, "profile", e.value))
+
+                def profile_changed(e) -> None:
+                    state.profile = e.value
+                    # Re-render immediately so the stale-profile notice appears the
+                    # moment the profile changes. A warning that only surfaces after
+                    # some unrelated interaction is a warning the reviewer misses.
+                    refresh = getattr(state, "refresh", None)
+                    if refresh is not None:
+                        refresh()
+
+                prof.on_value_change(profile_changed)
             with ui.row().classes("items-center gap-2"):
                 ui.label("Language").classes("az-muted text-xs")
                 lang = ui.select(
@@ -498,6 +532,7 @@ def _detection_control_bar(state: PageState, job: FileJob) -> None:
             ui.button("Re-scan", icon="refresh", on_click=lambda: _rescan_job(state, job)).props(
                 "color=primary dense"
             ).tooltip("Re-run detection on this file with the settings above. Resets per-value decisions.")
+        _stale_profile_notice(state, job)
         # Show the language this file was ACTUALLY scanned in -- previously the
         # detected language was invisible, so an auto-detect mistake (a German
         # doc scanned as English) had no on-screen signal at all.
@@ -779,10 +814,12 @@ async def scan_all(state: PageState, refresh) -> None:
                 uncertain.append(job)
                 continue
         job.config = {**effective, "languages": [lang]}
+        job.scanned_profile = state.profile
     if uncertain:
         chosen = await _ask_language(len(uncertain))
         for job in uncertain:
             job.config = {**effective, "languages": [chosen]}
+            job.scanned_profile = state.profile
 
     for job in pending:
         job.status = "scanning"

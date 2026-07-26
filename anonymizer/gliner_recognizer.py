@@ -182,6 +182,24 @@ class _OnnxGlinerBackend:
         ]
 
 
+def ml_available(gliner_cfg: dict) -> bool:
+    """Whether an ML pass COULD run: the runtime is importable and a model pack is
+    on disk. Cheap by construction -- an importlib spec check and a stat, never a
+    model load -- so it is safe to call on every profile switch.
+
+    This is what lets a detection profile *request* ML without being able to create
+    the hard-fail dead-end: on a machine that never received the model pack, the
+    request is simply not honoured and scanning continues on spaCy + gazetteer."""
+    import importlib.util
+
+    if importlib.util.find_spec("gliner") is None:
+        return False
+    try:
+        return resolve_model_path(gliner_cfg).exists()
+    except Exception:  # noqa: BLE001 -- an unresolvable path is simply "not available"
+        return False
+
+
 def load_gliner_backend(gliner_cfg: dict) -> GlinerBackend:
     """Construct the real ONNX GLiNER backend, importing the ML deps LAZILY. On
     any failure raises RuntimeError with an actionable message; the caller

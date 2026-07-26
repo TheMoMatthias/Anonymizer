@@ -113,3 +113,52 @@ def test_detection_control_bar_builds(render_ctx):
     gui_app._detection_control_bar(state, job)
     # The bar initializes the live sensitivity from the job's config.
     assert state.sensitivity == 0.0
+
+
+def _bar_text(state, job) -> str:
+    from nicegui import ui
+
+    from anonymizer.gui import app as gui_app
+
+    box = ui.column()
+    with box:
+        gui_app._detection_control_bar(state, job)
+    out = []
+    for d in [box, *box.descendants()]:
+        for c in (getattr(d, "_text", None), d._props.get("label")):
+            if isinstance(c, str) and c:
+                out.append(c)
+    return " | ".join(out)
+
+
+def test_switching_to_a_profile_that_detects_differently_offers_a_rescan(render_ctx):
+    """Profiles used to carry only default ACTIONS, so switching one could be
+    applied to findings already on screen. They now also carry DETECTION settings,
+    which cannot be applied retroactively -- the findings came from a scan that
+    used the old values. Left silent, the control bar asserts a profile that
+    demonstrably did not produce the list underneath it."""
+    from anonymizer.gui import app as gui_app
+    from anonymizer.models import FileJob
+
+    state = gui_app.PageState()
+    state.profile = "HR documents"
+    job = FileJob(
+        path=r"C:\docs\report.xlsx", status="review", scan=_result(), config={},
+        scanned_profile="Client statements",
+    )
+    assert "Re-scan to apply" in _bar_text(state, job)
+
+
+def test_no_rescan_notice_when_detection_is_unchanged(render_ctx):
+    """The notice must not cry wolf: re-showing it for a profile whose detection
+    settings are identical would train the reviewer to ignore it."""
+    from anonymizer.gui import app as gui_app
+    from anonymizer.models import FileJob
+
+    state = gui_app.PageState()
+    state.profile = "HR documents"
+    job = FileJob(
+        path=r"C:\docs\report.xlsx", status="review", scan=_result(), config={},
+        scanned_profile="HR documents",
+    )
+    assert "Re-scan to apply" not in _bar_text(state, job)

@@ -123,6 +123,72 @@ def _gliner_section(cfg: dict) -> None:
         ).classes("az-muted text-xs mb-2")
         ok, status = _gliner_status(gliner)
         ui.label(status).classes(f"text-xs az-mono {'text-positive' if ok else 'text-warning'}")
+        _gliner_advanced(gliner)
+
+
+# The ML cutoffs, in the order a reader needs them: what each one does, and what
+# it costs to move. Kept out of the main card because the reviewer is a colleague
+# triaging documents, not someone tuning a model -- the detection PROFILE sets
+# these, and this expander exists for the person who has a measurement in hand.
+_GLINER_KNOBS = (
+    (
+        "min_score",
+        "Minimum confidence",
+        "Below this the AI's hit is dropped before anything else sees it. Raise it to cut "
+        "false positives (the shipped 'department' label matches the ordinary German noun "
+        "'Abteilung'); lower it to catch more.",
+        0.0,
+        1.0,
+    ),
+    (
+        "confidence_override",
+        "Trust-me threshold",
+        "At or above this score an AI hit skips the German-noun/part-of-speech filter. This is "
+        "what lets a project genuinely named 'Derivatefreiheit' survive a filter built to drop "
+        "common nouns. Too low and that filter stops working at all.",
+        0.0,
+        1.0,
+    ),
+)
+
+
+def _gliner_advanced(gliner: dict) -> None:
+    """The raw ML cutoffs, behind an expander.
+
+    These are owned by the detection PROFILE (see profiles.py): picking a document
+    type sets all of them coherently, which is the only way three interacting
+    numbers stay comprehensible to someone who is not tuning a model. Editing one
+    here is a deliberate override, so it says so -- silently diverging from the
+    profile that claims to govern it is how a settings screen starts lying."""
+    with ui.expansion("Advanced — AI confidence thresholds").classes("w-full mt-2"):
+        ui.label(
+            "Normally set for you by the detection profile you pick when scanning. Change these "
+            "only with a measurement in hand — they trade false positives against missed data."
+        ).classes("az-muted text-xs mb-2")
+        note = ui.label("").classes("text-xs text-warning")
+
+        def mark_overridden() -> None:
+            note.set_text(
+                "Overridden by hand — the detection profile no longer governs these until you reset them."
+            )
+
+        for key, label, tip, lo, hi in _GLINER_KNOBS:
+            with ui.row().classes("items-center gap-3 w-full py-1"):
+                ui.label(label).classes("text-sm w-44").tooltip(tip)
+                num = (
+                    ui.number(value=float(gliner.get(key, 0.0)), min=lo, max=hi, step=0.05, format="%.2f")
+                    .props("dense outlined")
+                    .classes("w-28")
+                )
+
+                def changed(e, k=key) -> None:
+                    if e.value is None:
+                        return
+                    gliner[k] = float(e.value)
+                    mark_overridden()
+
+                num.on_value_change(changed)
+            ui.label(tip).classes("az-muted text-xs mb-1")
 
 
 # Debounce: re-scanning is real work (seconds, not instant), so a preview
