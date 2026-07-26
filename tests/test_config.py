@@ -181,6 +181,75 @@ def test_schema_resync_is_idempotent_after_first_run(tmp_path, monkeypatch):
     assert cfg2["entities"]["NER_MISC"]["confidence_threshold"] == 0.61, "tweak must survive when version unchanged"
 
 
+# --- GLiNER labels are user-extendable ---------------------------------------
+#
+# A zero-shot label is plain text handed to the model at inference time. Adding
+# "Mandant", or re-pointing a shipped label that is noisy in this domain, is meant
+# to be a config edit rather than a code change -- so a schema bump must not eat it.
+
+
+def _stale_gliner_cfg(tmp_path, labels: dict, installed: dict | None = None) -> None:
+    """A pre-bump config whose gliner labels are `labels`, with `installed` as the
+    recorded provenance (None = a config written before provenance existed)."""
+    base = tmp_path / "Anonymizer"
+    base.mkdir(parents=True, exist_ok=True)
+    cfg = {"entities": {}, "gliner": {"enabled": True, "labels": labels}}
+    if installed is not None:
+        cfg[cfg_mod.GLINER_LABELS_STATE_KEY] = installed
+    (base / "config.yaml").write_text(yaml.safe_dump(cfg), encoding="utf-8")
+
+
+def _shipped_labels() -> dict:
+    return yaml.safe_load(cfg_mod.DEFAULT_CONFIG_PATH.read_text(encoding="utf-8"))["gliner"]["labels"]
+
+
+def test_user_added_gliner_label_survives_a_schema_bump(tmp_path, monkeypatch):
+    """Adding a label is the entire point of a zero-shot model. It must never cost
+    a code change, and must never be silently dropped on upgrade."""
+    monkeypatch.setenv("LOCALAPPDATA", str(tmp_path))
+    shipped = _shipped_labels()
+    _stale_gliner_cfg(tmp_path, {**shipped, "client reference": "MANDANT"}, installed=shipped)
+
+    labels = cfg_mod.load_config()["gliner"]["labels"]
+    assert labels["client reference"] == "MANDANT", "a user-added label was eaten by the bump"
+    assert labels["person"] == shipped["person"], "shipped labels must still re-sync"
+
+
+def test_user_edited_gliner_label_is_not_reverted(tmp_path, monkeypatch):
+    """Re-pointing a noisy shipped label is legitimate local tuning -- the shipped
+    'department' matches the ordinary German noun 'Abteilung'. Silently reverting
+    that on upgrade is how a config stops being trustworthy."""
+    monkeypatch.setenv("LOCALAPPDATA", str(tmp_path))
+    shipped = _shipped_labels()
+    edited = {**shipped, "department": "OTHER_ENTITIES"}
+    _stale_gliner_cfg(tmp_path, edited, installed=shipped)
+
+    labels = cfg_mod.load_config()["gliner"]["labels"]
+    assert labels["department"] == "OTHER_ENTITIES", "a deliberate user edit was reverted"
+
+
+def test_untouched_gliner_label_is_resynced(tmp_path, monkeypatch):
+    """The mirror requirement: an entry we installed and nobody touched must pick
+    up a shipped fix, or the label map freezes on whatever first shipped."""
+    monkeypatch.setenv("LOCALAPPDATA", str(tmp_path))
+    shipped = _shipped_labels()
+    stale = {**shipped, "person": "WRONG_TYPE"}
+    # provenance says WE installed WRONG_TYPE -> untouched -> safe to upgrade
+    _stale_gliner_cfg(tmp_path, stale, installed=stale)
+
+    assert cfg_mod.load_config()["gliner"]["labels"]["person"] == shipped["person"]
+
+
+def test_provenance_is_recorded_on_a_fresh_install(tmp_path, monkeypatch):
+    """A fresh config is a straight COPY of the shipped file. Without recording
+    provenance on first run, a label edited before the first bump would look
+    untouched and be reverted."""
+    monkeypatch.setenv("LOCALAPPDATA", str(tmp_path))
+    cfg = cfg_mod.load_config()
+    assert cfg.get(cfg_mod.GLINER_LABELS_STATE_KEY), "no label provenance recorded on a fresh install"
+    assert cfg[cfg_mod.GLINER_LABELS_STATE_KEY] == cfg["gliner"]["labels"]
+
+
 def test_undecryptable_lists_raises_and_is_not_overwritten(tmp_path, monkeypatch):
     """Regression (silent data loss): an undecryptable lists.enc used to be treated
     like 'absent' -> load/save overwrote it empty -> the deny list was permanently,

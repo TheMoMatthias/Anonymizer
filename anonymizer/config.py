@@ -148,6 +148,17 @@ def _ensure_defaults(cfg: dict) -> bool:
     if merge_new_recognizers(cfg) > 0 or cfg.get(SHIPPED_STATE_KEY, {}) != state_before:
         changed = True
 
+    # Record the GLiNER labels currently in the config as "what we installed", so a
+    # later schema bump can tell a user's edit from an untouched shipped entry.
+    # Written here rather than only at bump time because a fresh config is a
+    # straight COPY of the shipped file -- without this, a label edited before the
+    # first bump would look untouched and be silently reverted. The CURRENT labels
+    # are recorded, not the shipped ones: on a config predating this record, its
+    # own (possibly older) labels are the honest baseline for "unmodified".
+    if GLINER_LABELS_STATE_KEY not in cfg and (cfg.get("gliner") or {}).get("labels"):
+        cfg[GLINER_LABELS_STATE_KEY] = dict(cfg["gliner"]["labels"])
+        changed = True
+
     existing_allow = set(cfg.get("allow_list", []))
     new_allow = [a for a in shipped.get("allow_list", []) if a not in existing_allow]
     if new_allow:
@@ -158,6 +169,33 @@ def _ensure_defaults(cfg: dict) -> bool:
         changed = True
 
     return changed
+
+
+def _merge_gliner_labels(cfg: dict, shipped_labels: dict) -> dict:
+    """The GLiNER label map after a schema bump: shipped labels re-synced, the
+    user's own work kept.
+
+    Three cases, decided by the provenance record (GLINER_LABELS_STATE_KEY):
+      * a shipped label the user never touched  -> take the shipped value, so a
+        wording fix or a re-pointed entity type actually reaches existing installs;
+      * a shipped label the user CHANGED        -> keep theirs. Re-pointing a noisy
+        label (the shipped "department" matches the ordinary German noun
+        "Abteilung") is a legitimate local tuning decision, and silently reverting
+        it on upgrade is how a config stops being trustworthy;
+      * a label the user ADDED                  -> keep it. Adding a label is the
+        entire point of a zero-shot model and must never cost a code change.
+
+    With no provenance recorded (a config written before this existed) every
+    shipped label is treated as untouched, matching how the recognizer upgrade
+    path treats an unmarked legacy entry that still matches what we shipped."""
+    user_labels = dict((cfg.get("gliner") or {}).get("labels") or {})
+    installed = dict(cfg.get(GLINER_LABELS_STATE_KEY) or {})
+    merged = dict(user_labels)
+    for label, entity in shipped_labels.items():
+        untouched = label not in user_labels or user_labels[label] == installed.get(label, user_labels[label])
+        if untouched:
+            merged[label] = entity
+    return merged
 
 
 def _resync_builtins(cfg: dict, shipped: dict) -> bool:
@@ -232,7 +270,9 @@ def _resync_builtins(cfg: dict, shipped: dict) -> bool:
         cfg["gliner"] = {
             **shipped_gliner,
             "enabled": user_gliner.get("enabled", shipped_gliner.get("enabled", False)),
+            "labels": _merge_gliner_labels(cfg, shipped_gliner.get("labels") or {}),
         }
+        cfg[GLINER_LABELS_STATE_KEY] = dict(shipped_gliner.get("labels") or {})
 
     cfg["config_schema_version"] = shipped_ver
     return True
@@ -270,6 +310,15 @@ def save_config(config: dict) -> None:
 # it there and nobody has touched it" -> safe to upgrade. Anything else is a user
 # edit and is left exactly as it is.
 SHIPPED_STATE_KEY = "shipped_recognizers"
+
+# The same provenance idea, for the GLiNER label map: the label->entity mapping we
+# last installed. A zero-shot label is just plain text handed to the model at
+# inference time, so adding "Mandant" or "Vertragsnummer", or re-pointing a noisy
+# shipped label, is meant to be a config edit rather than a code change -- and it
+# must not be silently eaten by the next schema bump. Recording what WE installed
+# is what lets a re-sync tell "nobody touched this, safe to upgrade" from "the user
+# changed it deliberately, leave it alone".
+GLINER_LABELS_STATE_KEY = "shipped_gliner_labels"
 
 # Configs written BEFORE provenance existed carry no marker. They are adopted
 # (and upgraded) only if their content matches a definition this repo actually
