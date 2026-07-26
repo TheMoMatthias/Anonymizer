@@ -159,6 +159,114 @@ def test_resolve_overlaps_checksum_tested_id_beats_ner_on_an_identical_span():
     assert len(kept) == 1 and kept[0].entity_type == "IBAN_CODE"
 
 
+# --- Art. 9 span splitting ----------------------------------------------------
+#
+# An Art. 9 recognizer anchors on a label and claims the REST OF THE LINE, which
+# is deliberate: a German diagnosis legitimately contains commas ("Diabetes
+# mellitus Typ 2, insulinpflichtig"), so terminating at the first one would leave
+# health data in a file the tool calls verified. The cost was that a customer name
+# and IBAN sharing that line were destroyed ONE-WAY instead of pseudonymized.
+
+_DIAG = "Diagnose: Diabetes mellitus Typ 2, Herr Klaus Mueller, IBAN DE89370400440532013000"
+
+
+def _diag_findings(*, iban_validated=True, person_span=None):
+    """The Art. 9 line above as (art9, person, iban) findings. The Art. 9 span
+    covers everything after the 'Diagnose:' anchor, exactly as the recognizer
+    emits it."""
+    a_start = _DIAG.index("Diabetes")
+    art9 = Finding("DE_HEALTH_DATA", _DIAG[a_start:], 0.86, "", "u1", a_start, len(_DIAG))
+    p_start, p_end = person_span or (_DIAG.index("Klaus"), _DIAG.index("Mueller") + len("Mueller"))
+    person = Finding("PERSON", _DIAG[p_start:p_end], 0.85, "", "u1", p_start, p_end)
+    i_start = _DIAG.index("DE89")
+    iban = Finding(
+        "IBAN_CODE", _DIAG[i_start:], 0.98, "", "u1", i_start, len(_DIAG), validated=iban_validated
+    )
+    return art9, person, iban
+
+
+def test_art9_span_splits_around_a_contained_person_and_validated_id():
+    """The fix: a name and a checksum-validated IBAN buried in a `Diagnose:` line
+    survive as their own findings (so they stay reversibly pseudonymized) and the
+    one-way Art. 9 span is cut around them instead of destroying them."""
+    kept = _resolve_overlaps(list(_diag_findings()), _DIAG)
+    by_type = {f.entity_type for f in kept}
+    assert "PERSON" in by_type, "the customer name was destroyed by the Art.9 span"
+    assert "IBAN_CODE" in by_type, "the IBAN was destroyed by the Art.9 span"
+    assert "DE_HEALTH_DATA" in by_type, "the health text must still be covered"
+    person = next(f for f in kept if f.entity_type == "PERSON")
+    assert person.value == "Klaus Mueller"
+
+
+def test_art9_split_still_covers_every_letter_of_the_health_text():
+    """The whole point of claiming the rest of the line is that no health text
+    escapes. Splitting must not create a hole: every alphabetic character of the
+    original Art. 9 span is still covered by SOME finding."""
+    art9, person, iban = _diag_findings()
+    kept = _resolve_overlaps([art9, person, iban], _DIAG)
+    covered = set()
+    for f in kept:
+        covered.update(range(f.start, f.end))
+    uncovered = [i for i in range(art9.start, art9.end) if i not in covered and _DIAG[i].isalpha()]
+    assert not uncovered, f"letters left uncovered by the split: {[_DIAG[i] for i in uncovered]}"
+
+
+def test_art9_split_preserves_the_non_overlap_invariant():
+    """Apply splices spans and ASSUMES they never overlap. A split that produced
+    overlapping fragments would garble the written document."""
+    kept = _resolve_overlaps(list(_diag_findings()), _DIAG)
+    spans = sorted((f.start, f.end) for f in kept)
+    assert all(a_end <= b_start for (_a, a_end), (b_start, _b) in zip(spans, spans[1:])), spans
+
+
+def test_art9_split_emits_no_token_for_a_letter_free_gap():
+    """A gap of pure punctuation between two survivors has nothing to redact --
+    emitting a [DE_HEALTH_DATA] where only ', ' stood would corrupt the line for
+    no privacy gain."""
+    text = "Diagnose: Asthma, Klaus Mueller, Anna Weber"
+    a_start = text.index("Asthma")
+    art9 = Finding("DE_HEALTH_DATA", text[a_start:], 0.86, "", "u1", a_start, len(text))
+    p1 = Finding("PERSON", "Klaus Mueller", 0.85, "", "u1", text.index("Klaus"), text.index("Mueller") + 7)
+    p2 = Finding("PERSON", "Anna Weber", 0.85, "", "u1", text.index("Anna"), len(text))
+    kept = _resolve_overlaps([art9, p1, p2], text)
+    health = [f for f in kept if f.entity_type == "DE_HEALTH_DATA"]
+    assert all(any(ch.isalpha() for ch in f.value) for f in health), (
+        f"a letter-free fragment became a finding: {[f.value for f in health]}"
+    )
+    assert any("Asthma" in f.value for f in health), "the actual health word must stay covered"
+
+
+def test_art9_span_is_not_split_by_a_checksum_failed_id():
+    """Only arithmetic-backed survivors cut health data. A checksum-FAILED id may
+    not be an id at all, and a wrong survivor punches a hole in the Art. 9 span."""
+    art9, _person, iban = _diag_findings(iban_validated=False)
+    kept = _resolve_overlaps([art9, iban], _DIAG)
+    assert len(kept) == 1 and kept[0].entity_type == "DE_HEALTH_DATA"
+
+
+def test_art9_span_wins_whole_when_a_survivor_covers_it_entirely():
+    """If the survivor covers the Art. 9 span exactly, splitting would leave NO
+    Art. 9 finding at all -- the value would silently become reversible and lose
+    its special-category protection. That case keeps the old behaviour."""
+    a_start = _DIAG.index("Diabetes")
+    art9, _p, _i = _diag_findings()
+    person = Finding("PERSON", _DIAG[a_start:], 0.85, "", "u1", a_start, len(_DIAG))
+    kept = _resolve_overlaps([art9, person], _DIAG)
+    assert len(kept) == 1 and kept[0].entity_type == "DE_HEALTH_DATA"
+
+
+def test_art9_diagnosis_containing_commas_is_never_truncated():
+    """Pins the REJECTED fix: terminating an Art. 9 value at the first comma looks
+    obvious and leaks -- a German diagnosis legitimately contains commas, so the
+    tail ('insulinpflichtig') would ship in the clear."""
+    text = "Diagnose: Diabetes mellitus Typ 2, insulinpflichtig"
+    a_start = text.index("Diabetes")
+    art9 = Finding("DE_HEALTH_DATA", text[a_start:], 0.86, "", "u1", a_start, len(text))
+    kept = _resolve_overlaps([art9], text)
+    assert len(kept) == 1
+    assert "insulinpflichtig" in kept[0].value, "health data past the comma was left in the document"
+
+
 def test_checksum_failed_steuer_id_still_surfaces(analyzer, base_config):
     """Regression (LEAK): a checksum-FAILED Steuer-ID was demoted to 0.4 then
     dropped by its 0.6 threshold, vanishing from the actionable set. A typo'd/OCR'd

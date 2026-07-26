@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import functools
 import re
+from dataclasses import replace
 
 from . import taxonomy, validators
 from .actions import token_label
@@ -341,6 +342,94 @@ def _refine(finding: Finding) -> Finding:
     return finding
 
 
+def _survives_special_category(f: Finding) -> bool:
+    """True for a finding strong enough to survive INSIDE a one-way Art. 9 span
+    and cut it (see _split_special_category_spans).
+
+    Deliberately narrow. A PERSON, because a customer name is the value whose
+    reversibility is worth most operationally; and any id whose CHECKSUM PASSED,
+    because that is the only claim here backed by arithmetic rather than by a
+    model. A checksum-FAILED id is excluded on purpose -- it may not be an id at
+    all, and every wrong survivor cuts a hole in health data."""
+    return f.entity_type == "PERSON" or f.validated is True
+
+
+def _lettered_gaps(parent: Finding, chosen: list[Finding], text: str) -> list[Finding]:
+    """The parts of `parent` that `chosen` does not cover, as Art. 9 findings.
+
+    Only gaps that still contain a LETTER survive: health text on either side of
+    a name is still health text, but a gap of pure punctuation (", ", " - ") has
+    nothing to redact, and emitting a `[DE_HEALTH_DATA]` token where only a comma
+    stood would corrupt the line for no privacy gain. Surrounding whitespace is
+    trimmed off each gap for the same reason."""
+    gaps: list[Finding] = []
+    cursor = parent.start
+    for boundary in [*(s.start for s in chosen), parent.end]:
+        if boundary > cursor:
+            raw = text[cursor:boundary]
+            lead = len(raw) - len(raw.lstrip())
+            start, end = cursor + lead, cursor + len(raw.rstrip())
+            value = text[start:end]
+            if end > start and any(ch.isalpha() for ch in value):
+                gaps.append(
+                    replace(parent, start=start, end=end, value=value, context=_snippet(text, start, end))
+                )
+        nxt = next((s for s in chosen if s.start == boundary), None)
+        if nxt is not None:
+            cursor = max(cursor, nxt.end)
+    return gaps
+
+
+def _split_special_category_spans(
+    kept: list[Finding], carved: dict[int, list[Finding]], text: str
+) -> list[Finding]:
+    """Cut a one-way Art. 9 span around the high-specificity findings it swallowed.
+
+    An Art. 9 recognizer anchors on a LABEL and claims the rest of the line
+    ("Diagnose: ..."), which is correct and must stay that way: a German diagnosis
+    legitimately contains commas ("Diabetes mellitus Typ 2, insulinpflichtig"), so
+    terminating the value at the first one would leave health data in a file the
+    tool calls verified. But that same line also carries the customer's name and
+    IBAN -- and the Art. 9 action is ONE-WAY, so those were destroyed outright
+    instead of pseudonymized, with no way to ever restore them.
+
+    So the survivors are re-emitted as their own findings and the Art. 9 span is
+    split around them, with every lettered fragment keeping the identical one-way
+    action. A survivor covering the parent ENTIRELY does not split it: no fragment
+    would remain, the Art. 9 finding would vanish, and the value would silently
+    become reversible -- trading the special-category protection for the very
+    reversibility this is meant to preserve *inside* it. That case keeps the old
+    behaviour and the Art. 9 span wins whole.
+
+    The non-overlap invariant apply relies on holds by construction: fragments are
+    the gaps BETWEEN survivors, and the survivors are de-overlapped against each
+    other first -- they were each compared only against the parent on the way in,
+    never against one another, so two of them genuinely can overlap."""
+    if not carved:
+        return kept
+    out: list[Finding] = []
+    for parent in kept:
+        survivors = carved.get(id(parent))
+        if not survivors:
+            out.append(parent)
+            continue
+        chosen: list[Finding] = []
+        for s in survivors:  # already in _resolve_overlaps' priority order
+            if s.start < parent.start or s.end > parent.end:
+                continue  # a crossing merge moved the parent; s is no longer inside
+            if any(s.start < c.end and c.start < s.end for c in chosen):
+                continue
+            chosen.append(s)
+        chosen.sort(key=lambda f: f.start)
+        fragments = _lettered_gaps(parent, chosen, text) if chosen else []
+        if not fragments:
+            out.append(parent)
+            continue
+        out.extend(fragments)
+        out.extend(chosen)
+    return out
+
+
 def _resolve_overlaps(findings: list[Finding], text: str) -> list[Finding]:
     """Keeps a non-overlapping set. Apply replaces spans by splicing text and
     ASSUMES they never overlap (see the format handlers' run/cell replacement);
@@ -395,6 +484,10 @@ def _resolve_overlaps(findings: list[Finding], text: str) -> list[Finding]:
         ),
     )
     kept: list[Finding] = []
+    # Contained findings strong enough to CUT the one-way Art. 9 span holding them.
+    # Resolved after the loop, keyed on the parent's identity because a crossing
+    # merge below can still move that parent's bounds after we record it.
+    carved: dict[int, list[Finding]] = {}
     for f in ordered:
         overlappers = [k for k in kept if f.start < k.end and k.start < f.end]
         if not overlappers:
@@ -403,6 +496,8 @@ def _resolve_overlaps(findings: list[Finding], text: str) -> list[Finding]:
         contained_in = next((k for k in overlappers if k.start <= f.start and f.end <= k.end), None)
         if contained_in is not None:
             _absorb_corroborating_source(contained_in, f)
+            if taxonomy.is_special_category(contained_in.entity_type) and _survives_special_category(f):
+                carved.setdefault(id(contained_in), []).append(f)
             continue  # fully contained by a kept span -> its PII is already covered
         # Crossing overlap: extend the highest-priority overlapper to the union of
         # f and EVERY span it crosses (f may bridge two adjacent kept spans), so no
@@ -420,7 +515,7 @@ def _resolve_overlaps(findings: list[Finding], text: str) -> list[Finding]:
         # rather than show a stale "verified" chip for a value never validated.
         winner.validated = None
         _absorb_corroborating_source(winner, f)
-    return sorted(kept, key=lambda f: f.start)
+    return sorted(_split_special_category_spans(kept, carved, text), key=lambda f: f.start)
 
 
 def _absorb_corroborating_source(kept: Finding, dropped: Finding) -> None:
