@@ -329,6 +329,19 @@ source, which is the intended reading of the grill decision.
   full suite caught a document that could no longer be saved at all. The gate
   watched precision and never watched recall. Any future model swap runs the full
   suite.
+- `1c338dc` **Provenance reported the wrong profile.** Found by running Stage 3
+  against the REAL model instead of the injected fake: `detection_provenance` reads
+  `cfg["profile"]`, which `apply_profile` never wrote, so every report claimed
+  "Balanced (default)" — in the very output where the HR profile had visibly
+  applied its own cutoffs. A provenance field that is always the same value looks
+  like evidence, which makes it worse than no field.
+
+**Zero-shot false positives measured on the real model** (tuning input for step 5,
+not defects): `PERSON 'Der Mitarbeiter' 0.95` — a role, not a name — and
+`DIVISION 'Abteilung' 0.59`, the ordinary German noun for "department". Both are
+label/threshold calibration. The `Abteilung` case is now re-pointable without a
+code change (that is what the label-provenance work bought), though shipped labels
+still cannot be deleted — see below.
 
 ### Where this run stopped
 
