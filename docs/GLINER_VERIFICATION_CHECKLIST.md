@@ -1,79 +1,131 @@
-# GLiNER — weekend verification checklist
+# GLiNER — verification checklist
 
-A hands-on checklist to take the GLiNER integration from "scaffolded, disabled by
-default" to "verified working on a real document." Do this on a **connected
-machine** (the model must be fetched once). Depth/rationale for every step lives
-in `docs/run_gliner-integration_2026-07-24.md`; this file is the do-list.
+The do-list for taking GLiNER from "scaffolded, disabled by default" to "verified
+working on a real document". Depth and rationale live in
+`docs/run_gliner-integration_2026-07-24.md` (original design) and
+`docs/run_gliner-completion_2026-07-26.md` (what actually happened on a connected
+machine, including three offline failures the design could not have found).
 
-**Current state:** Phases A + B done, Phase C offline scaffolding done. GLiNER ships
-**disabled** (`gliner.enabled: false`) with no model present. 203 tests green.
+**Current state (2026-07-26, after the merge at `1ac90e4`):** Phases A+B+C done.
+The model pack is **built and verified loading fully offline**, and the loader is
+fixed for the air-gap. GLiNER still ships **disabled** (`gliner.enabled: false`)
+— flipping that is gated on the real-workbook measurement in step 5, which is
+**yours**, because it needs your reference document. **418 tests green.**
 
 ---
 
-## 0. Baseline (5 min)
-- [ ] `git pull` (branch `master`).
-- [ ] `uv sync` then `uv run pytest -q` → expect **203 passed**. This is the "before" state with GLiNER off.
-- [ ] Launch the app, open Settings → confirm the new **"AI detection (GLiNER)"** card shows a toggle and a status line reading `runtime: MISSING · model: not found …` (correct while nothing is installed).
+## ✅ 0. Baseline — DONE
+- [x] Suite green: **418 passed** (was 203 pre-merge; the audit-remediation branch
+      merged in). Use 418 as the "before" number, not 203.
+- [x] Settings shows the **"AI detection (GLiNER)"** card with its status line.
 
-## 1. Install the ML runtime — mind the torch/CUDA trap (15–30 min)
-> **Known issue:** `gliner` pulls the **full torch + CUDA stack** transitively. A naive install is many GB and GPU-oriented — the opposite of the ONNX/<1GB goal.
-- [ ] Preferred: install a **torch-free ONNX path** — `onnxruntime` + `transformers`/`tokenizers` only — and load the ONNX graph + tokenizer directly, bypassing `gliner`'s torch import. (Adapt `_OnnxGlinerBackend.predict` in `anonymizer/gliner_recognizer.py` to this path.)
-- [ ] Fallback: CPU-only torch (`uv pip install ... --index <pytorch-cpu>`), so no `nvidia-*`/`cuda-*` wheels. Larger, but no GPU stack.
-- [ ] Confirm the resolved install has **no CUDA wheels**: `uv run python -c "import importlib.util as u; print('torch', u.find_spec('torch')); print('onnxruntime', u.find_spec('onnxruntime'))"`.
+## ✅ 1. ML runtime — DONE, and the feared trap does not exist here
+- [x] **The torch/CUDA trap was a Linux-marker artifact of `uv lock`.** On this
+      platform `gliner + onnxruntime` resolves with **zero `nvidia-*`/`cuda-*`
+      packages**: PyPI's Windows torch wheel is CPU-only (122 MB), because
+      CUDA-enabled Windows builds live on the separate pytorch index.
+- [x] **Measured full install: 693 MB** (torch 471, transformers 51, onnxruntime
+      40, sympy 29, numpy 43, rest <10 each).
+- [x] **Consequence:** we keep the upstream `gliner` package. The torch-free ONNX
+      path — reimplementing GLiNER's tokenizer and span decoding and owning that
+      drift forever — is **not needed and not being done**. `gliner.onnx` is now
+      `false` in the shipped config.
+- Install with: `uv sync --extra ml`
 
-## 2. Prepare the model → `vendor/gliner-model/` (20–40 min)
-- [ ] Fetch `urchade/gliner_multi-v2.1`, export to **ONNX**, and **int8-quantise** (per the gliner / optimum docs).
-- [ ] Save the `from_pretrained` snapshot into `vendor/gliner-model/` (config json + `onnx/model.onnx` + tokenizer files).
-- [ ] Note the on-disk size — this is what the bundle will carry (target: well under 1 GB).
+## ✅ 2. Model pack — DONE, and it needs three things its own repo doesn't ship
+```
+uv run python scripts/fetch_gliner_model.py vendor/gliner-model
+```
+- [x] Pack built: **~1.16 GB** (fp32 `model.safetensors` 1156 MB + fast tokenizer
+      16 MB + spm 4.3 MB + a 4.3 MB pack-local `hf-cache/`).
+- [x] `urchade/gliner_multi-v2.1` ships **only** config + weights. The pack also
+      needs (a) the mDeBERTa **tokenizer**, (b) a `tokenizer_class` key so
+      transformers 5.x can build it, and (c) the **base encoder config** in a
+      pack-local HF cache. All three are missing in a way that fails **only on a
+      machine with no network** — see the script's docstring.
+- [ ] *(optional, not done)* int8 ONNX export to shrink 1156 MB → ~290 MB. No
+      upstream ONNX build exists and gliner ships no exporter, so this is our own
+      torch.onnx/optimum step. Only worth it if bundle size actually bites.
 
-## 3. Smoke-test the backend loads + predicts (5 min)
-- [ ] ```
-  uv run python -c "from anonymizer.gliner_recognizer import load_gliner_backend; b=load_gliner_backend({'model_path':'vendor/gliner-model','onnx':True}); print(b.predict('Ada Lovelace arbeitet bei DeepL Pro in Karlsruhe.', ['person','tool','location']))"
-  ```
-- [ ] Expect spans for a person, a tool (DeepL Pro), and a location, each with a score. If this raises, the model layout/path is wrong — fix before continuing.
+## ✅ 3. Backend smoke test — DONE (offline)
+Verified with `HF_HUB_OFFLINE=1`, which is the only honest test:
+```
+loaded in 4.0s   type=UniEncoderSpanGLiNER
+'Ada Lovelace arbeitet bei DeepL Pro in Karlsruhe.'   (122 ms)
+    person 'Ada Lovelace' 0.991 | organization 'DeepL Pro' 0.962 | location 'Karlsruhe' 0.987
+'Das Projekt Derivatefreiheit wurde von Herrn Klaus Mueller geleitet.'   (56 ms)
+    project 'Derivatefreiheit' 0.719 | person 'Herrn Klaus Mueller' 0.942
+'Die Effizienz der Reaktionszeiten war zufriedenstellend.'   (54 ms)   -> (no entities)
+deterministic across repeated inference: True
+```
+- [x] Mixed-language win real: the English product name inside German prose.
+- [x] A German noun-shaped **project name survives**; ordinary nominalizations
+      (*Effizienz*, *Reaktionszeiten*) are **not** flagged.
+- [x] **Deterministic** — the property scan/apply parity depends on.
+- [x] ~55–120 ms per text on CPU.
 
-## 4. Enable and run a functional check (15 min)
-- [ ] Point the app at the model: set `ANONYMIZER_GLINER_MODEL=…\vendor\gliner-model` (the bundle launcher does this automatically from `gliner-model\`).
-- [ ] Turn the Settings **AI detection** toggle **on** (or set `gliner.enabled: true` in `%LOCALAPPDATA%\Anonymizer\config.yaml`). Confirm the status line now reads `runtime: installed · model: … (NNN MB)`.
-- [ ] Scan a **small** German test doc that contains: a prose name spaCy usually misses, an English tool name inside German text, and a project/tool term. Verify in the review screen:
-  - [ ] GLiNER findings appear (source `gliner`), including the English tool in the German doc (the mixed-language win).
-  - [ ] A high-confidence German noun-like tool/project name is **kept** (confidence-override working); ordinary German nouns like *Effizienz* are **not** flagged.
-- [ ] **Hard-fail check:** rename `vendor/gliner-model` temporarily, keep GLiNER enabled, scan → expect a clear error pointing to the Settings toggle (not a silent degrade). Restore the folder.
+## 4. Functional check in the app — PARTLY DONE
+- [x] Loader hardened for the air-gap: `local_files_only=True` (a hub lookup on an
+      air-gapped box does not fail fast — it **stalls inside the scan**, which
+      reads as a hung app), pack-local `cache_dir`, and `model.eval()`.
+- [ ] Turn the Settings **AI detection** toggle on; confirm the status line reads
+      `runtime: installed · model: … (NNN MB)`.
+- [ ] Scan a small German doc and confirm GLiNER findings appear with source
+      `gliner` in the review screen.
+- [ ] **Hard-fail check:** rename `vendor/gliner-model`, keep GLiNER enabled,
+      scan → expect a clear actionable error, not a silent degrade.
 
-## 5. DONE-WHEN measurement on the REAL workbook (30–60 min) — the real test
-Run your reference workbook **twice**: once with GLiNER off, once on.
-- [ ] **Recall ↑:** GLiNER recovers clearly-missed names/orgs (items absent from the old `_flagged.csv`). Use the "export flagged words" feature to diff.
-- [ ] **Precision held:** total flagged **≤ ~445** (the current baseline). If it blows past that, raise `confidence_override` / per-entity thresholds, or lower the sensitivity slider.
-- [ ] **Speed:** typical scan **< 5 min** with GLiNER on. If not, that's the trigger to implement the deferred soft cap (step 8).
-- [ ] Record the three numbers (recall delta, FP count, scan time) in the run-file progress log.
+## 5. ⚠️ DONE-WHEN measurement on YOUR reference workbook — **yours to run**
+This is the gate on shipping GLiNER enabled, and it needs your real document.
+Run it **twice**, once with GLiNER off and once on:
+- [ ] **Recall ↑** — GLiNER recovers clearly-missed names/orgs. Diff the
+      "Export flagged terms" CSVs from the two runs.
+- [ ] **Precision held** — total flagged **≤ ~445** (current baseline). If it
+      blows past, raise `confidence_override` / lower sensitivity.
+- [ ] **Speed** — typical scan **< 5 min** with GLiNER on.
+- [ ] Record the three numbers in the run-file progress log.
 
-## 6. Scan/apply parity (10 min) — must not regress
-- [ ] Apply redactions on the test doc and confirm the output re-scan (`verify_output`) passes with **zero residual**. GLiNER inference must be deterministic (eval mode, fixed weights) — if parity ever fails, that determinism is the first thing to check.
+## 6. Scan/apply parity — must not regress
+- [ ] Apply on a GLiNER-enabled scan and confirm `verify_output` passes with zero
+      residual. Determinism is verified (step 3); the planned **memo replay** (apply
+      reuses scan's GLiNER output rather than re-inferring) makes this structural.
 
-## 7. (Optional) spaCy size downgrade lg→sm
-- [ ] Switch `engine.SPACY_MODELS` to `de_core_news_sm` / `en_core_web_sm`, update the model-wheel URLs in `pyproject.toml`, `uv sync`.
-- [ ] **Run `uv run pytest tests/test_precision.py tests/test_language.py`.** If the German-noun precision tests regress → **revert to `lg`** (documented default) and accept the size cost.
+## 7. (Optional) spaCy lg→sm downgrade
+- [ ] Switch `engine.SPACY_MODELS` to the `sm` models, update the wheel URLs,
+      `uv sync`, then run `pytest tests/test_precision.py tests/test_language.py`.
+      **If the German-noun precision tests regress → revert to `lg`** and accept
+      the size cost. `_is_pos_implausible` / `_is_german_nominalization` read
+      spaCy POS directly, so this is load-bearing.
 
-## 8. Build the offline bundle + finish the deferred work
-- [ ] `./scripts/build_offline_bundle.ps1 -WithML` (after step 1's torch decision). Check final bundle size.
-- [ ] Now that the model is measurable, implement the two DEFERRED items and validate against the real doc:
-  - [ ] **Soft cap** — a content-keyed allow-set precomputed identically in scan + apply (a running counter breaks parity; see run-file). Log the notice when capped.
-  - [ ] **Cell-level DESCRIPTION flag** — whole-cell summarize when GLiNER flags sensitive prose; if v2.1 zero-shot description quality is poor, escalate to GLiNER2 (DEFERRED note).
+## 8. Build the bundle + the deferred items
+- [ ] `./scripts/build_offline_bundle.ps1 -WithML` — it copies
+      `vendor\gliner-model` and `launch.bat` sets `ANONYMIZER_GLINER_MODEL`.
+- [ ] **Soft cap** — now much simpler than designed: with memo replay, a plain
+      **scan-time counter** is parity-safe and the content-keyed allow-set is no
+      longer needed. Log a visible notice when it trips.
+- [ ] **Cell-level DESCRIPTION flag** — escalate to GLiNER2 if v2.1's zero-shot
+      description quality disappoints.
 
 ## 9. Flip the shipped default
-- [ ] Once measurements pass, set `gliner.enabled: true` in `anonymizer/data/default_recognizers.yaml` so fresh installs get it on (`_resync_builtins` preserves any user's explicit choice).
+- [ ] Only once step 5 passes: set `gliner.enabled: true` in
+      `anonymizer/data/default_recognizers.yaml` (`_resync_builtins` preserves any
+      user's explicit choice). Bump `config_schema_version` with it.
 
 ---
 
-## Rollback (if anything misbehaves)
-- Turn the Settings toggle **off** (or `gliner.enabled: false`) → instantly back to spaCy + gazetteer, no code change.
-- Or revert the GLiNER commits (`258cb35`..`039a15e`) → exact pre-GLiNER behaviour. spaCy downgrade is a `pyproject` revert.
+## Rollback
+- Settings toggle **off** (or `gliner.enabled: false`) → instantly back to spaCy +
+  gazetteer, no code change. This is also the escape hatch the load-failure error
+  points at.
+- Or revert the GLiNER commits (`258cb35`..`039a15e`, plus the 2026-07-26 fixes).
 
 ## Quick reference
-- Recognizer + backend: `anonymizer/gliner_recognizer.py`
-- Precision-gate override / detect hook: `anonymizer/core.py` (`_rejected_by_precision`, `detect_unit`)
-- Config block: `anonymizer/data/default_recognizers.yaml` (`gliner:`), schema v6
+- Recognizer + loader: `anonymizer/gliner_recognizer.py`
+- **Pack builder: `scripts/fetch_gliner_model.py`** (run on a connected machine)
+- Precision-gate override / detect hook: `anonymizer/core.py`
+- Config block: `anonymizer/data/default_recognizers.yaml` (`gliner:`), schema v7
 - Settings UI: `anonymizer/gui/settings_page.py` (`_gliner_section`)
 - Bundle: `scripts/build_offline_bundle.ps1 -WithML`, `scripts/bundle_templates/launch.bat`
 - Tests: `tests/test_gliner.py`, `tests/test_gui_render.py`
-- Full spec + runbook: `docs/run_gliner-integration_2026-07-24.md`
+- Design: `docs/run_gliner-integration_2026-07-24.md`
+- **What actually happened + remaining plan: `docs/run_gliner-completion_2026-07-26.md`**

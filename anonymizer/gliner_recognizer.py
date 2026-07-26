@@ -124,6 +124,17 @@ class GlinerRecognizer(EntityRecognizer):
         return results
 
 
+# A model pack ships its own tiny Hugging Face cache. GLiNER's Encoder resolves the
+# BASE encoder config by its hub id -- `AutoConfig.from_pretrained("microsoft/
+# mdeberta-v3-base")` in gliner/modeling/encoder.py -- which reaches the network on
+# a machine that has none. It does forward `cache_dir`, so a pre-populated cache
+# INSIDE the pack makes that call resolve locally with nothing patched and
+# `gliner_config.json` left untouched, which keeps the pack relocatable (the bundle
+# is copied to an arbitrary folder off a network share). ~4 MB: config + tokenizer
+# only, never the base encoder's weights -- GLiNER carries its own fine-tuned ones.
+PACK_CACHE_DIRNAME = "hf-cache"
+
+
 def resolve_model_path(gliner_cfg: dict) -> Path:
     """Resolve the configured model path. Absolute paths are used verbatim; a
     relative path is resolved against the ANONYMIZER_GLINER_MODEL env var (set by
@@ -141,12 +152,21 @@ def resolve_model_path(gliner_cfg: dict) -> Path:
 
 
 class _OnnxGlinerBackend:
-    """Real ONNX-backed backend. Deterministic by construction: GLiNER runs a
-    fixed-weight encoder in eval mode with no sampling, so identical input yields
-    identical spans -- the property scan/apply parity relies on. NOTE: this path
-    requires the model + onnxruntime present and is validated when the model is
-    vendored into the bundle (a networked/packaging step); the unit tests cover
-    the recognizer via an injected fake backend instead."""
+    """The real model-backed backend, wrapping whichever variant
+    `GLiNER.from_pretrained` returned (`GLiNER` is a factory that swaps in
+    `UniEncoderSpanGLiNER` and friends -- `predict_entities` lives on the returned
+    instance, not on the factory class).
+
+    Deterministic by construction: a fixed-weight encoder in eval mode with no
+    sampling, so identical input yields identical spans -- the property scan/apply
+    parity relies on. VERIFIED 2026-07-26 against the real vendored pack, loading
+    fully offline (HF_HUB_OFFLINE=1): repeated inference over the same text
+    produced byte-identical spans and scores.
+
+    The name is historical -- it serves the plain safetensors path too, which is
+    what actually ships (see the `onnx` key in default_recognizers.yaml). Unit
+    tests drive the recognizer through an injected fake backend instead, so the
+    suite still runs with no ML dependency installed."""
 
     def __init__(self, model) -> None:
         self._model = model
@@ -183,15 +203,27 @@ def load_gliner_backend(gliner_cfg: dict) -> GlinerBackend:
             f"'{model_path}'. Restore the bundled model, set ANONYMIZER_GLINER_MODEL, "
             f"or turn off ML detection in Settings."
         )
+    kwargs = {
+        "load_onnx_model": bool(gliner_cfg.get("onnx", False)),
+        "load_tokenizer": True,
+        # NEVER reach the network. This ships air-gapped, where an un-pinned hub
+        # lookup does not fail fast -- it stalls on a connection timeout inside the
+        # scan, which reads to the operator as a hung application rather than a
+        # missing file. Fail immediately with the message below instead.
+        "local_files_only": True,
+    }
+    cache = model_path / PACK_CACHE_DIRNAME
+    if cache.is_dir():
+        kwargs["cache_dir"] = str(cache)
     try:
-        model = GLiNER.from_pretrained(
-            str(model_path),
-            load_onnx_model=bool(gliner_cfg.get("onnx", True)),
-            load_tokenizer=True,
-        )
+        model = GLiNER.from_pretrained(str(model_path), **kwargs)
     except Exception as e:  # noqa: BLE001 -- surface any load error as a clear RuntimeError
         raise RuntimeError(
             f"ML detection (GLiNER) model at '{model_path}' failed to load: {e}. "
-            f"Turn off ML detection in Settings to continue with reduced detection."
+            f"The model pack must contain the weights, the tokenizer files AND a "
+            f"'{PACK_CACHE_DIRNAME}' folder holding the base encoder config -- see "
+            f"docs/run_gliner-completion_2026-07-26.md. Turn off ML detection in "
+            f"Settings to continue with reduced detection."
         ) from e
+    model.eval()  # fixed weights, no dropout -- the determinism scan/apply parity needs
     return _OnnxGlinerBackend(model)

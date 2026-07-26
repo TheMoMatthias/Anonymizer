@@ -8,7 +8,7 @@
 # lists, sensitivity, name_column_headers, user-ADDED recognizers). Without this,
 # the additive-only merge left every existing config permanently stuck on the
 # first-run defaults -- e.g. NER_MISC at 0.5 long after it shipped at 0.75.
-config_schema_version: 6
+config_schema_version: 7
 
 languages:
   - de
@@ -94,8 +94,15 @@ corroboration_only: true
 #   - labels:             {gliner phrase -> entity type} sent at inference time
 gliner:
   enabled: false
-  model_path: gliner_multi-v2.1-onnx
-  onnx: true
+  model_path: gliner-model
+  # Load the plain (safetensors) model, NOT an ONNX graph. Measured 2026-07-26 on
+  # the target platform: the upstream gliner_multi-v2.1 repo publishes no ONNX
+  # build, gliner ships ONNX *runtime* wrappers but no exporter, and the whole
+  # reason to want ONNX -- dodging a multi-GB CUDA stack -- turned out not to
+  # exist here: PyPI's Windows torch wheel is CPU-only (122 MB; the full runtime
+  # is 693 MB with zero nvidia-*/cuda-* packages). Flip to true only alongside a
+  # pack that actually contains onnx/model.onnx.
+  onnx: false
   min_chars: 3
   min_score: 0.3
   confidence_override: 0.85

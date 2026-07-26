@@ -88,14 +88,22 @@ if (Test-Path $glinerVendor) {
     @"
 Drop an OFFLINE GLiNER model here to enable AI detection (Settings -> AI detection).
 
-Expected layout (a from_pretrained snapshot with an ONNX build):
+Expected layout (verified working offline 2026-07-26, ~1.2 GB):
   gliner-model\gliner_config.json
-  gliner-model\onnx\model.onnx        (int8-quantised recommended)
-  gliner-model\tokenizer.json  (+ tokenizer/model support files)
+  gliner-model\model.safetensors
+  gliner-model\tokenizer.json          (pre-serialized FAST tokenizer)
+  gliner-model\tokenizer_config.json   (must carry "tokenizer_class")
+  gliner-model\spm.model
+  gliner-model\hf-cache\...            (base encoder config -- REQUIRED)
 
-Prepare it on a CONNECTED machine per the runbook in
-docs\run_gliner-integration_2026-07-24.md ("Connected-machine runbook"): fetch
-gliner_multi-v2.1, export/quantise to ONNX, and copy the snapshot folder here.
+Do NOT hand-assemble this. Build it on a CONNECTED machine with:
+  uv sync --extra ml
+  uv run python scripts\fetch_gliner_model.py vendor\gliner-model
+
+Three of those pieces are NOT in the model's own repo -- the tokenizer, the
+tokenizer_class key, and the base encoder config -- and each one is missing in a
+way that only fails on a machine with no network. That is what the script exists
+to get right; see its docstring and docs\run_gliner-completion_2026-07-26.md.
 The launcher auto-detects this folder and sets ANONYMIZER_GLINER_MODEL. Without
 it, AI detection stays off (the rule-based + spaCy pass still runs); enabling it
 in Settings without a model here makes scanning stop with a clear error.

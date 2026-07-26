@@ -13,6 +13,8 @@ See docs/run_gliner-integration_2026-07-24.md.
 from __future__ import annotations
 
 import copy
+import sys
+import types
 
 import pytest
 
@@ -21,6 +23,7 @@ from anonymizer.config import DEFAULT_CONFIG_PATH
 from anonymizer.engine import build_analyzer
 from anonymizer.gliner_recognizer import (
     GLINER_SOURCE,
+    PACK_CACHE_DIRNAME,
     GlinerRecognizer,
     load_gliner_backend,
     resolve_model_path,
@@ -210,3 +213,66 @@ def test_language_agnostic_finds_english_term_in_german_config(gliner_config):
 def test_resolve_model_path_env(monkeypatch, tmp_path):
     monkeypatch.setenv("ANONYMIZER_GLINER_MODEL", str(tmp_path / "m.onnx"))
     assert resolve_model_path({"model_path": "ignored"}) == tmp_path / "m.onnx"
+
+
+def _fake_gliner_module(record: dict):
+    """A stand-in for the `gliner` package that records how from_pretrained was
+    called. gliner is deliberately NOT a dependency of the test environment (the
+    whole suite runs with no ML stack), so the loader's call contract can only be
+    pinned by injecting the module."""
+    mod = types.ModuleType("gliner")
+
+    class _FakeModel:
+        def eval(self):
+            record["eval_called"] = True
+
+        def predict_entities(self, text, labels, **kw):
+            return []
+
+    class _FakeGLiNER:
+        @staticmethod
+        def from_pretrained(path, **kwargs):
+            record["path"] = path
+            record["kwargs"] = kwargs
+            return _FakeModel()
+
+    mod.GLiNER = _FakeGLiNER
+    return mod
+
+
+def test_load_backend_never_reaches_the_network(monkeypatch, tmp_path):
+    """AIR-GAP CONTRACT. Without local_files_only the hub lookup does not fail
+    fast on a machine with no network -- it stalls on a connection timeout INSIDE
+    the scan, which reads to the operator as a hung application rather than a
+    missing file. Verified 2026-07-26 against the real pack under HF_HUB_OFFLINE=1."""
+    pack = tmp_path / "gliner-model"
+    pack.mkdir()
+    record: dict = {}
+    monkeypatch.setitem(sys.modules, "gliner", _fake_gliner_module(record))
+
+    load_gliner_backend({"model_path": str(pack)})
+
+    assert record["kwargs"]["local_files_only"] is True, "the loader may never reach the hub"
+    assert record["eval_called"] is True, "eval mode is what makes inference deterministic"
+
+
+def test_load_backend_uses_the_pack_local_hf_cache(monkeypatch, tmp_path):
+    """GLiNER's Encoder resolves the BASE encoder config by its HUB ID
+    ("microsoft/mdeberta-v3-base"), not from the pack -- so without a pack-local
+    cache the very first scan on the air-gapped target dies looking for it. The
+    cache is passed only when present, so a pack built before this convention
+    still loads (and fails with the actionable message instead)."""
+    pack = tmp_path / "gliner-model"
+    (pack / PACK_CACHE_DIRNAME).mkdir(parents=True)
+    record: dict = {}
+    monkeypatch.setitem(sys.modules, "gliner", _fake_gliner_module(record))
+
+    load_gliner_backend({"model_path": str(pack)})
+    assert record["kwargs"]["cache_dir"] == str(pack / PACK_CACHE_DIRNAME)
+
+    no_cache = tmp_path / "bare-model"
+    no_cache.mkdir()
+    record2: dict = {}
+    monkeypatch.setitem(sys.modules, "gliner", _fake_gliner_module(record2))
+    load_gliner_backend({"model_path": str(no_cache)})
+    assert "cache_dir" not in record2["kwargs"]

@@ -159,4 +159,141 @@ _(updated as work lands)_
 
 - **2026-07-26** — Merge `1ac90e4` resolved, 407 tests green. Grill complete
   (27 questions / 7 rounds); this run-file written. Network verified reachable.
-  Awaiting sign-off before Stage 1.
+  Signed off.
+- **2026-07-26 — Stage 1 complete ✅ (416 tests green)**
+  - `fc42a69` **Art. 9 span splitting.** `_resolve_overlaps` now cuts a one-way
+    Art. 9 span around a contained PERSON or checksum-validated id instead of
+    destroying it. Lettered fragments keep the one-way action; letter-free gaps
+    are dropped; a survivor covering the parent entirely does NOT split it (that
+    would delete the Art. 9 finding and silently make the value reversible).
+    Survivors are de-overlapped against each other first — each was compared only
+    against the parent on the way in. 7 tests, incl. one pinning the *rejected*
+    comma-termination fix and one asserting no alphabetic character of the
+    original span is left uncovered. **Closes the open audit item.**
+  - `3748c3d` **Sheet titles require corroboration.** A bare spaCy guess can no
+    longer rename a worksheet (measured: "Tab" → PERSON @0.85 → tab renamed and
+    every reference rewritten). Pattern/checksum/deny-list/name-column/propagated
+    hits still rename. Parity holds by construction: a filtered finding never
+    reaches decisions, so apply's `redact()` leaves the title alone.
+- **2026-07-26 — Stage 2 finding: the torch/CUDA trap does NOT apply on Windows.**
+  `uv pip compile` of `gliner + onnxruntime` on this machine resolves to
+  **torch 2.13.0 with no `nvidia-*` and no `cuda-*` packages at all**, and the
+  PyPI `torch` **win_amd64 cp312 wheel is 122 MB** — PyPI's Windows torch is
+  CPU-only, because CUDA-enabled Windows builds live on the separate pytorch
+  index. The ~500-line CUDA lock recorded on 2026-07-24 was a **Linux-marker
+  artifact of `uv lock`** resolving every platform, not what this deployment
+  installs. The tool targets Windows exclusively (`.bat` launchers,
+  `%LOCALAPPDATA%`, a PowerShell bundle script).
+  **Consequence:** the risky torch-free path — reimplementing GLiNER's tokenizer
+  and span decoding against onnxruntime, and owning that drift forever — is
+  **not needed**. We keep the upstream `gliner` package (correct, maintained) AND
+  stay well under the 1 GB target. This is better than either option the grill
+  offered; the ONNX timebox is therefore spent, unused.
+  **Measured install** (throwaway venv, `gliner 0.2.28` + `onnxruntime 1.28`):
+  **693 MB total, zero `nvidia-*`/`cuda-*` packages.** Breakdown: torch 471 MB,
+  transformers 51, onnxruntime 40, sympy 29, numpy 43, the rest <10 each.
+- **2026-07-26 — Stage 2 finding: the vendored pack needs a TOKENIZER that its
+  own repo does not ship.** `urchade/gliner_multi-v2.1` contains exactly three
+  files — `gliner_config.json`, `model.safetensors`, `pytorch_model.bin`. No
+  tokenizer. Its `gliner_config.json` names `microsoft/mdeberta-v3-base` as the
+  encoder, so `from_pretrained(..., load_tokenizer=True)` — which is what
+  `load_gliner_backend` calls — resolves the tokenizer **from the Hub**. On the
+  air-gapped target that is a hard failure at first scan, and it would only ever
+  have been discovered on a machine with no network. The pack must therefore
+  vendor the mDeBERTa SentencePiece tokenizer alongside the weights (this is also
+  why `sentencepiece` appears in gliner's dependency closure). Verification is by
+  loading with `HF_HUB_OFFLINE=1`, which is the only honest test of "does this
+  work air-gapped".
+- **2026-07-26 — Corrected a false alarm:** `dir(GLiNER)` shows no
+  `predict_entities`, which looked like the scaffolding calling a non-existent
+  API. It is not: `gliner.GLiNER` is a *factory* that swaps in a concrete variant
+  (`UniEncoderSpanGLiNER` et al.), and `predict_entities(text, labels, flat_ner,
+  threshold, ...)` lives on `BaseEncoderGLiNER`. `_OnnxGlinerBackend.predict` is
+  correct as written. Recorded so the next reader does not re-derive it.
+- **ONNX export:** gliner ships ONNX *runtime* wrappers (`gliner/onnx/model.py`,
+  `*ORTModel`) but **no exporter** in the package, and the upstream repo publishes
+  no pre-exported ONNX build. Export is therefore our own step (torch.onnx /
+  optimum) — deferred behind a working torch-path smoke test, since the torch
+  path is now known to be small enough to ship on its own. `gliner.onnx` flipped
+  to `false` in the shipped config, `config_schema_version` 6 → 7.
+
+### Stage 2 — three offline failures, all found by cutting the network
+
+Each of these fails **only** on a machine with no network. On the build box every
+one of them silently succeeds by reaching the Hub, so none could have been found
+without deliberately setting `HF_HUB_OFFLINE=1`. This is why the pack is now built
+by a committed script (`scripts/fetch_gliner_model.py`) rather than by hand.
+
+1. **No tokenizer in the model repo.** `urchade/gliner_multi-v2.1` contains
+   exactly `gliner_config.json`, `model.safetensors`, `pytorch_model.bin`. The
+   tokenizer belongs to the base encoder named in the config
+   (`microsoft/mdeberta-v3-base`), so `load_tokenizer=True` resolves it from the
+   Hub. → vendor the mDeBERTa tokenizer into the pack.
+2. **No `tokenizer_class`, so AutoTokenizer refuses.** mdeberta's
+   `tokenizer_config.json` has two keys and names no tokenizer class, and the pack
+   has no `config.json` for AutoTokenizer to infer a model type from — transformers
+   5.13 then raises a *misleading* "you need sentencepiece installed" (it was
+   installed). → write `tokenizer_class: DebertaV2Tokenizer`, then re-serialize a
+   **fast `tokenizer.json`** so the target does no SentencePiece conversion at all.
+3. **Encoder config fetched by hub id.** `gliner/modeling/encoder.py` calls
+   `AutoConfig.from_pretrained("microsoft/mdeberta-v3-base")` — a hub id, not a
+   path. It forwards `cache_dir`, so the pack ships a **4.3 MB pack-local
+   `hf-cache/`** (config + tokenizer only, never the base encoder's weights) that
+   `load_gliner_backend` passes back in. Chosen over rewriting
+   `gliner_config.json`'s `model_name` to an absolute path because the bundle is
+   copied to an arbitrary folder off a network share — the pack must stay
+   **relocatable**.
+
+**Loader hardening** (`gliner_recognizer.load_gliner_backend`): now passes
+`local_files_only=True`, the pack-local `cache_dir` when present, and calls
+`model.eval()`. The first matters most — without it a hub lookup on an air-gapped
+box does **not** fail fast, it stalls on a connection timeout *inside the scan*,
+which reads to the operator as a hung application rather than a missing file.
+Pinned by two tests that inject a fake `gliner` module (the suite still runs with
+no ML stack installed).
+
+**Verified offline** (`HF_HUB_OFFLINE=1`), model pack ~1.16 GB:
+- loads in 4.0 s as `UniEncoderSpanGLiNER`; ~55–120 ms per text on CPU
+- `'Ada Lovelace arbeitet bei DeepL Pro in Karlsruhe.'` → person 0.991,
+  **organization 'DeepL Pro' 0.962** (the mixed-language win), location 0.987
+- `'Das Projekt Derivatefreiheit ... Herrn Klaus Mueller ...'` → **project
+  'Derivatefreiheit' 0.719** (a German noun-shaped project name survives), person 0.942
+- `'Die Effizienz der Reaktionszeiten war zufriedenstellend.'` → **no entities**
+  (the nominalizations that plague spaCy)
+- **deterministic across repeated inference: True** — the parity property
+- full suite **418 passed** with the ML stack installed (no numpy/torch/spaCy conflict)
+
+**End-to-end through the REAL shipped path** (`load_gliner_backend` →
+`build_analyzer(gliner_backend=…)` → `core.detect_unit`), still offline:
+
+```
+'Die Abteilung nutzt das externe Werkzeug DeepL Pro fuer Uebersetzungen.' (152 ms)
+    DEPARTMENT     'Abteilung'                     0.51  src=gliner
+    TOOL           'DeepL Pro'                     0.77  src=gliner
+'Das Projekt Derivatefreiheit wurde von Herrn Klaus Mueller geleitet.'    (63 ms)
+    PROJECT        'Das Projekt Derivatefreiheit'  0.73  src=gliner
+    PERSON         'Klaus Mueller'                 0.91  src=gliner
+'Die Effizienz der Reaktionszeiten war zufriedenstellend.'               (65 ms)
+    (none)
+'Diagnose: Diabetes mellitus Typ 2, Herr Klaus Mueller, IBAN DE89370400440532013000'
+    DE_HEALTH_DATA 'Diabetes mellitus Typ 2, Herr'  0.86  src=PatternRecognizer
+    PERSON         'Klaus Mueller'                  0.97  src=gliner
+    DE_HEALTH_DATA ', IBAN'                         0.86  src=PatternRecognizer
+    IBAN_CODE      'DE89370400440532013000'         1.00  src=IbanRecognizer
+detect_unit deterministic: True
+```
+
+The last case is **Stage 1's Art. 9 split confirmed against the real model**: the
+name and the IBAN survive as their own reversible findings while the health text
+either side of them stays one-way. Note the surviving PERSON here came from
+GLiNER — `_survives_special_category` keys on entity type and checksum, not on
+source, which is the intended reading of the grill decision.
+
+**Two tuning observations for the step-5 measurement (not defects):**
+- `DEPARTMENT 'Abteilung' 0.51` — the German common noun for "department" itself,
+  matched as a department. A low-confidence zero-shot false positive of exactly
+  the kind `min_score` exists to trim; it sits just above the 0.3 floor.
+- `PROJECT 'Das Projekt Derivatefreiheit' 0.73` — the span over-reaches to include
+  the article and the label word. Harmless for redaction (it over-covers) but it
+  makes the pseudonym token less readable.
+  Both are threshold/`min_score` calibration, which the real-workbook run drives.
