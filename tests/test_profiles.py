@@ -92,6 +92,15 @@ def test_profile_never_turns_ml_off(monkeypatch):
     assert out["gliner"]["enabled"] is True
 
 
+def test_applied_profile_records_its_own_name():
+    """detection_provenance reports which profile produced a document by reading
+    cfg["profile"]. Nothing wrote that key, so every report claimed "Balanced
+    (default)" whatever actually ran -- a provenance field that is always the same
+    value is worse than no field, because it looks like evidence."""
+    assert profiles.apply_profile(_cfg(), "HR documents")["profile"] == "HR documents"
+    assert profiles.apply_profile(_cfg(), "Balanced (default)")["profile"] == "Balanced (default)"
+
+
 def test_detection_keys_separate_what_is_found_from_what_is_done():
     """The review screen needs this split: an ACTION change can be re-applied to
     findings already on screen, a DETECTION change cannot."""

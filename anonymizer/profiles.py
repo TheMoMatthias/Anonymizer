@@ -127,6 +127,12 @@ def apply_profile(config: dict, name: str) -> dict:
 
     cfg = copy.deepcopy(config)
     profile = PROFILES.get(name)
+    # Stamp the name even for an unknown/Balanced profile. detection_provenance
+    # reads it to record WHICH profile produced a document, and without this it
+    # read a key nobody ever wrote -- so every report claimed "Balanced (default)"
+    # no matter what actually ran. A provenance field that is always the same value
+    # is worse than no field: it looks like evidence.
+    cfg["profile"] = name
     if not profile:
         return cfg
 
