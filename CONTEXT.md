@@ -68,3 +68,29 @@
   the German-noun/POS precision filter, so a strongly-detected German tool/project
   name survives even when it looks like a common noun; low-confidence hits are still
   filtered.
+- **Anchored-pattern exemption**: a hit from a config PATTERN recognizer skips the
+  precision gate even when its entity type is one spaCy also emits (NRP, PERSON,
+  ORGANIZATION, LOCATION, NER_MISC). The required literal anchor is stronger
+  corroboration than a part-of-speech tag; only spaCy, propagation and
+  below-override GLiNER hits are treated as bare guesses.
+- **Art. 9 span splitting**: when a one-way Art. 9 span (a whole `Diagnose: …`
+  line) contains a PERSON or checksum-validated ID, that value survives as its own
+  finding and the Art. 9 span is cut around it. Fragments containing a letter keep
+  the one-way action; letter-free fragments are dropped. Preserves reversibility
+  for the contained value without leaving health data behind.
+- **AI-detected**: the third finding-provenance state beside *pattern-backed* and
+  *NER guess* — a hit that came from the GLiNER second pass. Carries its own stat
+  tile, bulk band and row chip so ML findings can be judged and cleared as a group.
+- **Memo replay**: apply reusing the GLiNER output memoized during scan instead of
+  re-running inference. Makes scan–apply parity structural rather than dependent on
+  inference reproducing bit-identically across machines.
+- **Detection provenance**: the recorded set of models, versions, active profile and
+  effective thresholds that produced a given run, written to the audit log — so a
+  redaction decision can be explained months later.
+- **Model pack**: the separately-versioned model folder (discovered via
+  `ANONYMIZER_GLINER_MODEL`) that can be dropped into an existing offline bundle,
+  so upgrading the model does not mean re-copying the whole multi-GB bundle.
+- **Profile-owned thresholds**: detection cutoffs (sensitivity, GLiNER
+  `min_score`/`confidence_override`) carried BY the named detection profile rather
+  than set as independent knobs; raw values live behind an Advanced expander that
+  marks the profile modified once touched.
