@@ -672,6 +672,19 @@ def _sheet_renames(wb, redact, removed: set[str]) -> dict[str, str]:
     not a length-filtered one, because pipeline.verify_output re-scans the output
     with the recognizers and would re-detect a short value just the same.
 
+    SECOND trigger, and the one that makes this agree with the verifier: a title
+    that literally CONTAINS a checked removed value is renamed even when redacting
+    it changes nothing. Those two tests can disagree, and did -- measured on the
+    audit workbook (2026-07-26). A hidden sheet called "Archiv Thomas Weber" is
+    claimed by spaCy as ONE PERSON span covering the whole title, so the only value
+    ever offered for decision was "Archiv Thomas Weber"; the reviewer decided
+    "Thomas Weber" (from the cells) instead, redact() therefore left the title
+    alone, and the name shipped in xl/workbook.xml. verify_output caught it and
+    blocked the save -- correct, but it meant a sheet named after a customer made
+    the whole workbook impossible to process, with an error naming a value the
+    reviewer had already dealt with. Keying the rename on exactly what the verifier
+    checks removes the disagreement by construction.
+
     The replacement is a neutral placeholder PROVEN clean two ways -- no decided
     value redacts out of it, and no checked removed value is a substring of it. A
     workbook whose sheet is literally called "Sheet" would otherwise be renamed to
@@ -681,7 +694,9 @@ def _sheet_renames(wb, redact, removed: set[str]) -> dict[str, str]:
     renames: dict[str, str] = {}
     for ws in wb.worksheets:
         title = ws.title
-        if not title.strip() or redact(title, None) == title:
+        title_low = title.lower()
+        carries_removed = any(v in title_low for v in removed)
+        if not title.strip() or (redact(title, None) == title and not carries_removed):
             continue
         candidate = None
         for stem in _SHEET_TITLE_PLACEHOLDERS:
