@@ -47,3 +47,38 @@ def test_filejob_name():
     job = FileJob(path=r"C:\docs\Report.docx")
     assert job.name == "Report.docx"
     assert job.status == "pending"
+
+
+def test_preview_row_carries_context():
+    """The preview dialog needs the surrounding-text snippet to show a
+    highlighted before/after view, not just a bare value -> token pair."""
+    result = _result()
+    preview = core.build_preview(result.groups)
+    flat = {r.entity_type: r for pg in preview for r in pg.rows}
+    assert flat["IBAN_CODE"].context == "ctx"
+
+
+def test_highlighted_context_html_wraps_and_colours_the_match():
+    from anonymizer.gui.app import _highlighted_context_html
+
+    out = _highlighted_context_html("...zeitnah, [aber] die Abdeckung...", "#e11d48")
+    assert '<b style="color:#e11d48">[aber]</b>' in out
+    assert out.startswith("...zeitnah, ")
+    assert out.endswith(" die Abdeckung...")
+
+
+def test_highlighted_context_html_escapes_document_content():
+    """Context is sourced from the user's own document -- it must never be
+    interpreted as markup when injected into ui.html()."""
+    from anonymizer.gui.app import _highlighted_context_html
+
+    out = _highlighted_context_html("<script>x</script> [<b>evil</b>] & more", "#000")
+    assert "<script>x</script>" not in out
+    assert "&lt;script&gt;" in out
+
+
+def test_highlighted_context_html_falls_back_without_brackets():
+    from anonymizer.gui.app import _highlighted_context_html
+
+    out = _highlighted_context_html("no brackets here", "#000")
+    assert out == "no brackets here"

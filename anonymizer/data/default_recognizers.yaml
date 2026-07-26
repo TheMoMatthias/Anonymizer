@@ -1,8 +1,57 @@
 # Default entity/recognizer configuration.
 # Editable directly, or via the Settings tab in the app (which writes back here).
+#
+# config_schema_version: BUMP THIS whenever a shipped built-in definition changes
+# and existing users must pick it up (an entity threshold, a built-in recognizer
+# regex, tier boundaries). On a bump, load_config re-syncs the code-owned
+# built-ins from this file ONCE, while preserving user-owned data (allow/deny
+# lists, sensitivity, name_column_headers, user-ADDED recognizers). Without this,
+# the additive-only merge left every existing config permanently stuck on the
+# first-run defaults -- e.g. NER_MISC at 0.5 long after it shipped at 0.75.
+config_schema_version: 6
+
 languages:
   - de
   - en
+
+# Topical (non-personal) sensitivity: internal tools, divisions, departments,
+# licensees, confidential project descriptions. Detection is structure-driven --
+# a column whose header matches a category's header_terms (substring, case-
+# insensitive) makes every cell in that column that category; those values seed
+# an auto-gazetteer that propagates document-wide. No manual list required
+# (manual terms can be added per category). Per-category default ACTION lives in
+# the entities block above; the term maps live here.
+topical:
+  enabled: true
+  # header_terms are matched as WHOLE WORDS (word boundaries), not substrings --
+  # a category column triggers whole-column redaction, so defaults are kept
+  # high-precision and conservative. Add your own compound headers per deployment.
+  categories:
+    TOOL:
+      header_terms: [tool, tools, system, systeme, software, applikation, application,
+                     plattform, platform, framework]
+      terms: []
+    DIVISION:
+      header_terms: [division, bereich, geschäftsbereich, geschaeftsbereich, sparte, ressort]
+      terms: []
+    DEPARTMENT:
+      header_terms: [abteilung, team, referat, fachbereich, organisationseinheit]
+      terms: []
+    LICENSEE:
+      header_terms: [lizenzgeber, lizenznehmer, lizenz, anbieter, hersteller,
+                     vendor, dienstleister, zulieferer]
+      terms: []
+    PROJECT:
+      header_terms: [projekt, projektname, projekttitel, vorhaben, initiative]
+      terms: []
+    # Free-text description columns -- whole cell summarized (not propagated).
+    # Compound headers ARE listed explicitly since word-boundary matching won't
+    # find 'beschreibung' inside 'Projektbeschreibung'.
+    DESCRIPTION:
+      header_terms: [beschreibung, projektbeschreibung, kurzbeschreibung, nutzenbeschreibung,
+                     notiz, notizen, kommentar, kommentare, bemerkung, bemerkungen, freitext,
+                     details, inhalt, oldvalue, newvalue, altervalue, neuervalue]
+      terms: []
 
 # Trust-tier boundaries (score -> high/medium/low). High-tier findings are
 # eligible for auto-accept; medium/low are surfaced for active review.
@@ -17,6 +66,49 @@ tiers:
 # Global recall<->precision offset (the sensitivity slider). Positive lowers
 # every detection threshold (more recall, more review); 0 = shipped behaviour.
 sensitivity: 0.0
+
+# Corroboration-only for the free-text "medium sensitivity" NER types
+# (ORGANIZATION / LOCATION / NER_MISC): when true, one of these is surfaced only
+# if something beyond a bare spaCy guess backs it (a pattern/anchor/propagation
+# source, a checksum verdict, or a name-column override). Strips the product
+# names / jargon / common nouns that dominate false positives on business
+# documents. PERSON and structured IDs are never affected. Set false for a
+# recall-first deployment that wants every raw NER guess surfaced for review.
+corroboration_only: true
+
+# GLiNER: offline zero-shot NER model run as a SECOND-PASS recognizer, after the
+# cheap deterministic first pass (gazetteer/headers/spaCy). It recovers items
+# spaCy + gazetteer miss (prose names, orgs, and open-ended tools/projects) and,
+# being multilingual, runs language-agnostic so it catches English tool names in
+# a German document. spaCy stays for POS (the precision filters need it).
+#   - enabled:            master switch (user-owned; preserved across schema bumps)
+#   - model_path:         relative -> resolved against ANONYMIZER_GLINER_MODEL or
+#                         the package models/ dir; absolute used verbatim
+#   - onnx:               load the quantised ONNX build (small, CPU-friendly)
+#   - min_chars/min_score:cheap per-text gates before a hit is considered
+#   - confidence_override:a GLiNER hit at/above this score bypasses the German-
+#                         noun/POS precision gate (so a real German tool/project
+#                         name isn't re-dropped); lower-confidence hits still gated
+#   - cell_cap:           soft ceiling on ML-eligible cells per doc (logged, not
+#                         silently truncated) -- protects huge workbooks
+#   - labels:             {gliner phrase -> entity type} sent at inference time
+gliner:
+  enabled: false
+  model_path: gliner_multi-v2.1-onnx
+  onnx: true
+  min_chars: 3
+  min_score: 0.3
+  confidence_override: 0.85
+  cell_cap: 5000
+  labels:
+    person: PERSON
+    organization: ORGANIZATION
+    location: LOCATION
+    tool: TOOL
+    division: DIVISION
+    department: DEPARTMENT
+    licensee: LICENSEE
+    project: PROJECT
 
 # Default posture: pseudonymize (preserves relationships for downstream AI),
 # with hard one-way anonymize reserved for the highest-sensitivity identifiers
@@ -68,7 +160,14 @@ entities:
   # ("Frau Bauer"). Presidio dropped them outright; now they surface for review.
   NER_MISC:
     default_action: pseudonymize
-    confidence_threshold: 0.5
+    # 0.75, not 0.5: MISC is spaCy's catch-all for anything it can't confidently
+    # classify (engine.py's _ENTITY_MAPPING comment), and its flat NER score is
+    # ~0.85 regardless of confidence -- a 0.5 floor let almost every raw MISC
+    # hit through, including ordinary words ("aber", "abdeckung") the model
+    # mis-tagged. 0.75 still clears for a plain MISC hit by default (recall
+    # intact) while sitting well above generic-word noise. Paired with the
+    # lowercase/stopword filters in core.py's detect_unit.
+    confidence_threshold: 0.75
   # Nationality / religious or political group (spaCy NORP -> presidio NRP; the
   # English model produces it, the German model does not). GDPR Art. 9 special
   # category -> anonymize (one-way), surfaced for review rather than auto-accepted.
@@ -108,6 +207,35 @@ entities:
   DE_KUNDENNUMMER:
     default_action: pseudonymize
     confidence_threshold: 0.6
+  # Topical (non-personal) categories -- detected structurally (header->category)
+  # and by the auto-gazetteer, not by NER thresholds; the low threshold just keeps
+  # them surfaced. Named things pseudonymize to consistent reversible tokens
+  # (keeps referential structure for a downstream LLM); PROJECT descriptions
+  # become 'summarize' once that mode ships (Phase B) -- 'anonymize' until then.
+  TOOL:
+    default_action: pseudonymize
+    confidence_threshold: 0.5
+  DIVISION:
+    default_action: pseudonymize
+    confidence_threshold: 0.5
+  DEPARTMENT:
+    default_action: pseudonymize
+    confidence_threshold: 0.5
+  LICENSEE:
+    default_action: pseudonymize
+    confidence_threshold: 0.5
+  PROJECT:
+    # A project NAME is a name -> pseudonymize (consistent reversible token).
+    default_action: pseudonymize
+    confidence_threshold: 0.5
+  DESCRIPTION:
+    # Free-text description columns (Beschreibung/Notiz/Kommentar/OldValue/...) ->
+    # summarize the whole cell to a zero-content structural placeholder.
+    default_action: summarize
+    confidence_threshold: 0.5
+  POSSIBLE_TOPICAL:
+    default_action: skip
+    confidence_threshold: 0.5
 
 # Structural/banking words the German NER model routinely mislabels as
 # people/orgs/places. They are never PII, so suppressing them is pure precision
@@ -130,6 +258,47 @@ allow_list:
   - Euro
   - GmbH
   - Vertraulich
+  # Business / tech / project jargon that free-text NER repeatedly mis-flags as
+  # an org/place/person on internal documents but which is never PII. Editable
+  # in Settings; extend per workbook.
+  - CAPEX
+  - OPEX
+  - RAG
+  - DORA
+  - GRC
+  - DMS
+  - CRM
+  - KPI
+  - ROI
+  - LTV
+  - FTE
+  - PoC
+  - MVP
+  - RFP
+  - OCR
+  - LLM
+  - KI
+  - API
+  - Baseline
+  - Build
+  - Backlog
+  - Roadmap
+  - Alerting
+  - Onboarding
+  - Reporting
+  - Dashboard
+  - Workflow
+  - Review
+  - Research
+  - Status
+  - Gate
+  - To-Be
+  - As-Is
+  - Lessons Learned
+  - Human-in-the-Loop
+  - ReadOnly
+  - Personas
+  - Persona
 deny_list: []
 
 # Extra spreadsheet column-header words that mark a column as PEOPLE (matched
@@ -324,10 +493,16 @@ custom_recognizers:
       # the delimited case (a cell reading "Im Anhang 2").
       - regex: '(?:^|(?<=[,;:]\s{0,2}))(?:Am|An\s+de[rm]|Auf\s+de[rm]|Bei\s+der|Beim|Hinter\s+de[rm]|Im|In\s+de[rnm]|Unter\s+den|Vor\s+dem|Zum|Zur)\s+(?!(?:Jahr|Rahmen|Anhang|Auftrag|Anschluss|Übrigen|Wesentlichen|Folgenden|Vergleich|Durchschnitt|Gegensatz|Zusammenhang|Zeitraum|Monat|Quartal|Namen|Sinne|Falle|Zuge|Ergebnis|Betrag|Konto|Depot|Anhänge|Stichtag|Zeitpunkt|Beispiel|Anlage|Ende|Schnitt)\b)\p{Lu}[\p{L}\-]+(?:\s+\p{Lu}[\p{L}\-]+){0,2}\s*(?!(?:19|20)\d{2}\b)\d{1,3}\s?[a-z]?(?=\s*(?:[,;]|\.(?:\s|$)|$))'
         score: 0.55
-      # PLZ + city. \p{L} (not [a-zäöüß]) so a hyphenated or non-ASCII district is
-      # kept: the ASCII-lowercase tail stopped at the capital E and redacted
-      # "50667 Köln" out of "50667 Köln-Ehrenfeld", leaving the district behind.
-      - regex: '\b(?:D-)?\d{5}\s+\p{Lu}[\p{L}.\-]{1,30}'
+      # PLZ + city. Two independent fixes, one from each branch:
+      #  * \p{L} (not [a-zäöüß]) so a hyphenated or non-ASCII district is kept:
+      #    the ASCII-lowercase tail stopped at the capital E and redacted
+      #    "50667 Köln" out of "50667 Köln-Ehrenfeld", leaving the district behind.
+      #  * the negative lookahead excludes a 5-digit AMOUNT/COUNT followed by a
+      #    currency or unit word ("66450 Euro", "39870 Minuten") -- not addresses,
+      #    and a measured false positive in a financial workbook. It has to sit
+      #    BEFORE the city class, so it is checked at the position the city would
+      #    start rather than after one has already been consumed.
+      - regex: '\b(?:D-)?\d{5}\s+(?!(?:Euro|EUR|USD|CHF|GBP|Cent|Minuten?|Stunden?|Tage?|Tagen|Sekunden?|Wochen?|Monate?n?|Jahre?n?|Prozent|Stück|Stk|Mio|Mrd|Tsd)\b)\p{Lu}[\p{L}.\-]{1,30}'
         score: 0.5
     context: ["adresse", "anschrift", "wohnhaft", "straße", "plz", "postleitzahl", "wohnort"]
   # Bare numeric customer number (Kundennummer 4830123). Context-gated like the

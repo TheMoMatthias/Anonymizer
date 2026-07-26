@@ -68,10 +68,18 @@ _NAME = r"\p{Lu}\p{L}+(?:[-\s]\p{Lu}\p{L}+){0,2}"
 # `Herrn?` also matches the dative "Herrn" that opens a German postal address
 # block ("Herrn\n<Name>\n<Straße>") -- the single most common place a customer name
 # appears in a bank letter, and exactly the sparse-context spot spaCy misses.
-_HONORIFICS = r"(?:Herrn?|Frau|Hr\.|Fr\.|Dr\.|Prof\.)"
+# ENGLISH honorifics/labels are included too, and these patterns are registered
+# for EVERY scan language (below), so an English person's name in a
+# German-dominant document ("Mr Smith", "Client: John Baker") is still caught
+# even though only the German NER model runs -- the "layered" mixed-language
+# strategy: dominant-language NER + language-independent anchors, rather than
+# running a second full NER model (which re-tags ordinary German words as noise).
+_HONORIFICS = r"(?:Herrn?|Frau|Hr\.|Fr\.|Dr\.|Prof\.|Mr\.?|Mrs\.?|Ms\.?|Miss|Sir|Madam)"
 _NAME_LABELS = (
     r"(?:Name|Kunde|Kundin|Kontoinhaber|Sachbearbeiter|Ansprechpartner|Empfänger|"
-    r"Berater|Beraterin|Mitarbeiter|Antragsteller|Versicherungsnehmer|Vertragspartner)"
+    r"Berater|Beraterin|Mitarbeiter|Antragsteller|Versicherungsnehmer|Vertragspartner|"
+    # English labels for a mixed-language document:
+    r"Customer|Client|Contact|Beneficiary|Applicant|Representative|Attn)"
 )
 _ANCHORED_NAME_PATTERNS = [
     Pattern(name="honorific_name", regex=rf"(?<=\b{_HONORIFICS}\s+){_NAME}", score=0.75),
@@ -127,11 +135,15 @@ def _expand_umlauts(pattern: str) -> str:
     return "".join(out)
 
 
-def build_analyzer(config: dict) -> AnalyzerEngine:
+def build_analyzer(config: dict, *, gliner_backend=None) -> AnalyzerEngine:
     """Builds the Presidio analyzer (spaCy NLP engine + recognizers). Detection
     logic itself lives in `core`; language *selection* per document lives in
     `pipeline`/`language`. This just assembles an engine that can run either
-    supported language on demand."""
+    supported language on demand.
+
+    `gliner_backend` lets a caller inject a ready GlinerBackend (tests pass a
+    deterministic fake); when None and GLiNER is enabled, the real ONNX backend
+    is loaded here and a load failure propagates -- the intended hard-fail."""
     languages = config.get("languages") or list(DEFAULT_LANGUAGES)
     unknown = [lang for lang in languages if lang not in SPACY_MODELS]
     if unknown:
@@ -205,4 +217,26 @@ def build_analyzer(config: dict) -> AnalyzerEngine:
                 global_regex_flags=_CASE_SENSITIVE_FLAGS,
             )
         )
+
+    # GLiNER second-pass recognizer (optional, config-gated). Registered per
+    # language, but the backend is language-agnostic, so in the normal
+    # single-language-narrowed scan it runs once over the full text and can catch
+    # an English tool name inside a German document. A load failure propagates
+    # (hard-fail); the message tells the user to disable ML detection in Settings.
+    gliner_cfg = config.get("gliner") or {}
+    if gliner_cfg.get("enabled"):
+        from .gliner_recognizer import GlinerRecognizer, load_gliner_backend
+
+        backend = gliner_backend if gliner_backend is not None else load_gliner_backend(gliner_cfg)
+        label_map = gliner_cfg.get("labels") or {}
+        for lang in languages:
+            analyzer.registry.add_recognizer(
+                GlinerRecognizer(
+                    backend,
+                    label_map,
+                    supported_language=lang,
+                    min_chars=int(gliner_cfg.get("min_chars", 3)),
+                    min_score=float(gliner_cfg.get("min_score", 0.3)),
+                )
+            )
     return analyzer

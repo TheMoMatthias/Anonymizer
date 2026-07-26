@@ -15,9 +15,10 @@ and `Client.auto_index_client` does not exist in NiceGUI 3.14.)
 from __future__ import annotations
 
 import pytest
+from nicegui import Client, ui
 from nicegui import context as ng_context
 from nicegui import core as ng_core
-from nicegui import ui
+from nicegui.testing.general import nicegui_reset_globals, prepare_simulation
 
 from anonymizer import audit as audit_mod
 from anonymizer.gui import app as gui_app
@@ -26,6 +27,32 @@ from anonymizer.mapping import MappingLockError, MappingRekeyError
 from anonymizer.models import ColumnInfo, DataClassGroup, FileJob, GroupedFinding, ScanResult
 
 # --- headless UI driving -----------------------------------------------------
+
+
+@pytest.fixture(autouse=True)
+def _client_ctx():
+    """Give every test in this file its OWN NiceGUI client/slot context.
+
+    These tests used to build on whatever ambient auto-index client happened to be
+    on the slot stack. That is global state shared with every other GUI test file,
+    and `nicegui_reset_globals()` (used by the render smoke tests) legitimately
+    tears it down -- so the whole file passed alone and errored with "the slot
+    stack for this task is empty" as soon as it ran after them. Owning the context
+    here makes the file order-independent instead of making the other files clean
+    up less.
+
+    Declared FIRST so it wraps `_fail_on_swallowed_handler_exception` below: the
+    reset swaps out `nicegui.core.app`, and the handler must be registered on the
+    instance the test will actually run against."""
+    prepare_simulation()
+    with nicegui_reset_globals():
+
+        @ui.page("/probe")
+        def probe():
+            pass
+
+        with Client(probe):
+            yield
 
 
 @pytest.fixture(autouse=True)
@@ -183,9 +210,24 @@ def _result(items, **kwargs) -> ScanResult:
     return ScanResult(groups=[dcg], stats=stats, **kwargs)
 
 
-def _render(result, column_policies=None):
+def _render(result, column_policies=None, cluster: str | None = None, cell_policies=None):
+    """Render the review screen, optionally on a specific left-rail cluster.
+
+    The screen is a two-pane master/detail: only the SELECTED cluster's detail is
+    built, so a test asserting on a class card, the Columns panel or the Overview
+    has to say which one it is looking at -- exactly as the reviewer clicks it.
+    Cluster keys are "overview", "class:<data class key>", "columns", "cells" and
+    "misses". Defaults to the first cluster (Overview), like a fresh scan."""
+    if cluster is not None:
+        result._selected_cluster = cluster
     box = ui.column()
-    review.render_review(box, result, lambda: None, column_policies if column_policies is not None else {})
+    review.render_review(
+        box,
+        result,
+        lambda: None,
+        column_policies if column_policies is not None else {},
+        cell_policies,
+    )
     return box
 
 
@@ -203,7 +245,7 @@ def test_class_bulk_applies_when_the_action_is_already_the_dominant_one():
     be pseudonymized were saved as `skip`, i.e. shipped in the clear.
     """
     items = [_finding("Klaus"), _finding("Anna"), _finding("Bernd"), _finding("Erika", action="skip")]
-    box = _render(_result(items))
+    box = _render(_result(items), cluster="class:people")
 
     _activate(_row_of(box, "Set all"), "pseudonymize")
 
@@ -227,7 +269,7 @@ def test_overflow_bulk_applies_when_the_action_is_already_the_dominant_one():
     rendered. A no-op here leaves values the reviewer can neither see nor fix."""
     items = [_finding(f"Name {i}") for i in range(review._REVIEW_CAP + 20)]
     items[-1].action = "skip"  # beyond the render cap: only the summary row reaches it
-    box = _render(_result(items))
+    box = _render(_result(items), cluster="class:people")
 
     _activate(_row_of(box, "set these to"), "pseudonymize")
 
@@ -246,7 +288,7 @@ def test_class_bulk_reaches_capped_overflow_and_auto_accepted_items():
     review_items = [_finding(f"Name {i}") for i in range(review._REVIEW_CAP + 50)]
     auto_items = [_finding(f"Auto {i}", tier="high", score=0.99) for i in range(5)]
     items = review_items + auto_items
-    box = _render(_result(items))
+    box = _render(_result(items), cluster="class:people")
 
     _activate(_row_of(box, "Set all"), "anonymize")
 
@@ -267,7 +309,7 @@ def test_overflow_bulk_touches_only_the_hidden_values():
     """"Set these to X" means the summarized overflow, not the whole class -- the
     rows the reviewer already decided on screen must survive it."""
     items = [_finding(f"Name {i}") for i in range(review._REVIEW_CAP + 200)]
-    box = _render(_result(items))
+    box = _render(_result(items), cluster="class:people")
 
     _activate(_row_of(box, "set these to"), "anonymize")
 
@@ -290,12 +332,15 @@ def test_column_policy_toggle_keeps_its_value_and_records_every_change():
         ],
     )
     policies: dict = {}
-    box = _render(result, column_policies=policies)
+    box = _render(result, column_policies=policies, cluster="columns")
 
     _activate(_row_of(box, "C · Notiz", up=2), "anonymize")
     assert policies == {"Kunden!C": "anonymize"}
 
-    _activate(_row_of(box, "C · Notiz", up=2), "none")
+    # "skip" -- NOT the older "none" -- is the no-op across every action surface on
+    # this screen now, column policies included: one word, one position, one colour
+    # for "don't touch this", instead of the Columns panel inventing its own.
+    _activate(_row_of(box, "C · Notiz", up=2), "skip")
     assert policies == {}, "clearing a column policy must remove it, not leave a stale blackout"
 
 
@@ -307,8 +352,15 @@ def test_stat_bar_is_recomputed_after_a_class_bulk_action():
 
     "auto-accepted" is a DECISION word, but it was read once from the frozen scan
     stats dict -- so after the reviewer bulk-skipped the class the header still
-    advertised those values as accepted. The per-class bulk deliberately does NOT
-    re-render (10k live toggles), so the header has to be refreshed on its own.
+    advertised those values as accepted.
+
+    The two-pane layout put the stat bar on the Overview cluster and the class
+    bulk on the class cluster, so they are never on screen at once and the
+    original in-place refresh has nothing to refresh. The defect is unchanged
+    though, and so is this guard: bulk-skip the class, walk BACK to Overview the
+    way the reviewer does, and the header must reflect the decisions -- which only
+    holds because _stat_bar derives every tile from the live findings rather than
+    from result.stats.
     """
     items = [
         _finding("Auto 1", tier="high", score=0.99),
@@ -316,13 +368,13 @@ def test_stat_bar_is_recomputed_after_a_class_bulk_action():
         _finding("Klaus"),
         _finding("Anna"),
     ]
-    box = _render(_result(items))
-    assert _stat_tiles(box)["auto-accepted"] == 2
+    result = _result(items)
+    assert _stat_tiles(_render(result, cluster="overview"))["auto-accepted"] == 2
 
-    _activate(_row_of(box, "Set all"), "skip")
+    _activate(_row_of(_render(result, cluster="class:people"), "Set all"), "skip")
 
     assert {g.action for g in items} == {"skip"}
-    assert _stat_tiles(box)["auto-accepted"] == 0
+    assert _stat_tiles(_render(result, cluster="overview"))["auto-accepted"] == 0
 
 
 def test_stat_bar_is_recomputed_after_a_global_bulk_action():

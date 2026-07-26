@@ -23,7 +23,7 @@ INFO = "#0e7490"
 TIER_COLORS = {"high": "#0d9488", "medium": "#d97706", "low": "#64748b"}
 SENSITIVITY_COLORS = {"high": "#e11d48", "medium": "#d97706", "low": "#64748b"}
 
-ACTION_COLORS = {"pseudonymize": "#0d9488", "anonymize": "#e11d48", "skip": "#64748b"}
+ACTION_COLORS = {"pseudonymize": "#0d9488", "anonymize": "#e11d48", "skip": "#64748b", "summarize": "#0e7490"}
 
 _CSS = """
 :root {
@@ -118,9 +118,19 @@ html, body { margin: 0; width: 100%; overflow-x: hidden; }
 @media (max-width: 860px) {
   .az-main { flex-direction: column !important; flex-wrap: wrap !important; }
   .az-rail { flex: 1 1 auto !important; max-width: none !important; width: 100%; }
+  .az-review-split { flex-direction: column !important; }
+  .az-cluster-rail { flex: 1 1 auto !important; max-width: none !important; width: 100%; position: static !important; }
 }
 
-.az-scroll { max-height: 58vh; overflow-y: auto; overflow-x: hidden; }
+/* Clustered review nav (the master list in the master/detail review screen).
+   The rail stays put (sticky) while the detail pane scrolls, so you never lose
+   the cluster list -- the accessibility fix for the old single long scroll. */
+.az-cluster-rail { position: sticky; top: 4px; }
+.az-cluster-nav { border: 1px solid transparent; border-radius: 10px; cursor: pointer; transition: background .12s ease; }
+.az-cluster-nav:hover { background: var(--surface-2); }
+.az-cluster-nav--active { background: var(--surface); border-color: var(--border); box-shadow: var(--shadow); }
+
+.az-scroll { max-height: 62vh; overflow-y: auto; overflow-x: hidden; }
 .az-scroll::-webkit-scrollbar { width: 10px; }
 .az-scroll::-webkit-scrollbar-thumb { background: var(--border); border-radius: 8px; }
 

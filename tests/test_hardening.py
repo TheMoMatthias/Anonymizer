@@ -124,13 +124,37 @@ def test_literal_residual_bracketed_value_does_not_resurrect_the_token_phantom(t
 
 
 class _FakeResult:
-    """Minimal stand-in for a presidio RecognizerResult."""
+    """Minimal stand-in for a presidio RecognizerResult. Reports itself as a
+    SpacyRecognizer hit, which is what these spans stand in for -- and what keeps
+    them subject to the same precision gate a real NER guess must clear."""
 
     def __init__(self, entity_type: str, start: int, end: int, score: float):
         self.entity_type = entity_type
         self.start = start
         self.end = end
         self.score = score
+        self.recognition_metadata = {"recognizer_name": "SpacyRecognizer"}
+
+
+class _FakeNlpArtifacts:
+    """`tokens = None` is the documented "no POS information available" signal:
+    _is_pos_implausible and _is_german_nominalization both no-op on it. That is
+    exactly what these tests want -- they pin propagation SEEDING, not spaCy's
+    part-of-speech opinion about a fabricated span."""
+
+    tokens = None
+
+
+class _FakeNlpEngine:
+    def process_text(self, text, language):
+        return _FakeNlpArtifacts()
+
+    def process_batch(self, texts, language, batch_size=None, **kwargs):
+        # Same (text, artifacts) pair stream precompute_nlp_artifacts expects.
+        return [(t, _FakeNlpArtifacts()) for t in texts]
+
+    def is_stopword(self, word, language):
+        return False
 
 
 class _FakeAnalyzer:
@@ -140,6 +164,7 @@ class _FakeAnalyzer:
 
     def __init__(self, spans: dict[str, list[tuple[str, int, int, float]]]):
         self._spans = spans
+        self.nlp_engine = _FakeNlpEngine()
 
     def analyze(self, text, language, entities=None, allow_list=None, **kwargs):
         return [_FakeResult(*s) for s in self._spans.get(text, [])]

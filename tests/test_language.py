@@ -1,6 +1,7 @@
 from anonymizer.core import detect_unit
 from anonymizer.language import detect_dominant
 from anonymizer.models import TextUnit
+from anonymizer.pipeline import _language_sample, _narrow_language
 
 
 def test_detects_german():
@@ -74,3 +75,31 @@ def test_umlaut_names_plus_one_ambiguous_word_not_confident_german():
     German, mis-routing an English sentence to the German NER model (a leak)."""
     lang, confident = detect_dominant("Björn wore a hat in Düsseldorf.")
     assert not (lang == "de" and confident), (lang, confident)
+
+
+def test_language_sample_is_not_biased_to_the_head():
+    """Regression (the reported over-flagging): a German spreadsheet was
+    mis-detected as English because only the first units -- the header row and
+    English-ish field-name cells -- were sampled. The sample must span the whole
+    document so the German prose body dominates, as it does in the real file."""
+    # Mimic the real shape: English-ish field-name/description cells first (with
+    # real English function words, as a spreadsheet's header/first rows have),
+    # then a far larger German prose body.
+    head = [
+        TextUnit(f"h{i}", t) for i, t in enumerate(
+            ["The project status and the value of this", "for the owner to be updated by the team"]
+        )
+    ]
+    body = [
+        TextUnit(f"b{i}", "Der Prozess wurde abgeschlossen und die Kosten sind mit dem Team abgestimmt worden.")
+        for i in range(300)
+    ]
+    units = head + body
+
+    # Old behaviour (first units only) saw English; the whole-doc sample must see German.
+    assert detect_dominant(" ".join(u.text for u in units[:2]))[0] == "en"
+    lang, confident = detect_dominant(_language_sample(units))
+    assert lang == "de" and confident, (lang, confident)
+
+    narrowed = _narrow_language({"languages": ["de", "en"]}, units)
+    assert narrowed["languages"] == ["de"]
