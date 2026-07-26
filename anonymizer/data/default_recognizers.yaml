@@ -8,7 +8,7 @@
 # lists, sensitivity, name_column_headers, user-ADDED recognizers). Without this,
 # the additive-only merge left every existing config permanently stuck on the
 # first-run defaults -- e.g. NER_MISC at 0.5 long after it shipped at 0.75.
-config_schema_version: 7
+config_schema_version: 8
 
 languages:
   - de
@@ -621,7 +621,7 @@ custom_recognizers:
       # The value pattern must START on a non-space: a leading '\s{0,3}' inside the
       # lookbehind can match empty, so a plain '[^\n;,.]+' matched " rk" WITH the
       # separating space and the whole finding (and its pseudonym key) carried it.
-      - regex: '(?<=\b(?:Schwerbehindertenausweis|Krankenversicherungsnummer|Krankenversicherung|Krankenversicherer|Berufsunfähigkeit|Gesundheitszustand|Gesundheitsdaten|Arbeitsunfähigkeit|Erwerbsminderung|Grad der Behinderung|Behinderungsgrad|Schwerbehinderung|Rehabilitation|Krankschreibung|Schwangerschaft|Krankenkasse|Pflegekasse|Arztbericht|Behandlung|Impfstatus|Genanalyse|Pflegestufe|Pflegegrad|Erkrankung|Blutgruppe|Medikation|Krankheit|Diagnose|Therapie|Gentest|Attest|Befund|Reha|GdB)\s{0,3}[:=]\s{0,3})(?=[^\n;]*[\p{L}\d])(?!(?:keine?(?:\s+Angaben?)?|nein|nichts|ohne|unbekannt|entfällt|nicht\s+(?:angegeben|bekannt|zutreffend|erhoben)|null|leer|n\.?\s?a\.?|k\.?\s?a\.?)(?![\p{L}\d])[\s.,;]*$)[^\s\n;](?:(?:(?!\.(?:\s|$))[^\n;])*[^\s\n;.,])?'
+      - regex: '(?<=\b(?:Schwerbehindertenausweis|Krankenversicherungsnummer|Krankenversicherung|Krankenversicherer|Berufsunfähigkeit|Gesundheitszustand|Gesundheitsdaten|Arbeitsunfähigkeit|Erwerbsminderung|Grad der Behinderung|Behinderungsgrad|Schwerbehinderung|Rehabilitation|Krankschreibung|Schwangerschaft|Krankenkasse|Pflegekasse|Arztbericht|Behandlung|Impfstatus|Genanalyse|Pflegestufe|Pflegegrad|Erkrankung|Blutgruppe|Medikation|Krankheit|Diagnose|Therapie|Gentest|Attest|Befund|Reha|GdB)\s{0,3}[:=]\s{0,3})(?=[^\n;]*[\p{L}\d])(?!(?:keine?(?:\s+Angaben?)?|nein|nichts|ohne|unbekannt|entfällt|nicht\s+(?:angegeben|bekannt|zutreffend|erhoben)|null|leer|n\.?\s?a\.?|n\s*/\s*a|k\.?\s?a\.?)(?![\p{L}\d])[\s.,;]*$)[^\s\n;](?:(?:(?!\.(?:\s|$))[^\n;])*[^\s\n;.,])?'
         score: 0.86
       # Words that state a health FACT about a person (not a column label): these
       # are the datum itself even standing alone in a cell. Pure LABEL nouns
@@ -665,7 +665,7 @@ custom_recognizers:
     languages: [de]
     umlaut_variants: true
     patterns:
-      - regex: '(?<=\b(?:Kirchensteuerabzugsmerkmal|Konfessionszugehörigkeit|Religionszugehörigkeit|Religionsgemeinschaft|Glaubensgemeinschaft|Kirchensteuermerkmal|KiSt-Merkmal|Konfession|Religion|Glaube)\s{0,3}[:=]\s{0,3})(?=[^\n;]*[\p{L}\d])(?!(?:keine?(?:\s+Angaben?)?|nein|nichts|ohne|unbekannt|entfällt|nicht\s+(?:angegeben|bekannt|zutreffend|erhoben)|null|leer|n\.?\s?a\.?|k\.?\s?a\.?)(?![\p{L}\d])[\s.,;]*$)[^\s\n;](?:(?:(?!\.(?:\s|$))[^\n;])*[^\s\n;.,])?'
+      - regex: '(?<=\b(?:Kirchensteuerabzugsmerkmal|Konfessionszugehörigkeit|Religionszugehörigkeit|Religionsgemeinschaft|Glaubensgemeinschaft|Kirchensteuermerkmal|KiSt-Merkmal|Konfession|Religion|Glaube)\s{0,3}[:=]\s{0,3})(?=[^\n;]*[\p{L}\d])(?!(?:keine?(?:\s+Angaben?)?|nein|nichts|ohne|unbekannt|entfällt|nicht\s+(?:angegeben|bekannt|zutreffend|erhoben)|null|leer|n\.?\s?a\.?|n\s*/\s*a|k\.?\s?a\.?)(?![\p{L}\d])[\s.,;]*$)[^\s\n;](?:(?:(?!\.(?:\s|$))[^\n;])*[^\s\n;.,])?'
         score: 0.86
       # A BARE "orthodox" is deliberately absent: "orthodox" is an ordinary English
       # adjective, and although these recognizers no longer run on English scans a
@@ -689,7 +689,7 @@ custom_recognizers:
     languages: [de]
     umlaut_variants: true
     patterns:
-      - regex: '(?<=\b(?:Staatsangehörigkeit|Staatsbürgerschaft|Volkszugehörigkeit|Nationalität|Herkunftsland|Geburtsland|Ethnie)\s{0,3}[:=]\s{0,3})(?=[^\n;]*[\p{L}\d])(?!(?:keine?(?:\s+Angaben?)?|nein|nichts|ohne|unbekannt|entfällt|nicht\s+(?:angegeben|bekannt|zutreffend|erhoben)|null|leer|n\.?\s?a\.?|k\.?\s?a\.?)(?![\p{L}\d])[\s.,;]*$)[^\s\n;](?:(?:(?!\.(?:\s|$))[^\n;])*[^\s\n;.,])?'
+      - regex: '(?<=\b(?:Staatsangehörigkeit|Staatsbürgerschaft|Volkszugehörigkeit|Nationalität|Herkunftsland|Geburtsland|Ethnie)\s{0,3}[:=]\s{0,3})(?=[^\n;]*[\p{L}\d])(?!(?:keine?(?:\s+Angaben?)?|nein|nichts|ohne|unbekannt|entfällt|nicht\s+(?:angegeben|bekannt|zutreffend|erhoben)|null|leer|n\.?\s?a\.?|n\s*/\s*a|k\.?\s?a\.?)(?![\p{L}\d])[\s.,;]*$)[^\s\n;](?:(?:(?!\.(?:\s|$))[^\n;])*[^\s\n;.,])?'
         score: 0.86
       # "Herkunft" is NOT in the list above on purpose: in a bank it far more often
       # means the origin of FUNDS ("Herkunft: Erbschaft"), which is not Art. 9 data
@@ -705,14 +705,14 @@ custom_recognizers:
     patterns:
       - regex: '\b(?:homosexuell|heterosexuell|transsexuell|intersexuell|bisexuell|lesbisch|schwul|geschlechtsangleichung|geschlechtsumwandlung|nichtbinär)\b'
         score: 0.86
-      - regex: '(?<=\b(?:Sexuelle Orientierung|Sexuelle Identität|Geschlechtsidentität|Sexualleben)\s{0,3}[:=]\s{0,3})(?=[^\n;]*[\p{L}\d])(?!(?:keine?(?:\s+Angaben?)?|nein|nichts|ohne|unbekannt|entfällt|nicht\s+(?:angegeben|bekannt|zutreffend|erhoben)|null|leer|n\.?\s?a\.?|k\.?\s?a\.?)(?![\p{L}\d])[\s.,;]*$)[^\s\n;](?:(?:(?!\.(?:\s|$))[^\n;])*[^\s\n;.,])?'
+      - regex: '(?<=\b(?:Sexuelle Orientierung|Sexuelle Identität|Geschlechtsidentität|Sexualleben)\s{0,3}[:=]\s{0,3})(?=[^\n;]*[\p{L}\d])(?!(?:keine?(?:\s+Angaben?)?|nein|nichts|ohne|unbekannt|entfällt|nicht\s+(?:angegeben|bekannt|zutreffend|erhoben)|null|leer|n\.?\s?a\.?|n\s*/\s*a|k\.?\s?a\.?)(?![\p{L}\d])[\s.,;]*$)[^\s\n;](?:(?:(?!\.(?:\s|$))[^\n;])*[^\s\n;.,])?'
         score: 0.86
   - name: DE_UNION_PARTY
     language: de
     languages: [de]
     umlaut_variants: true
     patterns:
-      - regex: '(?<=\b(?:Gewerkschaftsmitgliedschaft|Gewerkschaftszugehörigkeit|Gewerkschaftsmitglied|Parteimitgliedschaft|Parteizugehörigkeit|Parteimitglied|Gewerkschaft|Partei)\s{0,3}[:=]\s{0,3})(?=[^\n;]*[\p{L}\d])(?!(?:keine?(?:\s+Angaben?)?|nein|nichts|ohne|unbekannt|entfällt|nicht\s+(?:angegeben|bekannt|zutreffend|erhoben)|null|leer|n\.?\s?a\.?|k\.?\s?a\.?)(?![\p{L}\d])[\s.,;]*$)[^\s\n;](?:(?:(?!\.(?:\s|$))[^\n;])*[^\s\n;.,])?'
+      - regex: '(?<=\b(?:Gewerkschaftsmitgliedschaft|Gewerkschaftszugehörigkeit|Gewerkschaftsmitglied|Parteimitgliedschaft|Parteizugehörigkeit|Parteimitglied|Gewerkschaft|Partei)\s{0,3}[:=]\s{0,3})(?=[^\n;]*[\p{L}\d])(?!(?:keine?(?:\s+Angaben?)?|nein|nichts|ohne|unbekannt|entfällt|nicht\s+(?:angegeben|bekannt|zutreffend|erhoben)|null|leer|n\.?\s?a\.?|n\s*/\s*a|k\.?\s?a\.?)(?![\p{L}\d])[\s.,;]*$)[^\s\n;](?:(?:(?!\.(?:\s|$))[^\n;])*[^\s\n;.,])?'
         score: 0.86
   # Named unions and parties, CASE-SENSITIVE and therefore a separate recognizer:
   # case-insensitively, "Die Linke" would match the everyday phrase "die linke
@@ -724,4 +724,111 @@ custom_recognizers:
     case_sensitive: true
     patterns:
       - regex: '\b(?:ver\.di|IG\s+Metall|IG\s+BCE|IG\s+BAU|Marburger\s+Bund|Vereinigung\s+Cockpit|Piratenpartei|Freie\s+Wähler|Die\s+Linke|Die\s+Grünen|Bündnis\s+90|DGB|GEW|NGG|GdP|EVG|SPD|CDU|CSU|FDP|AfD)\b'
+        score: 0.86
+
+  # =========================================================================
+  # GDPR Art. 9 special-category data, ENGLISH.
+  #
+  # MEASURED GAP (2026-07-26): the German Art. 9 recognizers above are
+  # `languages: [de]` -- correctly, because their word lists false-fired on
+  # ordinary English ("The Great Depression started in 1929" -> health data) and
+  # an Art. 9 finding is ONE-WAY, so that irreversibly destroyed English text.
+  # But no English equivalents were ever added, so on an English document FIVE of
+  # the six Art. 9 categories had ZERO detection: health, union/party membership,
+  # sexual orientation and ethnic origin were all completely invisible, and only
+  # religion was caught (incidentally, by the English spaCy NRP model).
+  #
+  # This is the same defect that was fixed for German -- the class existed in the
+  # taxonomy with nothing able to fill it -- and it is the worst place to have it:
+  # the categories with the strictest legal protection had the least coverage.
+  #
+  # These emit the SAME entity types as their German counterparts. The DE_ prefix
+  # is an internal identifier, not a language claim: reusing the types means the
+  # data class, the one-way default action, the tier rules and the Art.9 overlap
+  # splitting all apply unchanged. The written TOKEN is language-neutral (see
+  # actions.TOKEN_LABELS), so an English document is redacted to [HEALTH_DATA],
+  # never to a German-looking [DE_HEALTH_DATA].
+  #
+  # Anchored-label patterns do the work, mirroring the German design: a literal
+  # field label followed by a value. Bare word lists are kept deliberately short
+  # and unambiguous, because the action is irreversible.
+  # =========================================================================
+  - name: DE_HEALTH_DATA
+    language: en
+    languages: [en]
+    case_sensitive: true
+    patterns:
+      # Unambiguous in any casing-sensitive context; both are health data outright.
+      - regex: '\b(?:HIV|AIDS)\b'
+        score: 0.86
+  - name: DE_HEALTH_DATA
+    language: en
+    languages: [en]
+    patterns:
+      # "Diagnosis: <rest of the segment>". The value runs to the end of the
+      # segment, NOT to the first comma: an English diagnosis contains commas just
+      # as a German one does ("type 2 diabetes, insulin dependent"), and stopping
+      # early would leave health data in a file the tool calls verified.
+      - regex: '(?<=\b(?:Diagnosis|Diagnoses|Medical\s+condition|Health\s+condition|Medical\s+history|Illness|Disease|Prognosis|Medication|Treatment|Disability|Sick\s+leave|Health\s+status|Blood\s+group|Blood\s+type)\s{0,3}[:=]\s{0,3})(?=[^\n;]*[\p{L}\d])(?!(?:none|nil|no|n\.?\s?a\.?|n\s*/\s*a|unknown|not\s+(?:stated|known|applicable|provided|recorded)|blank|empty)(?![\p{L}\d])[\s.,;]*$)[^\s\n;](?:(?:(?!\.(?:\s|$))[^\n;])*[^\s\n;.,])?'
+        score: 0.86
+      # Prose form: "is HIV positive", "was diagnosed with X", "suffers from X".
+      - regex: '(?<=\b(?:diagnosed\s+with|suffers\s+from|suffering\s+from|treated\s+for)\s)[^\s\n;](?:(?:(?!\.(?:\s|$))[^\n;,])*[^\s\n;.,])?'
+        score: 0.86
+  - name: DE_RELIGION
+    language: en
+    languages: [en]
+    patterns:
+      - regex: '(?<=\b(?:Religion|Religious\s+affiliation|Religious\s+belief|Faith|Denomination|Confession)\s{0,3}[:=]\s{0,3})(?=[^\n;]*[\p{L}\d])(?!(?:none|nil|no|n\.?\s?a\.?|n\s*/\s*a|unknown|not\s+(?:stated|known|applicable|provided|recorded)|blank|empty)(?![\p{L}\d])[\s.,;]*$)[^\s\n;](?:(?:(?!\.(?:\s|$))[^\n;])*[^\s\n;.,])?'
+        score: 0.86
+  - name: DE_RELIGION
+    language: en
+    languages: [en]
+    case_sensitive: true
+    patterns:
+      # Case-sensitive: lower-case "catholic"/"orthodox" are ordinary English
+      # adjectives ("catholic tastes", "orthodox approach"). A bare "Orthodox" is
+      # deliberately absent for the same reason the German list omits it; the
+      # compounded form and the label pattern above cover the real cases.
+      - regex: '\b(?:Roman\s+Catholic|Greek\s+Orthodox|Russian\s+Orthodox|Orthodox\s+Christian|Catholic|Protestant|Lutheran|Anglican|Methodist|Baptist|Evangelical|Presbyterian|Muslim|Islamic|Jewish|Hindu|Buddhist|Sikh|Jehovah''s\s+Witness|Atheist|Agnostic)\b'
+        score: 0.86
+  - name: DE_UNION_PARTY
+    language: en
+    languages: [en]
+    patterns:
+      # A bare "Union" anchor is deliberately EXCLUDED: in a bank "Credit Union:
+      # ..." is an ordinary counterparty field, and claiming it as union
+      # membership would one-way destroy a legitimate institution name.
+      - regex: '(?<=\b(?:Trade\s+union|Trade\s+Union|Labour\s+union|Labor\s+union|Union\s+membership|Union\s+member|Political\s+party|Party\s+membership|Party\s+affiliation|Political\s+affiliation|Works\s+council)\s{0,3}[:=]\s{0,3})(?=[^\n;]*[\p{L}\d])(?!(?:none|nil|no|n\.?\s?a\.?|n\s*/\s*a|unknown|not\s+(?:stated|known|applicable|provided|recorded)|blank|empty)(?![\p{L}\d])[\s.,;]*$)[^\s\n;](?:(?:(?!\.(?:\s|$))[^\n;])*[^\s\n;.,])?'
+        score: 0.86
+  - name: DE_UNION_PARTY
+    language: en
+    languages: [en]
+    case_sensitive: true
+    patterns:
+      # Named unions/parties only where the string is unambiguous. "Unite" and
+      # "Labour" alone are excluded -- both are ordinary words that appear in
+      # banking prose.
+      - regex: '\b(?:UNISON|Unite\s+the\s+Union|AFL-CIO|Teamsters|Trades\s+Union\s+Congress|Labour\s+Party|Conservative\s+Party|Liberal\s+Democrats|Green\s+Party|Democratic\s+Party|Republican\s+Party)\b'
+        score: 0.86
+  - name: DE_SEX_LIFE
+    language: en
+    languages: [en]
+    patterns:
+      # "gay" is deliberately absent: it is also a surname (and a given name), and
+      # this action is irreversible. The label pattern below still catches it when
+      # it appears as a recorded value.
+      - regex: '\b(?:homosexual|heterosexual|bisexual|transsexual|transgender|intersex|asexual|pansexual|lesbian|non-binary|nonbinary|LGBTQ|LGBTQ\+|LGBT)\b'
+        score: 0.86
+      - regex: '(?<=\b(?:Sexual\s+orientation|Sexual\s+identity|Gender\s+identity|Sex\s+life|Sexual\s+preference)\s{0,3}[:=]\s{0,3})(?=[^\n;]*[\p{L}\d])(?!(?:none|nil|no|n\.?\s?a\.?|n\s*/\s*a|unknown|not\s+(?:stated|known|applicable|provided|recorded)|blank|empty)(?![\p{L}\d])[\s.,;]*$)[^\s\n;](?:(?:(?!\.(?:\s|$))[^\n;])*[^\s\n;.,])?'
+        score: 0.86
+  # Racial / ethnic origin, English. Emits NRP for the same reason the German one
+  # does: NRP is already mapped to the special-category class and one-way action.
+  # The English spaCy model DOES produce NRP in prose ("he is Turkish"), but not
+  # for the labelled field form ("Nationality: Turkish"), which is exactly how a
+  # bank's onboarding record stores it.
+  - name: NRP
+    language: en
+    languages: [en]
+    patterns:
+      - regex: '(?<=\b(?:Nationality|Citizenship|Ethnicity|Ethnic\s+origin|Ethnic\s+group|Ethnic\s+background|Racial\s+origin|Race|National\s+origin|Country\s+of\s+birth|Place\s+of\s+birth)\s{0,3}[:=]\s{0,3})(?=[^\n;]*[\p{L}\d])(?!(?:none|nil|no|n\.?\s?a\.?|n\s*/\s*a|unknown|not\s+(?:stated|known|applicable|provided|recorded)|blank|empty)(?![\p{L}\d])[\s.,;]*$)[^\s\n;](?:(?:(?!\.(?:\s|$))[^\n;])*[^\s\n;.,])?'
         score: 0.86

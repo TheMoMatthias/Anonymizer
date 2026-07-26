@@ -1,3 +1,5 @@
+import pytest
+
 from anonymizer.core import detect_unit
 from anonymizer.language import detect_dominant
 from anonymizer.models import TextUnit
@@ -103,3 +105,84 @@ def test_language_sample_is_not_biased_to_the_head():
 
     narrowed = _narrow_language({"languages": ["de", "en"]}, units)
     assert narrowed["languages"] == ["de"]
+
+
+# --- GDPR Art. 9 parity between German and English ---------------------------
+#
+# MEASURED GAP (2026-07-26 audit): the German Art. 9 recognizers are
+# `languages: [de]` -- correctly, their word lists false-fired on ordinary English
+# ("The Great Depression" -> health data) and the action is ONE-WAY. But no
+# English equivalents existed, so on an English document FIVE of six Art. 9
+# categories had ZERO detection: health, union/party, sexual orientation and
+# ethnic origin were invisible; only religion was caught, incidentally, by spaCy's
+# NRP. For a bank handling English documents that is the legally most-protected
+# data with the least coverage. These tests pin both directions of the fix.
+
+from anonymizer import taxonomy as _taxonomy
+
+
+def _art9(analyzer, base_config, text, lang):
+    cfg = {**base_config, "languages": [lang]}
+    return [
+        f
+        for f in detect_unit(analyzer, TextUnit("u1", text), cfg)
+        if _taxonomy.data_class_for(f.entity_type).key == "special_category"
+    ]
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "Diagnosis: type 2 diabetes, insulin dependent",
+        "The employee was diagnosed with multiple sclerosis last year.",
+        "Medical condition: chronic back pain",
+        "The patient is HIV positive.",
+        "Religion: Roman Catholic",
+        "The applicant is Muslim and requests prayer facilities.",
+        "Trade union: Unite the Union",
+        "Union membership: UNISON since 2019",
+        "Political party: Labour Party",
+        "Sexual orientation: homosexual",
+        "The client is transgender.",
+        "Nationality: Turkish",
+        "Ethnic origin: Kurdish",
+        "Country of birth: Syria",
+    ],
+)
+def test_english_art9_is_detected(analyzer, base_config, text):
+    """Every one of these was invisible on an English document before the audit."""
+    assert _art9(analyzer, base_config, text, "en"), f"Art.9 leak in English: {text!r}"
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        # Ordinary banking English that LOOKS like Art.9 vocabulary. A hit here is
+        # ONE-WAY, so it destroys legitimate text with no way to recover it.
+        "The Great Depression started in 1929 and reshaped banking.",
+        "Credit Union: Nationwide Building Society",
+        "The bank has catholic tastes in counterparties.",
+        "An orthodox approach to risk management was applied.",
+        "The union of the two datasets produced 4,000 rows.",
+        "Race conditions in the settlement engine were fixed.",
+        "European Union regulations apply to this transaction.",
+        "Party: Deutsche Bank AG acting as counterparty",
+        # Explicitly-empty values must never be claimed as a disclosure.
+        "Diagnosis: none",
+        "Religion: not stated",
+        "Nationality: n/a",
+    ],
+)
+def test_english_art9_does_not_fire_on_ordinary_banking_prose(analyzer, base_config, text):
+    hits = _art9(analyzer, base_config, text, "en")
+    assert not hits, f"ONE-WAY false positive would destroy legitimate text: {text!r} -> {hits}"
+
+
+def test_art9_token_is_not_german_prefixed_in_an_english_document():
+    """The DE_ prefix on these entity types is an internal identifier, not a
+    language claim -- the English recognizers emit the same types. Redacting an
+    English contract to "[DE_HEALTH_DATA]" reads as a bug to whoever receives it."""
+    from anonymizer.actions import token_label
+
+    for et in ("DE_HEALTH_DATA", "DE_RELIGION", "DE_UNION_PARTY", "DE_SEX_LIFE"):
+        assert not token_label(et).startswith("DE_"), et

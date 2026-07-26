@@ -42,6 +42,15 @@ TOKEN_LABELS = {
     "DATE_TIME": "DATE",
     "NER_MISC": "ENTITY",
     "DENY_LIST": "REDACTED",
+    # GDPR Art. 9. The DE_ prefix on these entity types is an internal identifier,
+    # not a language claim -- the same types are emitted by the English recognizers
+    # so the data class, one-way action and tier rules apply once for both. The
+    # written TOKEN must not inherit that prefix: redacting an English contract to
+    # "[DE_HEALTH_DATA]" reads as a bug to the person receiving the file.
+    "DE_HEALTH_DATA": "HEALTH_DATA",
+    "DE_RELIGION": "RELIGION",
+    "DE_UNION_PARTY": "UNION_PARTY",
+    "DE_SEX_LIFE": "SEX_LIFE",
     # Topical (non-personal) categories.
     "TOOL": "TOOL",
     "DIVISION": "DIVISION",
