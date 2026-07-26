@@ -53,6 +53,14 @@ class GroupedFinding:
     # model guess, not something a rule ever anchored. Drives a distinct
     # sub-band within the Medium tier in the review UI (see review.py).
     is_ner_guess: bool = False
+    # True if ANY occurrence came from the GLiNER second pass. Deliberately a
+    # THIRD state rather than a second meaning for is_ner_guess: a GLiNER hit is
+    # neither a bare spaCy guess nor a rule-anchored match, and forcing it into
+    # that binary decides by accident what should be decided by measurement.
+    # "any", not "every", because provenance here is a warning: if the ML model
+    # is the only reason a value is on screen for even one occurrence, the
+    # reviewer should be told.
+    is_ai_detected: bool = False
 
 
 @dataclass

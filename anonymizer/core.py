@@ -786,6 +786,9 @@ def build_scan_result(findings: list[Finding], units: list[TextUnit], config: di
     # (it is DERIVED from an NER guess), so a bare NER value that merely
     # propagated stays a guess.
     all_ner_guess: dict[tuple[str, str], bool] = {}
+    # ANY occurrence from the ML second pass marks the group AI-detected (see
+    # GroupedFinding.is_ai_detected for why "any" rather than "every").
+    any_ai: dict[tuple[str, str], bool] = {}
     for f in findings:
         key = (f.entity_type, f.value.strip().lower())
         default_action = entities_cfg.get(f.entity_type, {}).get("default_action", "anonymize")
@@ -806,9 +809,22 @@ def build_scan_result(findings: list[Finding], units: list[TextUnit], config: di
             g.validated = f.validated
         is_guess = f.entity_type in _NER_ENTITIES and f.source in ("SpacyRecognizer", "propagation")
         all_ner_guess[key] = all_ner_guess.get(key, True) and is_guess
+        any_ai[key] = any_ai.get(key, False) or f.source == GLINER_SOURCE
     for key, g in grouped.items():
         g.tier = taxonomy.tier_for(g.max_score, high, medium)
         g.is_ner_guess = all_ner_guess.get(key, False)
+        g.is_ai_detected = any_ai.get(key, False)
+        # An ML-sourced GDPR Art. 9 finding is NEVER auto-accepted, whatever it
+        # scored. Art. 9 types carry a one-way `anonymize` default, so an
+        # auto-applied zero-shot false positive destroys legitimate content with
+        # no way back -- and zero-shot confidence is not calibrated evidence that
+        # a sentence really discloses someone's health, religion or sexuality.
+        # Demoting to the review tier keeps the recall (the finding is still
+        # surfaced, still defaulted to anonymize) while putting a human in front
+        # of every irreversible act. Anchored Art. 9 recognizers are untouched:
+        # they demanded a literal label like "Diagnose:" before matching.
+        if g.is_ai_detected and taxonomy.is_special_category(g.entity_type) and g.tier == taxonomy.TIER_HIGH:
+            g.tier = taxonomy.TIER_MEDIUM
 
     # Corroboration-only: drop bare ORG/LOCATION/MISC NER guesses (nothing but a
     # flat spaCy hit backs them) -- on business prose these are almost entirely

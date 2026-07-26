@@ -192,6 +192,13 @@ def _capture_row(g: GroupedFinding, on_change: Callable) -> list:
         # reviewer can see WHAT kind of thing each value is -- especially the new
         # topical categories (tools, divisions, projects) vs. personal entities.
         theme.chip(token_label(g.entity_type), theme.SECONDARY).tooltip(g.entity_type)
+        # Provenance where the decision is actually made. The stat tile and the
+        # bulk band both aggregate; only this says "THIS value is here because a
+        # model said so", which is what changes how carefully a row is read.
+        if g.is_ai_detected:
+            theme.chip("AI", theme.INFO).tooltip(
+                "Found by the offline AI model (GLiNER) rather than by a rule or checksum."
+            )
         if g.validated is True:
             theme.chip("✓ valid", theme.TIER_COLORS["high"])
         elif g.validated is False:
@@ -452,18 +459,23 @@ def _tier_bands(
             if not gs:
                 continue
             if tier == "medium":
-                pattern_backed = [g for g in gs if not g.is_ner_guess]
+                # THREE-way, not two. An AI-detected hit has is_ner_guess False, so
+                # a two-way split filed it under "pattern-backed" -- labelling a
+                # zero-shot model's judgement as if a rule had anchored it, in the
+                # one place the reviewer goes to decide how much to trust a band.
                 ner_guess = [g for g in gs if g.is_ner_guess]
-                if pattern_backed:
-                    _tier_band(
-                        f"{label} ({len(pattern_backed)})", pattern_backed, result, container, on_change,
-                        column_policies, cell_policies,
-                    )
-                if ner_guess:
-                    _tier_band(
-                        f"{label} · NER guess ({len(ner_guess)})", ner_guess, result, container, on_change,
-                        column_policies, cell_policies,
-                    )
+                ai = [g for g in gs if g.is_ai_detected and not g.is_ner_guess]
+                pattern_backed = [g for g in gs if not g.is_ner_guess and not g.is_ai_detected]
+                for sub_label, sub in (
+                    (label, pattern_backed),
+                    (f"{label} · AI-detected", ai),
+                    (f"{label} · NER guess", ner_guess),
+                ):
+                    if sub:
+                        _tier_band(
+                            f"{sub_label} ({len(sub)})", sub, result, container, on_change,
+                            column_policies, cell_policies,
+                        )
                 continue
             _tier_band(f"{label} ({len(gs)})", gs, result, container, on_change, column_policies, cell_policies)
 
@@ -542,6 +554,11 @@ def _stat_bar(result: ScanResult) -> Callable[[], None]:
         # the rest) but off the live findings, so the split stays honest after the
         # reviewer has been editing.
         model_guess = sum(1 for g in items if g.is_ner_guess)
+        # AI-detected is its own tile, and is subtracted OUT of "likely PII".
+        # Folded in, an ML hit was counted as a corroborated finding -- the tile
+        # that says "these are the trustworthy ones" would have been quietly
+        # inflated by exactly the population the reviewer most needs to judge.
+        ai_detected = sum(1 for g in items if g.is_ai_detected)
         with row:
             _stat(
                 uncertain,
@@ -551,8 +568,17 @@ def _stat_bar(result: ScanResult) -> Callable[[], None]:
                 tip="Findings below the high-confidence bar — worth a look. This is a detection count, "
                 "so it does not fall as you decide them.",
             )
-            _stat(len(items) - model_guess, "likely PII", theme.PRIMARY)
+            _stat(len(items) - model_guess - ai_detected, "likely PII", theme.PRIMARY)
             _stat(model_guess, "model guesses", theme.SECONDARY)
+            if ai_detected:
+                _stat(
+                    ai_detected,
+                    "AI-detected",
+                    theme.INFO,
+                    tip="Found by the offline AI model (GLiNER), not by a rule or a checksum. "
+                    "It reaches things the rules cannot — prose names, tools, project names — "
+                    "but it is a model's judgement, so these are worth a look.",
+                )
             _stat(accepted, "auto-accepted")
             _stat(len(result.possible_misses), "possible misses", theme.SECONDARY)
 

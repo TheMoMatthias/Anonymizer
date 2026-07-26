@@ -183,7 +183,15 @@ def _stat_tiles(scope) -> dict[str, int]:
 # --- fixtures ----------------------------------------------------------------
 
 
-def _finding(value: str, action: str = "pseudonymize", tier: str = "medium", score: float = 0.85):
+def _finding(
+    value: str,
+    action: str = "pseudonymize",
+    tier: str = "medium",
+    score: float = 0.85,
+    *,
+    ai: bool = False,
+    guess: bool = False,
+):
     return GroupedFinding(
         entity_type="PERSON",
         value=value,
@@ -192,6 +200,8 @@ def _finding(value: str, action: str = "pseudonymize", tier: str = "medium", sco
         context=f"...{value}...",
         action=action,
         tier=tier,
+        is_ai_detected=ai,
+        is_ner_guess=guess,
     )
 
 
@@ -389,6 +399,49 @@ def test_stat_bar_is_recomputed_after_a_global_bulk_action():
     _activate(_row_of(box, "Apply to everything"), "skip")
 
     assert _stat_tiles(box)["auto-accepted"] == 0
+
+
+# --- AI-detected: the third provenance state ---------------------------------
+
+
+def test_ai_detected_is_counted_apart_from_likely_pii():
+    """Folded into "likely PII", an ML hit was counted as a corroborated finding:
+    the tile that says "these are the trustworthy ones" would be inflated by
+    exactly the population the reviewer most needs to judge."""
+    items = [_finding("Klaus"), _finding("Anna", ai=True), _finding("Bernd", guess=True)]
+    tiles = _stat_tiles(_render(_result(items), cluster="overview"))
+    assert tiles["AI-detected"] == 1
+    assert tiles["model guesses"] == 1
+    assert tiles["likely PII"] == 1, "likely PII must exclude BOTH the ML hit and the NER guess"
+
+
+def test_ai_tile_is_hidden_when_no_ml_ran():
+    """GLiNER ships disabled, so on the common path the tile would read a
+    permanent 0 and just cost header space."""
+    tiles = _stat_tiles(_render(_result([_finding("Klaus")]), cluster="overview"))
+    assert "AI-detected" not in tiles
+
+
+def test_ai_detected_gets_its_own_bulk_band_not_the_pattern_backed_one():
+    """An AI hit has is_ner_guess False, so the old two-way medium split filed it
+    under "pattern-backed" -- labelling a zero-shot model's judgement as if a rule
+    had anchored it, in the one place the reviewer decides how far to trust a
+    band. Setting the AI band must not touch the rule-backed rows."""
+    anchored = _finding("Klaus")
+    ml = _finding("Anna", ai=True)
+    box = _render(_result([anchored, ml]), cluster="overview")
+
+    _activate(_row_of(box, "Medium · AI-detected"), "anonymize")
+
+    assert ml.action == "anonymize"
+    assert anchored.action == "pseudonymize", "the AI band must not reach rule-backed findings"
+
+
+def test_ai_provenance_is_visible_on_the_row_itself():
+    """The tile and the band both aggregate. Only the row says "THIS value is here
+    because a model said so", which is what changes how carefully it is read."""
+    box = _render(_result([_finding("Anna", ai=True)]), cluster="class:people")
+    assert "AI" in _texts(box)
 
 
 # --- D3: Clear must be confirmed ---------------------------------------------

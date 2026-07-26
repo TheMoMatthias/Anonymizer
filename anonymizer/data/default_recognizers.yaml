@@ -107,6 +107,10 @@ gliner:
   min_score: 0.3
   confidence_override: 0.85
   cell_cap: 5000
+  # GLiNER labels are plain text supplied at INFERENCE time -- that is the whole
+  # point of a zero-shot model, and why adding a category costs a line here rather
+  # than a retrained model. Left of the colon is the phrase handed to the model,
+  # right of it the entity type the hit is mapped onto.
   labels:
     person: PERSON
     organization: ORGANIZATION
@@ -116,6 +120,19 @@ gliner:
     department: DEPARTMENT
     licensee: LICENSEE
     project: PROJECT
+    # GDPR Art. 9 special categories. Added because German Art. 9 detection is
+    # ANCHORED -- it needs a literal label ("Diagnose:", "Konfession:") right
+    # before the value -- so it structurally cannot see the same disclosure made
+    # in prose ("der Kunde ist schwer erkrankt"). A zero-shot model can.
+    #
+    # These are one-way `anonymize` types, so an ML hit on them is FORCED into the
+    # review tier and can never be auto-applied (core.build_scan_result). The
+    # recall is worth having; destroying a document on a zero-shot guess is not.
+    health condition: DE_HEALTH_DATA
+    religious belief: DE_RELIGION
+    trade union or political party membership: DE_UNION_PARTY
+    sexual orientation: DE_SEX_LIFE
+    nationality or ethnic origin: NRP
 
 # Default posture: pseudonymize (preserves relationships for downstream AI),
 # with hard one-way anonymize reserved for the highest-sensitivity identifiers

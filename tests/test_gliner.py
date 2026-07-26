@@ -215,6 +215,63 @@ def test_resolve_model_path_env(monkeypatch, tmp_path):
     assert resolve_model_path({"model_path": "ignored"}) == tmp_path / "m.onnx"
 
 
+def _grouped(cfg, backend, text):
+    """The reviewer-facing GroupedFindings for a text, via the real detect path."""
+    analyzer = build_analyzer(cfg, gliner_backend=backend)
+    unit = TextUnit(id="u1", text=text)
+    findings = core.detect_unit(analyzer, unit, cfg)
+    return {g.value: g for g in core.build_scan_result(findings, [unit], cfg).all_actionable()}
+
+
+def test_gliner_hit_is_a_third_state_not_a_ner_guess(gliner_config):
+    """Provenance is three-valued. A GLiNER hit is neither a bare spaCy guess nor
+    a rule-anchored match, and collapsing it into `is_ner_guess` would decide by
+    accident -- via which side of a boolean it lands on -- a question that belongs
+    to measurement: whether ML hits should face the corroboration-only drop."""
+    backend = FakeBackend([("tool", "DeepL Pro", 0.9)])
+    g = _grouped(gliner_config, backend, "Die Abteilung nutzt DeepL Pro taeglich.")["DeepL Pro"]
+    assert g.is_ai_detected is True
+    assert g.is_ner_guess is False
+
+
+def test_non_gliner_finding_is_not_marked_ai_detected(gliner_config):
+    """The flag must not leak onto rule-anchored findings that merely co-occur
+    with an ML hit in the same unit."""
+    backend = FakeBackend([("tool", "DeepL Pro", 0.9)])
+    text = "DeepL Pro, IBAN DE89370400440532013000"
+    groups = _grouped(gliner_config, backend, text)
+    iban = next(g for v, g in groups.items() if "DE8937" in v)
+    assert iban.is_ai_detected is False
+
+
+def test_ml_sourced_art9_is_never_auto_accepted(gliner_config):
+    """Art. 9 types default to ONE-WAY anonymize. An auto-applied zero-shot false
+    positive therefore destroys legitimate content irreversibly -- and zero-shot
+    confidence is not calibrated evidence that a sentence really discloses
+    someone's health. A human confirms every one, however high it scored."""
+    backend = FakeBackend([("health condition", "schwer erkrankt", 0.99)])
+    g = _grouped(gliner_config, backend, "Der Kunde ist schwer erkrankt gewesen.")["schwer erkrankt"]
+    assert g.entity_type == "DE_HEALTH_DATA"
+    assert g.is_ai_detected is True
+    assert g.tier != "high", "an ML Art.9 hit must never land in the auto-accept tier"
+    assert g.action == "anonymize", "demoting the tier must not weaken the action"
+
+
+def test_anchored_art9_can_still_auto_accept(analyzer, base_config):
+    """The mirror requirement: the demotion is about ML PROVENANCE, not about
+    Art. 9 generally. An anchored recognizer demanded a literal 'Diagnose:' label
+    before matching, and must keep whatever tier its score earns."""
+    unit = TextUnit("u1", "Diagnose: Diabetes mellitus Typ 2")
+    cfg = {**base_config, "languages": ["de"], "tiers": {"high": 0.8, "medium": 0.5}}
+    findings = core.detect_unit(analyzer, unit, cfg)
+    art9 = [f for f in findings if f.entity_type == "DE_HEALTH_DATA"]
+    assert art9, "the anchored Art.9 recognizer should still fire"
+    groups = core.build_scan_result(findings, [unit], cfg).all_actionable()
+    g = next(g for g in groups if g.entity_type == "DE_HEALTH_DATA")
+    assert g.is_ai_detected is False
+    assert g.tier == "high", "an anchored 0.86 hit under a 0.8 bar must keep its tier"
+
+
 def _fake_gliner_module(record: dict):
     """A stand-in for the `gliner` package that records how from_pretrained was
     called. gliner is deliberately NOT a dependency of the test environment (the
