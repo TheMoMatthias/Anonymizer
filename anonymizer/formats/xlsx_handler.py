@@ -10,7 +10,13 @@ from openpyxl.utils import column_index_from_string, get_column_letter
 
 from .. import taxonomy
 from ..actions import decisions_lookup, resolve_replacement, token_label
-from ..core import _resolve_overlaps, detect_unit, neutralize_structural_noise, precompute_nlp_artifacts
+from ..core import (
+    _NER_ENTITIES,
+    _resolve_overlaps,
+    detect_unit,
+    neutralize_structural_noise,
+    precompute_nlp_artifacts,
+)
 from ..engine import DEFAULT_LANGUAGES
 from ..models import CellInfo, ColumnInfo, Finding, ProcessingError, TextUnit
 from .run_replace import apply_aux_parts, aux_text_units
@@ -314,6 +320,43 @@ def _iter_sheet_name_units(wb):
             yield f"sheetname|{ws.title}", ws.title
 
 
+# The recognizer name presidio reports for a raw spaCy NER span -- i.e. a guess
+# with nothing but the model behind it.
+_BARE_NER_SOURCE = "SpacyRecognizer"
+
+
+def _corroborated_for_sheet_title(f: Finding) -> bool:
+    """Whether a finding is strong enough to justify RENAMING a worksheet.
+
+    Renaming a sheet is structural, not textual: it rewrites xl/workbook.xml and
+    every formula, defined name and chart reference that points at that sheet. It
+    is a far heavier act than replacing a value inside one cell -- and it is driven
+    by whatever detection makes of a string that is usually three to eight
+    characters of structural vocabulary ("Tab", "Daten", "Q3", "Blatt2").
+
+    Measured: spaCy claims a bare "Tab" as PERSON at its flat 0.85. PERSON is
+    deliberately exempt from the corroboration-only rule AND from the
+    lowercase/stopword precision filters -- both exemptions are correct, because a
+    real lowercase surname has to stay reachable inside a CELL -- so nothing else
+    stands between one weak three-character guess and a renamed tab with every
+    reference to it rewritten.
+
+    So a sheet title alone requires more than a bare spaCy guess. A pattern/anchor
+    hit, a passed checksum, a deny-list term, a name-column override, or a value
+    propagated from a confirmed detection elsewhere in the document all qualify.
+    Non-NER entity types (IBAN, Steuer-ID, ...) are pattern-backed by definition.
+
+    This does NOT weaken the leak this feature exists to close. A sheet actually
+    called "Kunde Hans Mueller" still renames: "Hans Mueller" is corroborated by
+    the name-column/propagation machinery the moment it occurs anywhere else in the
+    workbook, and a title whose value the reviewer removed still redacts via the
+    ordinary `redact()` trigger in _sheet_renames. What stops is renaming on the
+    strength of nothing at all."""
+    if f.entity_type not in _NER_ENTITIES:
+        return True
+    return f.validated is True or f.source != _BARE_NER_SOURCE
+
+
 def extract_text_units(path: Path) -> list[TextUnit]:
     wb = openpyxl.load_workbook(path, data_only=False)
     units = [TextUnit(id=key, text=text) for key, text, _header in _iter_cell_units(wb)]
@@ -565,7 +608,9 @@ def scan(path: Path, analyzer, config) -> list:
     for key, text in _iter_defined_name_units(wb):
         findings.extend(detect(text, None, key))
     for key, text in _iter_sheet_name_units(wb):
-        findings.extend(detect(text, None, key))
+        # Filtered AFTER the shared memo cache, never inside it: the same string can
+        # also be a cell value, where a bare NER guess is still a legitimate finding.
+        findings.extend(f for f in detect(text, None, key) if _corroborated_for_sheet_title(f))
     # scan() builds its own unit stream rather than reusing extract_text_units, so
     # the auxiliary surfaces must be added here too or they would be reported to
     # the reviewer but never actually scanned.

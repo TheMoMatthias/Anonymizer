@@ -223,6 +223,56 @@ def test_column_blackout_redacts_undetected_cells_and_verifies(analyzer, base_co
     assert out["A2"].value != "Hans Mueller", "name column must still be redacted via the value path"
 
 
+def test_bare_ner_guess_does_not_rename_a_sheet(tmp_path, analyzer, base_config, mapping_db_path):
+    """A sheet TITLE is structural: renaming it rewrites xl/workbook.xml and every
+    formula, defined name and chart reference that points at the sheet.
+
+    Measured: spaCy claims a bare "Tab" as PERSON at its flat 0.85. PERSON is
+    deliberately exempt from the corroboration-only rule AND from the
+    lowercase/stopword precision filters -- both correct, so a real lowercase
+    surname stays reachable in a CELL -- which left nothing at all between one weak
+    three-character guess and a rewritten workbook structure."""
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.title = "Tab"
+    ws.append(["Wert"])
+    ws.append(["Interne Notiz"])
+    path = tmp_path / "tab.xlsx"
+    wb.save(path)
+
+    grouped = scan_document(path, analyzer, base_config).all_actionable()
+    assert not any(g.value == "Tab" for g in grouped), (
+        f"a bare NER guess on a sheet TITLE must not become a finding: "
+        f"{[(g.entity_type, g.value) for g in grouped]}"
+    )
+    for g in grouped:
+        g.action = "anonymize"
+    out_path, _ = apply_document(path, grouped, analyzer, base_config, mapping_db_path)
+    assert "Tab" in openpyxl.load_workbook(out_path).sheetnames, (
+        "the sheet was renamed on the strength of a bare NER guess"
+    )
+
+
+def test_pattern_backed_sheet_title_is_still_renamed(tmp_path, analyzer, base_config, mapping_db_path):
+    """The corroboration gate must not weaken the leak it guards. An IBAN in a
+    sheet title is pattern-anchored and checksum-tested -- not an NER guess at all
+    -- so it still renames the sheet and must not survive in xl/workbook.xml."""
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.title = f"Konto {IBAN}"[:31]
+    ws.append(["Wert"])
+    ws.append(["Zahlungseingang"])
+    path = tmp_path / "kontosheet.xlsx"
+    wb.save(path)
+
+    grouped = scan_document(path, analyzer, base_config).all_actionable()
+    assert any(IBAN in g.value for g in grouped), "a pattern-backed sheet title must still be surfaced"
+    for g in grouped:
+        g.action = "anonymize"
+    out_path, _ = apply_document(path, grouped, analyzer, base_config, mapping_db_path)
+    assert IBAN not in _raw_package_text(out_path), "the IBAN leaked in the sheet title"
+
+
 def test_xlsx_sheet_name_is_surfaced_and_redacted(tmp_path, analyzer, base_config, mapping_db_path):
     """FALSE-CLEAN (B3): Excel SHEET NAMES were never scanned and never redacted.
     The authoritative copy is xl/workbook.xml <sheet name="...">; only the app.xml

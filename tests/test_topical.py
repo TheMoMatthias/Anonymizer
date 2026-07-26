@@ -161,13 +161,13 @@ def _only_sheet(out_path):
     """The single worksheet of an applied workbook, looked up by POSITION.
 
     Deliberately not by title: sheet TITLES are themselves redacted at apply time
-    (xlsx_handler._sheet_renames), and a short title like "Tab" is claimed by
-    spaCy as a bare PERSON guess -- PERSON is exempt from the precision gate by
-    design, so the tab really is renamed. That is the sheet-title feature working;
-    these tests are about the CELL policy layer and must not break on it. It also
-    keeps them honest about a real guarantee: the reviewer's `Tab!A2` key still
-    resolves after the rename, because apply() looks policies up under the
-    ORIGINAL title."""
+    (xlsx_handler._sheet_renames), so a title carrying a corroborated finding is
+    legitimately gone by the time we read the output. These tests are about the
+    CELL policy layer and must not break on that.
+
+    It also keeps them honest about a real guarantee: the reviewer's `Tab!A2` key
+    still resolves after a rename, because apply() looks cell and column policies
+    up under the ORIGINAL sheet title, not the redacted one."""
     return openpyxl.load_workbook(out_path).worksheets[0]
 
 
