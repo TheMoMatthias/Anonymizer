@@ -26,23 +26,35 @@ topical:
   # header_terms are matched as WHOLE WORDS (word boundaries), not substrings --
   # a category column triggers whole-column redaction, so defaults are kept
   # high-precision and conservative. Add your own compound headers per deployment.
+  # MEASURED GAP (2026-07-26 audit): these lists were heavily German-weighted, so
+  # an ENGLISH workbook -- columns headed "Department", "Project", "Description",
+  # "Notes", "Supplier" -- triggered no header→category detection at all, while its
+  # German twin did. English terms are added below. A header term only ever OFFERS
+  # a whole-column policy to the reviewer (it never redacts on its own), so a
+  # broader list costs review noise at worst, not a wrong redaction.
   categories:
     TOOL:
-      header_terms: [tool, tools, system, systeme, software, applikation, application,
-                     plattform, platform, framework]
+      header_terms: [tool, tools, system, systeme, systems, software, applikation, application,
+                     applications, app, apps, plattform, platform, framework, service]
       terms: []
     DIVISION:
-      header_terms: [division, bereich, geschäftsbereich, geschaeftsbereich, sparte, ressort]
+      header_terms: [division, divisions, bereich, geschäftsbereich, geschaeftsbereich,
+                     sparte, ressort, "business unit", "business area", segment]
       terms: []
     DEPARTMENT:
-      header_terms: [abteilung, team, referat, fachbereich, organisationseinheit]
+      header_terms: [abteilung, team, teams, referat, fachbereich, organisationseinheit,
+                     department, departments, unit, "org unit", "cost centre", "cost center"]
       terms: []
     LICENSEE:
       header_terms: [lizenzgeber, lizenznehmer, lizenz, anbieter, hersteller,
-                     vendor, dienstleister, zulieferer]
+                     vendor, vendors, dienstleister, zulieferer,
+                     licensee, licensor, licence, license, supplier, suppliers,
+                     provider, manufacturer, counterparty]
       terms: []
     PROJECT:
-      header_terms: [projekt, projektname, projekttitel, vorhaben, initiative]
+      header_terms: [projekt, projektname, projekttitel, vorhaben, initiative,
+                     project, projects, "project name", "project title", programme,
+                     program, workstream]
       terms: []
     # Free-text description columns -- whole cell summarized (not propagated).
     # Compound headers ARE listed explicitly since word-boundary matching won't
@@ -50,7 +62,9 @@ topical:
     DESCRIPTION:
       header_terms: [beschreibung, projektbeschreibung, kurzbeschreibung, nutzenbeschreibung,
                      notiz, notizen, kommentar, kommentare, bemerkung, bemerkungen, freitext,
-                     details, inhalt, oldvalue, newvalue, altervalue, neuervalue]
+                     details, inhalt, oldvalue, newvalue, altervalue, neuervalue,
+                     description, descriptions, notes, note, comment, comments, remark,
+                     remarks, summary, "free text", "additional information"]
       terms: []
 
 # Trust-tier boundaries (score -> high/medium/low). High-tier findings are

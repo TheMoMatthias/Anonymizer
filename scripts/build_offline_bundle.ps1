@@ -80,9 +80,23 @@ Write-Host "Setting up the GLiNER (AI detection) model drop-in folder..."
 # leave the folder with instructions so it can be added without a rebuild.
 $glinerTarget = Join-Path $bundleDir "gliner-model"
 $glinerVendor = Join-Path $repoRoot "vendor\gliner-model"
-if (Test-Path $glinerVendor) {
+# The model is copied ONLY with -WithML. Without it the ML runtime is not
+# installed into the bundle, so a vendored model is 1.1 GB of dead weight that
+# nothing can load -- copied to the share and onto every colleague's machine for
+# no benefit -- while launch.bat still points ANONYMIZER_GLINER_MODEL at it. That
+# combination is worse than useless: the Settings card reports a model present
+# next to a missing runtime, which reads as a broken install rather than as the
+# deliberate lean build it actually is.
+if ($WithML -and (Test-Path $glinerVendor)) {
     Copy-Item $glinerVendor $glinerTarget -Recurse
     Write-Host "  Bundled GLiNER model from vendor\gliner-model."
+} elseif ($WithML) {
+    # Deliberately does NOT create an empty gliner-model\ folder: launch.bat keys
+    # ANONYMIZER_GLINER_MODEL off that folder existing, so an empty one would make
+    # the app report a model it cannot load instead of plainly "not found".
+    Write-Warning "  -WithML was passed but vendor\gliner-model does not exist. The ML runtime is installed but NO model is bundled, so AI detection will hard-fail if enabled. Build the pack first: uv run python scripts\fetch_gliner_model.py vendor\gliner-model"
+} elseif (Test-Path $glinerVendor) {
+    Write-Host "  Skipped vendor\gliner-model (no -WithML): the ML runtime is not in this bundle, so the model could not be loaded anyway. Re-run with -WithML to ship AI detection."
 } else {
     New-Item -ItemType Directory -Force -Path $glinerTarget | Out-Null
     @"

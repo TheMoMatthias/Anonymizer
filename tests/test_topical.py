@@ -258,3 +258,30 @@ def test_settings_topical_section_renders(base_config):
 
         with Client(_p):
             settings_page._topical_section(base_config, [])
+
+
+def test_english_headers_offer_a_whole_column_policy(tmp_path, analyzer, base_config):
+    """MEASURED GAP (2026-07-26 audit): the topical header_terms were heavily
+    German-weighted, so an ENGLISH workbook -- columns headed "Department",
+    "Project", "Supplier", "Description" -- triggered no header-to-category
+    detection at all, while its German twin did. The tool is specified for a bank
+    handling both languages, and a whole-column policy is the fastest way to cover
+    a column that is sensitive by TOPIC rather than by a detectable entity."""
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.title = "Sheet1"
+    ws.append(["Department", "Project", "Supplier", "Description"])
+    ws.append(["Group Risk", "Northstar", "Acme Systems Ltd",
+               "Quarterly review of the migration backlog."])
+    p = tmp_path / "english_topical.xlsx"
+    wb.save(p)
+
+    result = scan_document(p, analyzer, base_config)
+    headers = {c.header for c in (result.columns or [])}
+    assert {"Department", "Project", "Supplier", "Description"} <= headers, (
+        f"English topical columns were not surfaced for a column policy: {headers}"
+    )
+    topical = {g.entity_type for g in result.all_actionable()}
+    assert topical & {"PROJECT", "LICENSEE", "DESCRIPTION"}, (
+        f"no English topical category was detected at all: {topical}"
+    )
