@@ -823,7 +823,17 @@ def build_scan_result(findings: list[Finding], units: list[TextUnit], config: di
         # surfaced, still defaulted to anonymize) while putting a human in front
         # of every irreversible act. Anchored Art. 9 recognizers are untouched:
         # they demanded a literal label like "Diagnose:" before matching.
-        if g.is_ai_detected and taxonomy.is_special_category(g.entity_type) and g.tier == taxonomy.TIER_HIGH:
+        # ...and the same protection for a bare NER guess, for the same reason.
+        # Measured: spaCy's English model claims "The Great Depression" as NRP,
+        # which is a special category and therefore a ONE-WAY action -- an
+        # auto-accepted guess there destroys ordinary business prose with no way
+        # back. Both the model and the zero-shot pass are opinions, not evidence;
+        # an ANCHORED Art. 9 recognizer that demanded a literal "Diagnose:" is
+        # evidence and keeps whatever tier it earns. Costs no recall: the finding
+        # is still surfaced and still defaults to anonymize, it just cannot apply
+        # itself without a human looking at it.
+        unproven = g.is_ai_detected or g.is_ner_guess
+        if unproven and taxonomy.is_special_category(g.entity_type) and g.tier == taxonomy.TIER_HIGH:
             g.tier = taxonomy.TIER_MEDIUM
 
     # Corroboration-only: drop bare ORG/LOCATION/MISC NER guesses (nothing but a

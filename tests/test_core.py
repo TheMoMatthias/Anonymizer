@@ -349,3 +349,28 @@ def test_honorific_herrn_dative_is_anchored(analyzer, base_config):
     cfg = {**base_config, "languages": ["de"]}
     typed = {(f.entity_type, f.value) for f in detect_unit(analyzer, TextUnit("u1", "Herrn Klaus Mueller"), cfg)}
     assert any(et == "PERSON" and "Mueller" in v for et, v in typed), typed
+
+
+def test_bare_ner_special_category_is_never_auto_accepted():
+    """An Art.9 finding is ONE-WAY, so an auto-accepted GUESS destroys ordinary
+    prose with no way back. Measured: spaCy's English model claims "The Great
+    Depression" as NRP -- a special category. Both a bare NER guess and a zero-shot
+    hit are opinions; an ANCHORED recognizer that demanded a literal "Diagnose:" is
+    evidence and keeps whatever tier it earns. Costs no recall: the finding is
+    still surfaced and still defaults to anonymize, it just cannot apply itself
+    without a human looking at it."""
+    from anonymizer.core import build_scan_result
+    from anonymizer.models import TextUnit as TU
+
+    cfg = {"entities": {"NRP": {"default_action": "anonymize"}}, "tiers": {"high": 0.8, "medium": 0.5}}
+    units = [TU("u1", "x")]
+
+    guess = Finding("NRP", "The Great Depression", 0.99, "ctx", "u1", 0, 20, source="SpacyRecognizer")
+    g = next(iter(build_scan_result([guess], units, cfg).all_actionable()))
+    assert g.is_ner_guess is True
+    assert g.tier != "high", "a bare NER guess must not auto-apply a one-way Art.9 redaction"
+    assert g.action == "anonymize", "demoting the tier must not weaken the action"
+
+    anchored = Finding("NRP", "tuerkisch", 0.86, "ctx", "u1", 0, 9, source="PatternRecognizer")
+    a = next(iter(build_scan_result([anchored], units, cfg).all_actionable()))
+    assert a.tier == "high", "an anchored Art.9 hit must keep the tier its score earns"

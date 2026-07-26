@@ -633,11 +633,46 @@ def _sheet_languages(wb, config) -> dict[str, str]:
     return out
 
 
-def _cfg_for_sheet(config: dict, sheet_langs: dict[str, str], sheet: str | None) -> dict:
-    """The config to detect a given sheet's cells with. Unknown/None sheet (defined
-    names, auxiliary parts) keeps the document-level config."""
-    lang = sheet_langs.get(sheet or "")
-    if lang is None or config.get("languages") == [lang]:
+# A cell needs at least this many characters before its own text is a better
+# language signal than the sheet it sits on. Below it, a value ("Saldo", "Klaus
+# Mueller", "EUR 4,2 Mio.") has no language at all and the sheet must decide.
+_TEXT_LANG_MIN_CHARS = 40
+
+
+@functools.lru_cache(maxsize=8192)
+def _text_language(text: str, fallback: str, supported: tuple[str, ...]) -> str:
+    """The language of ONE cell, when the cell is long enough to have one.
+
+    Sheet-level routing is right for tables but wrong for the sheet that is a pile
+    of PROSE in both languages -- a strategy or minutes sheet where German and
+    English paragraphs sit in the same column. Measured: routing such a sheet to
+    English (correctly, most of it is) then ran the ENGLISH spaCy model over its
+    German sentences and produced exactly the noise per-document narrowing exists
+    to prevent -- "Konditionen", "Saldo" and "Zum Stichtag" all claimed as PERSON.
+
+    A long free-text cell carries its own signal, so it decides for itself. This
+    RAISES recall rather than trading it: each paragraph is scanned by the language
+    whose recognizers actually apply to it. Pure function of the text, so scan and
+    apply agree and parity holds; lru_cached because a spreadsheet repeats text.
+
+    Confidence IS required here, unlike the sheet-level routing which deliberately
+    drops it. The two cases differ: a sheet aggregates hundreds of cells and is
+    never "confident" while still being reliably directional, whereas ONE sentence
+    that the detector is unsure about is a coin flip. Measured at this length --
+    every confident verdict was correct ("Im Anhang 2 sind die Konditionen
+    beschrieben." -> de, "Race conditions in the settlement engine were fixed."
+    -> en) while the unconfident ones included a plainly wrong one ("Credit Union:
+    Nationwide Building Society" -> de). An unsure cell defers to its sheet.
+    """
+    if len(text) < _TEXT_LANG_MIN_CHARS:
+        return fallback
+    lang, confident = language.detect_dominant(text)
+    return lang if (confident and lang in supported) else fallback
+
+
+def _cfg_for_lang(config: dict, lang: str) -> dict:
+    """The config to detect with, narrowed to one language."""
+    if config.get("languages") == [lang]:
         return config
     return {**config, "languages": [lang]}
 
@@ -647,6 +682,7 @@ def scan(path: Path, analyzer, config) -> list:
     findings = []
     sheet_langs = _sheet_languages(wb, config)
     doc_lang = (config.get("languages") or list(DEFAULT_LANGUAGES))[0]
+    supported = tuple(sorted(set(config.get("languages") or ()) | set(DEFAULT_LANGUAGES)))
     # A "database" sheet repeats the same value thousands of times (a status, a
     # division, a city), and detection (one spaCy NER pass per cell) is the entire
     # cost. Memoize by (header, cell-text) for this scan: identical cells detect
@@ -660,15 +696,16 @@ def scan(path: Path, analyzer, config) -> list:
     artifacts_by_key = _precompute_cell_artifacts(wb, analyzer, config)
 
     def detect(text, header, key, sheet=None):
-        lang = sheet_langs.get(sheet or "", doc_lang)
+        lang = _text_language(text, sheet_langs.get(sheet or "", doc_lang), supported)
         base = cache.get((lang, header, text))
         if base is None:
             # Precomputed artifacts are tied to the DOCUMENT language, so they are
-            # only reusable for sheets that share it; elsewhere detect_unit does its
-            # own NLP pass in the right language rather than reuse a mismatched one.
+            # only reusable where that is the language actually being used;
+            # elsewhere detect_unit does its own NLP pass in the right language
+            # rather than reuse a mismatched tokenization.
             arts = artifacts_by_key.get((header, text)) if lang == doc_lang else None
             base = _analyze_cell_text(
-                text, header, analyzer, _cfg_for_sheet(config, sheet_langs, sheet), nlp_artifacts=arts
+                text, header, analyzer, _cfg_for_lang(config, lang), nlp_artifacts=arts
             )
             cache[(lang, header, text)] = base
         return [replace(f, unit_id=key) for f in base]
@@ -884,14 +921,15 @@ def apply(path: Path, out_path: Path, decisions: dict, analyzer, config, mapping
     artifacts_by_key = _precompute_cell_artifacts(wb, analyzer, config)
     sheet_langs = _sheet_languages(wb, config)
     doc_lang = (config.get("languages") or list(DEFAULT_LANGUAGES))[0]
+    supported = tuple(sorted(set(config.get("languages") or ()) | set(DEFAULT_LANGUAGES)))
 
     def redact(text: str, header: str | None, sheet: str | None = None) -> str:
-        lang = sheet_langs.get(sheet or "", doc_lang)
+        lang = _text_language(text, sheet_langs.get(sheet or "", doc_lang), supported)
         out = redact_cache.get((lang, header, text))
         if out is None:
             arts = artifacts_by_key.get((header, text)) if lang == doc_lang else None
             out = _apply_findings_to_text(
-                text, header, analyzer, _cfg_for_sheet(config, sheet_langs, sheet),
+                text, header, analyzer, _cfg_for_lang(config, lang),
                 decisions, mapping_store, nlp_artifacts=arts,
             )
             redact_cache[(lang, header, text)] = out

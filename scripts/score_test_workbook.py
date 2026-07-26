@@ -132,7 +132,20 @@ def main(d: Path) -> int:
     print("PHASE 2 -- what does detection actually find?")
     print("=" * 78)
     cfg = yaml.safe_load(DEFAULT_CONFIG_PATH.read_text(encoding="utf-8"))
-    analyzer = build_analyzer(cfg)
+    backend = None
+    if "--gliner" in sys.argv:
+        # Same measurement, with the offline ML second pass on. This is what
+        # answers "does GLiNER actually earn its place?" on a scored corpus rather
+        # than on impressions.
+        import os
+
+        os.environ.setdefault("HF_HUB_OFFLINE", "1")
+        from anonymizer.gliner_recognizer import load_gliner_backend
+
+        cfg["gliner"] = {**cfg["gliner"], "enabled": True}
+        backend = load_gliner_backend(cfg["gliner"])
+        print("  [GLiNER ENABLED]")
+    analyzer = build_analyzer(cfg, gliner_backend=backend)
 
     t0 = time.perf_counter()
     result = scan_document(xlsx, analyzer, cfg)
@@ -184,11 +197,27 @@ def main(d: Path) -> int:
         for m in misses:
             print(f"    {m['sheet']}!{m['cell']:<14} {m['value'][:46]!r:<50} [{m['why']}]")
 
-    fps = [d for d in decoys if covered(d["value"]) is not None]
+    # A decoy "fails" only on a HARMFUL claim. Detecting the real date inside
+    # "Zum Stichtag 31.12.2025 betrug der Saldo null." is correct behaviour -- a
+    # date is a date, it lands in the low-sensitivity dates class, and profiles
+    # routinely skip it. Counting that as a false positive would penalise the tool
+    # for being right and would quietly pad the FP number. What must never happen
+    # to ordinary business prose is being claimed as a person, a special category,
+    # an identifier or contact data -- those are what destroy meaning.
+    harmless = {"dates_other"}
+    fps = []
+    benign = []
+    for dec in decoys:  # not `d` -- that is the fixture directory, in scope here
+        g = covered(dec["value"])
+        if g is None:
+            continue
+        (benign if taxonomy.data_class_for(g.entity_type).key in harmless else fps).append((dec, g))
     print(f"\n  FALSE POSITIVES on decoys: {len(fps)}/{len(decoys)}")
-    for f in fps:
-        g = covered(f["value"])
+    for f, g in fps:
         print(f"    {f['sheet']}!{f['cell']:<6} {f['value'][:44]!r:<48} -> {g.entity_type} [{f['why']}]")
+    for f, g in benign:
+        print(f"    (not counted) {f['sheet']}!{f['cell']} -> {g.entity_type} on {f['value'][:38]!r} "
+              f"-- low-sensitivity class, correct detection")
 
     print("\n" + "=" * 78)
     print("PHASE 3 -- scan/apply round trip + fail-loud verify")
