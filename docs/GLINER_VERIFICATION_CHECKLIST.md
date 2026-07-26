@@ -90,12 +90,19 @@ Run it **twice**, once with GLiNER off and once on:
       residual. Determinism is verified (step 3); the planned **memo replay** (apply
       reuses scan's GLiNER output rather than re-inferring) makes this structural.
 
-## 7. (Optional) spaCy lg→sm downgrade
-- [ ] Switch `engine.SPACY_MODELS` to the `sm` models, update the wheel URLs,
-      `uv sync`, then run `pytest tests/test_precision.py tests/test_language.py`.
-      **If the German-noun precision tests regress → revert to `lg`** and accept
-      the size cost. `_is_pos_implausible` / `_is_german_nominalization` read
-      spaCy POS directly, so this is load-bearing.
+## ❌ 7. spaCy lg→sm downgrade — TRIED 2026-07-26, REVERTED
+- [x] Installed both `sm` models, switched `engine.SPACY_MODELS`, ran the suite.
+- [x] **Result: reverted to `lg`/`md`.** `sm` broke
+      `test_docx_field_code_hyperlink_is_surfaced_and_redacted` — a Word mail-merge
+      FIELD CODE document could no longer be saved **at all**: the fail-loud verify
+      found a removed value surviving verbatim and blocked the write. Mail-merge
+      templates are a common bank case, so "no output" is not an acceptable trade
+      for ~500 MB.
+- [x] **The recorded gate for this trial was too narrow.** `test_precision.py` +
+      `test_language.py` both went **green** on `sm` — they watch precision and
+      never watch recall. Any future model-swap trial must run the FULL suite.
+- Not worth retrying: the bundle-size pressure that motivated it largely
+  evaporated when torch turned out to be 122 MB rather than gigabytes.
 
 ## 8. Build the bundle + the deferred items
 - [ ] `./scripts/build_offline_bundle.ps1 -WithML` — it copies

@@ -298,20 +298,61 @@ source, which is the intended reading of the grill decision.
   makes the pseudonym token less readable.
   Both are threshold/`min_score` calibration, which the real-workbook run drives.
 
+### Stage 3 — complete ✅ (442 tests green)
+
+- `a84ef58` **AI-detected as a third provenance state + Art. 9 ML hits are
+  review-only.** `is_ai_detected` on GroupedFinding (set when ANY occurrence came
+  from the ML pass). It was already mislabelling things: the stat bar counted ML
+  hits inside "likely PII", and the Medium tier's two-way split filed them under
+  "pattern-backed" — a zero-shot judgement presented as rule-anchored, in the one
+  place the reviewer decides how far to trust a band. Now a tile (hidden when no ML
+  ran), a three-way band split, and a per-row chip. Art. 9 labels added to the
+  GLiNER map, but an ML-sourced Art. 9 finding is forced out of auto-accept however
+  high it scored — the action is irreversible and zero-shot confidence is not
+  calibrated evidence. Anchored Art. 9 keeps whatever tier it earns.
+- `3cfbc21` **GLiNER labels are user-extendable**, with provenance so a schema bump
+  cannot eat them: shipped+untouched re-syncs, shipped+edited is preserved,
+  user-added always survives. Recorded on FIRST RUN, not only at bump time.
+- `dfbd61c` **Detection provenance.** A value-free line (spaCy models, GLiNER pack +
+  cutoffs, profile, sensitivity, tiers, corroboration_only) into the per-document
+  `_report.json` and — without the filename — the audit log. Derived from the
+  NARROWED cfg, so it describes the stack that actually ran.
+- `47e0745` **Profiles own the ML cutoffs.** The five profiles carry min_score /
+  confidence_override; raw knobs moved behind a Settings "Advanced" expander. A
+  profile may REQUEST ML but never turns it off, and the request is honoured only
+  when a pack is installed — so a dropdown can never create the
+  enabled-but-missing state that hard-fails every scan. Because profiles now change
+  DETECTION, switching one shows a re-scan notice instead of leaving results that
+  quietly disagree with the settings above them.
+- **spaCy lg→sm: TRIED AND REVERTED.** See the checklist. The headline is that the
+  recorded gate (`test_precision.py` + `test_language.py`) went **green** while the
+  full suite caught a document that could no longer be saved at all. The gate
+  watched precision and never watched recall. Any future model swap runs the full
+  suite.
+
 ### Where this run stopped
 
-**Stages 1 and 2 are complete** (`75fd893`, `fc42a69`, `3748c3d`, `55b24ee`);
-418 tests green, tree clean, nothing pushed. Checklist steps 0–3 done, step 4
-done except the in-app click-through.
+**All three stages are complete.** 442 tests green, tree clean, nothing pushed.
+Checklist steps 0–3 and 7 done; step 4 done except the in-app click-through.
 
-**Stage 3 is untouched** and is the natural next session: the "AI-detected" third
-state (tile + band + chip), profile-owned thresholds with the Advanced expander
-and the re-scan prompt, review-only Art. 9 ML labels, user-extendable labels,
-detection provenance in the audit log, and the spaCy `lg→sm` trial. All of it is
-specified in the DECISIONS table above and none of it is blocked.
+**Remaining, and both are Moe's:**
+1. **Checklist step 5** — the recall / FP ≤ 445 / scan-time measurement on the real
+   reference workbook. This gates step 9 (flipping `gliner.enabled` to true), and
+   it needs his document, which never enters an agent session.
+2. **Checklist step 4's click-through** — enable the toggle in the running app,
+   confirm the status line, and pull the model folder to see the hard-fail error.
+   Automatable in principle, but the point of it is that a human sees the message.
 
-**Blocked on Moe only:** checklist step 5 — the recall/FP/scan-time measurement on
-the real reference workbook, which gates flipping `gliner.enabled` to true.
+**Deferred, unchanged:** PII-tuned GLiNER variants (trigger: weak recall on the
+real workbook), GLiNER2 + the cell-level DESCRIPTION flag, embedding fuzzy
+gazetteer, mapping-store provenance stamping, and the int8 ONNX export (only worth
+it if bundle size actually bites — it no longer obviously does).
+
+**One thing worth deciding later:** a user can ADD a GLiNER label but not REMOVE a
+shipped one. The measured `DEPARTMENT 'Abteilung' 0.51` false positive is
+re-pointable (that is what the provenance work bought) but not deletable. Left
+alone deliberately rather than invented on the spot — resurface it if the real
+workbook shows shipped labels doing more harm than good.
 
 **Environment note:** the project `.venv` now has the ML stack installed
 (`uv sync --extra ml --extra dev`). A bare `uv sync` prunes BOTH extras and

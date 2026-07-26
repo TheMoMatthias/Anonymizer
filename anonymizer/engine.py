@@ -11,6 +11,13 @@ from presidio_analyzer.predefined_recognizers import (
     PhoneRecognizer,
 )
 
+# MEASURED 2026-07-26, do not "optimize" this to the _sm models without redoing
+# the measurement. Downgrading de->sm / en->sm saves ~500 MB of bundle but broke
+# tests/test_fail_loud.py::test_docx_field_code_hyperlink_is_surfaced_and_redacted:
+# a Word mail-merge FIELD CODE document could no longer be saved AT ALL -- the
+# fail-loud verify found a removed value surviving verbatim and blocked the write.
+# Note the recorded gate for this trial (test_precision.py + test_language.py) went
+# GREEN: it watched precision and never watched recall, so the gate was too narrow.
 SPACY_MODELS = {
     "de": "de_core_news_lg",
     "en": "en_core_web_md",
