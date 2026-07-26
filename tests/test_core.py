@@ -42,6 +42,70 @@ def test_scan_apply_parity_no_residual(sample_docx, analyzer, base_config, mappi
     assert verify_output(out_path, decisions, analyzer, base_config) == []
 
 
+# --- detection provenance -----------------------------------------------------
+#
+# After GLiNER, the same document legitimately redacts differently depending on
+# which detection stack ran. Nothing in the output recorded that, so "why was this
+# redacted and that not?" -- asked months later -- had no answer.
+
+
+def test_provenance_records_the_stack_that_ran(base_config):
+    from anonymizer.pipeline import detection_provenance
+
+    line = detection_provenance({**base_config, "languages": ["de"]})
+    assert "de_core_news_lg" in line, "the POS backbone must be identified"
+    assert "gliner=off" in line, "ML on/off is the single biggest behavioural switch"
+    assert "tiers=" in line and "profile=" in line and "corroboration_only=" in line
+
+
+def test_provenance_names_the_gliner_pack_and_its_cutoffs(base_config, monkeypatch, tmp_path):
+    from anonymizer.pipeline import detection_provenance
+
+    monkeypatch.setenv("ANONYMIZER_GLINER_MODEL", str(tmp_path / "gliner-model"))
+    cfg = {**base_config, "languages": ["de"]}
+    cfg["gliner"] = {**cfg["gliner"], "enabled": True, "min_score": 0.42}
+    line = detection_provenance(cfg)
+    # The pack FOLDER, not a version string: the pack is user-swappable by design,
+    # so the folder is the only honest identifier of what actually ran.
+    assert "gliner=gliner-model" in line
+    assert "gliner_min_score=0.42" in line
+
+
+def test_provenance_carries_no_values_and_never_breaks_a_save(base_config):
+    """It must be safe to keep and to hand to someone who may not see the
+    documents -- and a provenance failure must never cost the operator an output."""
+    from anonymizer.pipeline import detection_provenance
+
+    cfg = {**base_config, "languages": ["de"]}
+    cfg["gliner"] = {**cfg["gliner"], "enabled": True, "model_path": None}
+    line = detection_provenance(cfg)  # must not raise on an unresolvable path
+    assert "gliner=" in line
+    assert "\n" not in line and "\t" not in line, "one audit line, or the log format breaks"
+
+
+def test_report_records_the_detection_stack(sample_docx, analyzer, base_config, mapping_db_path, monkeypatch, tmp_path):
+    """The per-document copy lives in the _report.json beside the output, which is
+    already scoped to that document -- unlike the audit log, which must not name
+    files (a source document is routinely named after the person it is about)."""
+    import json
+
+    monkeypatch.setenv("LOCALAPPDATA", str(tmp_path))
+    grouped = scan_document(sample_docx, analyzer, base_config).all_actionable()
+    for g in grouped:
+        g.action = "anonymize"
+    out_path, report_path = apply_document(sample_docx, grouped, analyzer, base_config, mapping_db_path)
+
+    report = json.loads(report_path.read_text(encoding="utf-8"))
+    assert "de_core_news_lg" in report["detection"]
+
+    from anonymizer import audit as audit_mod
+
+    lines = audit_mod.read_recent(10)
+    applied = [ln for ln in lines if "\tapply\t" in ln]
+    assert applied, f"the apply was not audited: {lines}"
+    assert sample_docx.stem not in applied[0], "the audit log must not record a document filename"
+
+
 def test_image_pdf_is_refused_when_ocr_unavailable(tmp_path, analyzer, base_config, monkeypatch):
     from anonymizer import ocr as ocr_mod
 

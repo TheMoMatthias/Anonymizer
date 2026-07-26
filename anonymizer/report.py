@@ -73,8 +73,16 @@ def write_report(
     grouped: list[GroupedFinding],
     config: dict | None = None,
     verified: bool = False,
+    provenance: str | None = None,
 ) -> Path:
     report_path = out_doc_path.with_name(out_doc_path.stem + "_report.json")
     data = {"source_document": out_doc_path.name, **build_report(grouped, config, verified)}
+    if provenance:
+        # WHAT produced this document: models, profile, effective cutoffs. After
+        # GLiNER the same document legitimately redacts differently depending on
+        # which detection stack ran, and nothing else in the output records that.
+        # Passed in rather than derived here so report.py stays free of engine and
+        # pipeline imports. Configuration only -- no values, same as the rest.
+        data["detection"] = provenance
     report_path.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
     return report_path

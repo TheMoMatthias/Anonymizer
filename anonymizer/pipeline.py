@@ -10,11 +10,13 @@ from pathlib import Path
 
 from lxml import etree
 
+from . import audit as audit_mod
 from . import core
 from . import language
 from . import ocr as ocr_mod
 from . import xmlsafe
-from .engine import DEFAULT_LANGUAGES
+from .engine import SPACY_MODELS, DEFAULT_LANGUAGES
+from .gliner_recognizer import resolve_model_path
 from .actions import decisions_lookup
 from .formats import docx_handler, legacy, pdf_handler, pptx_handler, xlsx_handler
 from .mapping import MappingStore
@@ -801,8 +803,55 @@ def apply_document(
             _cleanup(work_path)
         raise ProcessingError(f"Could not anonymize '{path.name}': {exc}") from exc
 
-    report_path = write_report(out_path, grouped, config=config, verified=True)
+    # `cfg`, not `config`: the provenance must describe the stack that ACTUALLY
+    # ran -- language-narrowed, with propagation and the topical gazetteer derived.
+    provenance = detection_provenance(cfg)
+    # No filename in the audit line. audit.py promises the log holds no original
+    # values, and a source document is routinely named after the person it is
+    # about ("Kreditakte Hans Mueller.xlsx"). The per-document copy lives in the
+    # _report.json next to the output, which is already scoped to that document.
+    audit_mod.log_event("apply", provenance)
+    report_path = write_report(out_path, grouped, config=config, verified=True, provenance=provenance)
     return out_path, report_path
+
+
+def detection_provenance(cfg: dict) -> str:
+    """A compact, value-free description of WHAT produced a redaction: models,
+    versions, profile and the effective cutoffs.
+
+    After GLiNER, a redaction decision depends on which detection stack ran -- the
+    same document scanned with ML on and ML off legitimately produces different
+    output. Nothing in the written file records that, so "why was this redacted
+    and that not?", asked months later by an auditor or by the colleague who
+    produced it, had no answer at all.
+
+    Deliberately carries NO values, no filenames and no counts of anything
+    sensitive -- only configuration. That is what keeps the audit log safe to
+    retain and to hand to someone who is not allowed to see the documents."""
+    langs = list(cfg.get("languages") or DEFAULT_LANGUAGES)
+    parts = [f"spacy={'+'.join(SPACY_MODELS.get(lang, lang) for lang in langs)}"]
+
+    gl = cfg.get("gliner") or {}
+    if gl.get("enabled"):
+        # The model is identified by the pack FOLDER, not by a version string --
+        # the model pack is user-swappable by design, so the folder name is the
+        # only honest identifier of what actually ran.
+        try:
+            pack = resolve_model_path(gl).name
+        except Exception:  # noqa: BLE001 -- provenance must never break a save
+            pack = "?"
+        parts.append(f"gliner={pack}")
+        parts.append(f"gliner_min_score={gl.get('min_score')}")
+        parts.append(f"gliner_override={gl.get('confidence_override')}")
+    else:
+        parts.append("gliner=off")
+
+    tiers = cfg.get("tiers") or {}
+    parts.append(f"profile={cfg.get('profile') or 'Balanced (default)'}")
+    parts.append(f"sensitivity={cfg.get('sensitivity', 0)}")
+    parts.append(f"tiers=high:{tiers.get('high')}/medium:{tiers.get('medium')}")
+    parts.append(f"corroboration_only={bool(cfg.get('corroboration_only', True))}")
+    return " ".join(parts)
 
 
 def _cleanup(work_path: Path) -> None:
