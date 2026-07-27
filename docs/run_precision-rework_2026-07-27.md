@@ -221,6 +221,49 @@ alone. The v9 schema resync preserves user-owned lists and the `enabled` toggle.
 Anything not listed above — in particular no changes to the mapping DB, the
 encrypted lists, the OCR path, or the review UI beyond the demoted band.
 
+## FINDING (2026-07-27, blocking the DONE-WHEN gate): the audit workbook over-reports recall
+
+Discovered while extending the fixture. `scripts/score_test_workbook.py:165` counts a
+planted secret as found when the detected value is a **substring** of it:
+
+```python
+for fv, g in found_vals.items():
+    if v in fv or fv in v:     # <-- the `fv in v` direction is unsound
+        return g
+```
+
+The `v in fv` direction is legitimate (a wider span, e.g. an address block, really
+does cover the planted value). The `fv in v` direction is not: a SHORTER detection
+does not cover a longer secret, and it does not even have to come from the same
+sheet.
+
+Measured consequence, and it is not hypothetical:
+
+* `muslimisch` is planted twice as `special_category` in `Personal Vertraulich`
+  (D4, D7) and is **not detected at all** in a full-document scan. Neither are
+  `roemisch-katholisch`, `evangelisch` or `konfessionslos`. The only DE_RELIGION
+  values the scan finds are `Muslim`, `Protestant`, `Roman Catholic`, `Buddhist` --
+  all from the ENGLISH sheet.
+* They are nevertheless scored as caught, because the English `Muslim` is a
+  substring of `muslimisch`.
+* So **`special_category 34/34 = 100%` is false, and the `204/206` total this
+  run-file recorded as the DONE-WHEN gate is over-reported.** Confirmed identical on
+  the pre-existing fixture, so this is long-standing and not introduced here.
+
+`_literal_residual` is what exposed it: the removed value `Muslim` survives
+verbatim in the output because it sits inside an undetected `muslimisch`, and apply
+correctly refuses to write the file. That is the fail-loud contract working exactly
+as designed -- the scan-side recall number was the thing that was wrong.
+
+Not fixed here, deliberately: tightening `covered()` lowers every recorded recall
+number in the repo, and re-baselining the gate mid-run is the user's call, not a
+measurement default. Recommendation: match whole-token and keep only the `v in fv`
+direction, then re-baseline. NOTE: in isolation with `languages: ["de"]`,
+`Konfession: muslimisch` IS detected as DE_RELIGION -- so the German Art.9 miss is
+specific to the full-document path, and the cause is not yet identified. Per-sheet
+routing is correct (`Personal Vertraulich` -> `de`) and per-text routing of
+`muslimisch` -> `de`, so neither is the explanation. Open.
+
 ## PROGRESS LOG
 
 - 2026-07-27 — Audited the export, reproduced every false positive's gate

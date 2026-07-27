@@ -9,8 +9,17 @@ must survive untouched. `scripts/score_test_workbook.py` reads it back and repor
 recall and false-positive rates per data class and per sheet.
 
 Everything here is FICTIONAL -- invented names, invented projects, invented
-counterparties, invented figures. Nothing derives from a real customer and no real
-file is read.
+counterparties, invented figures, invented hostnames. Nothing derives from a real
+customer and no real file is read.
+
+That is a hard rule, not a nicety: this fixture is the measurement instrument, and
+an instrument built out of real customer data cannot live in a git repo, be copied
+to a build machine, or be attached to a bug report. Where a real file has been
+studied (the innovation-pipeline workbook audited on 2026-07-27, see
+docs/run_precision-rework_2026-07-27.md), only its STRUCTURE was reproduced --
+sheet layout, column names, value style, language mix, length distributions. Every
+value was written from scratch. Nothing was copied, and nothing was "anonymized by
+shuffling", which would have left the real strings in the repo permanently.
 
 DESIGN: realistic first, but deliberately containing the shapes that break
 detection. Cell-level lists are the easy case; the hard case is PROSE, so most of
@@ -43,6 +52,7 @@ from pathlib import Path
 
 import openpyxl
 from openpyxl.comments import Comment
+from openpyxl.worksheet.datavalidation import DataValidation
 
 SEED = 20260726
 
@@ -73,6 +83,56 @@ CONFESSIONS = ["roemisch-katholisch", "evangelisch", "konfessionslos", "muslimis
 UNIONS = ["ver.di", "IG Metall", "Marburger Bund", "Vereinigung Cockpit"]
 COSTS = ["EUR 4,2 Mio.", "1.250.000 EUR", "TEUR 850", "EUR 2.4m", "USD 3,100,000",
          "EUR 640.000", "TEUR 1.900"]
+
+# --- the "database workbook" archetype (sheets 12-16) -------------------------
+# A second, structurally different shape from the bank-letter sheets above: an
+# internal innovation-pipeline tracker, one wide DB_* sheet per phase, with
+# `_`-joined schema-style headers. Modelled on the STRUCTURE of a real internal
+# workbook whose export was audited on 2026-07-27; every VALUE here is invented.
+# Nothing is copied, shuffled or derived from that file -- see the module docstring.
+#
+# This archetype is what actually broke detection, and in ways the sheets above
+# cannot reach:
+#   * people in ENGLISH-headed columns (Owner / MDX_Lead / User), where the German
+#     header stems never matched and bare spaCy misses a lone first name in a cell
+#   * internal LINKS carrying a hostname plus a document id
+#   * enumerated dropdown values repeated hundreds of times, which dominated the
+#     false positives -- declared as real Excel data validations so the workbook's
+#     own controlled vocabulary is readable
+#   * German compound nouns in free text, the residual noise a POS gate cannot reject
+
+# Bare first names, as an MDX_Lead / MDX_Proxy column actually holds them. A lone
+# capitalized first name in a cell is the single hardest people shape: no
+# honorific, no surname, no sentence.
+LEADS = ["Siggi", "Cordula", "Mirijam", "Hendrik", "Marco", "Sergii", "Anneke", "Jorick"]
+# Invented innovation-pipeline project titles (German/English mix, as such a
+# workbook really is).
+INNO_TITLES = [
+    "Automatisierte Belegpruefung", "Agentischer RFP-Assistent",
+    "Knowledge Graph fuer Fondsdaten", "Self-Service Reporting Portal",
+    "Digitale Depoteroeffnung", "Sanctions Screening Copilot",
+    "Stammdaten-Harmonisierung", "Meeting Minutes Generator",
+]
+# Fictional corporate hosts. `beispielbank.de` is invented ("example bank"); the
+# link SHAPE is what matters -- a hostname that names an internal system plus a
+# path that is a direct document pointer.
+INNO_HOSTS = ["confluence.beispielbank.de", "dms.beispielbank.de", "prozesse.beispielbank.de"]
+# Controlled vocabulary: the values a dropdown column repeats on every row. These
+# are DECOYS -- a scale label is never personal data, however often a name model
+# mistakes one for a surname.
+SCALE_3PKT = ["0 - Kein Beitrag", "1 - Gering / Kaum", "2 - Mittel / Bedingt", "3 - Hoch / Signifikant"]
+STATUS_LIST = ["Ungeprueft", "In Pruefung", "Abgeschlossen", "Pausiert", "Ausstehend", "Geklaert"]
+RELEVANZ_LIST = ["Idee", "Validierung", "Konzeption", "Rollout"]
+PERSONA_ROLES = ["Hauptzielgruppe", "Nebenzielgruppe", "Nur indirekt betroffen"]
+# German compound nouns and business jargon that a German NER model routinely tags
+# as a PERSON at its flat score. Capitalized (German capitalizes every noun) and
+# noun-class, so neither the case filter nor the POS filter can reject them --
+# which is precisely why they are planted as decoys rather than assumed harmless.
+JARGON_DE = [
+    "Datenfeeds", "Kernworkflow", "Portfoliobeitrag", "Abrechnungsprozess",
+    "Zielnutzer", "Marktdatengrundlage", "Content-Framework", "Datenlayer",
+    "Standardwechsel", "Anbindung", "Bearbeitungszeit", "Folgeaufwand",
+]
 
 
 def main(out_dir: Path, seed: int = SEED) -> int:
@@ -302,6 +362,124 @@ def main(out_dir: Path, seed: int = SEED) -> int:
     secret(hidden_name, "A2", f"{h_fn} {h_ln}", "people", "name on a HIDDEN sheet")
     must_catch.append({"sheet": hidden_name, "cell": "<sheet title>", "value": f"{h_fn} {h_ln}",
                        "data_class": "people", "why": "sensitive SHEET NAME (xl/workbook.xml)"})
+
+    # ------------------------------------------------- 12. DB_0_Metadaten (people + links)
+    # English-headed people columns and internal links -- the two recall gaps the
+    # 2026-07-27 audit found. Owner/Einreicher/MDX_Lead/MDX_Proxy hold people; the
+    # three link columns hold a hostname plus a document pointer.
+    ws12 = wb.create_sheet("DB_0_Metadaten")
+    ws12.append(["Projekt_ID", "Titel", "Geschaeftsbereich", "Abteilung", "Einreicher", "Owner",
+                 "MDX_Lead", "MDX_Proxy", "Confluence_Link", "Prozess_URL", "Aktuelle_Phase"])
+    for i, title in enumerate(INNO_TITLES, start=2):
+        (of, ol), (ef, el_) = rng.sample(de_people, 2)
+        lead, proxy = rng.sample(LEADS, 2)
+        owner, einreicher = f"{of} {ol}", f"{ef} {el_}"
+        host = rng.choice(INNO_HOSTS)
+        conf = f"https://{host}/x/{rng.randint(10**6, 10**7)}"
+        purl = f"https://{rng.choice(INNO_HOSTS)}/apps/workflow.nsf/doc/{rng.randint(10**7, 10**8)}?open"
+        ws12.append([f"INNO-26-{i:03d}", title, rng.choice(DIVISIONS), rng.choice(DEPTS),
+                     einreicher, owner, lead, proxy, conf, purl, rng.choice(RELEVANZ_LIST)])
+        secret("DB_0_Metadaten", f"E{i}", einreicher, "people", "full name, ENGLISH-headed people column")
+        secret("DB_0_Metadaten", f"F{i}", owner, "people", "full name under 'Owner'")
+        secret("DB_0_Metadaten", f"G{i}", lead, "people", "BARE FIRST NAME alone in a cell")
+        secret("DB_0_Metadaten", f"H{i}", proxy, "people", "BARE FIRST NAME alone in a cell")
+        secret("DB_0_Metadaten", f"I{i}", conf, "bank_internal", "internal link: host + document id")
+        secret("DB_0_Metadaten", f"J{i}", purl, "bank_internal", "internal deep link with query string")
+
+    # ------------------------------------------------- 13. DB_Log (one name, many rows)
+    # An audit log: the SAME person in a `User` column on every row. On the reported
+    # workbook one name sat in such a column 318 times and left in the clear.
+    ws13 = wb.create_sheet("DB_Log")
+    ws13.append(["Zeitstempel", "Projekt_ID", "User", "Feld_Name", "Alter_Wert", "Neuer_Wert"])
+    log_fn, log_ln = de_people[4]
+    log_user = f"{log_fn} {log_ln}"
+    for i in range(2, 22):
+        ws13.append([f"2026-0{rng.randint(1,9)}-{rng.randint(10,28)} {rng.randint(8,17)}:{rng.randint(10,59)}",
+                     f"INNO-26-{rng.randint(2,9):03d}", log_user,
+                     decoy("DB_Log", f"D{i}", f"Beschreibung_{i}", "snake_case schema field id, not a name"),
+                     rng.choice(STATUS_LIST), rng.choice(STATUS_LIST)])
+        secret("DB_Log", f"C{i}", log_user, "people", "same person repeated down a 'User' column")
+
+    # ------------------------------------------------- 14. DB_Setup (controlled vocabulary)
+    # The dropdown source lists, declared as REAL Excel data validations so the
+    # workbook's own controlled vocabulary is machine-readable. Every value is a
+    # decoy: a scale label or a status is never personal data, and these dominated
+    # the measured false positives (9 such values were 79% of the noise).
+    ws14 = wb.create_sheet("DB_Setup")
+    ws14.append(["Liste_3Pkt_Skala", "Liste_Standard_Status", "Liste_Relevanz", "Persona_Rollen"])
+    for i, row in enumerate(
+        zip(SCALE_3PKT, STATUS_LIST, RELEVANZ_LIST + [""], PERSONA_ROLES + [""]), start=2
+    ):
+        ws14.append(list(row))
+        for col, val in zip("ABCD", row):
+            if val:
+                decoy("DB_Setup", f"{col}{i}", val, "controlled-vocabulary dropdown value, never a name")
+
+    # ------------------------------------------------- 15. DB_2_Concept (enum columns + jargon)
+    # Where the vocabulary is USED: the same handful of labels repeated on every row,
+    # which is what makes a repetition signal possible. `Einschaetzung` is
+    # deliberately a NEUTRAL header -- not a Kommentar/Beschreibung/Notiz column --
+    # so a decoy there is a true false positive rather than the wholesale
+    # summarization a description column is supposed to get (see the note at
+    # Kostenplanung above).
+    ws15 = wb.create_sheet("DB_2_Concept")
+    ws15.append(["Projekt_ID", "GB_Fit_Marke", "GB_Fit_Innovation", "Ownership_geklaert_Status",
+                 "Einschaetzung", "Zielmetrik"])
+    for i in range(2, 14):
+        marke, inno = rng.choice(SCALE_3PKT), rng.choice(SCALE_3PKT)
+        own = rng.choice(STATUS_LIST)
+        jargon = JARGON_DE[(i - 2) % len(JARGON_DE)]
+        ws15.append([f"INNO-26-{rng.randint(2,9):03d}", marke, inno, own,
+                     f"{jargon}: die Umsetzung erfolgt schrittweise.", f"Zielwert_{i}"])
+        decoy("DB_2_Concept", f"B{i}", marke, "3-point scale label repeated down a column")
+        decoy("DB_2_Concept", f"D{i}", own, "status value under an 'Ownership...' header")
+        decoy("DB_2_Concept", f"E{i}", jargon, "German compound noun / business jargon, not a person")
+    # Real data validations, pointing at the DB_Setup lists. This is the signal a
+    # precision pass can read INSTEAD of guessing: the workbook declares, in its own
+    # XML, that these columns may only hold those values.
+    for col, ref in (("B", "$A$2:$A$5"), ("C", "$A$2:$A$5"), ("D", "$B$2:$B$7")):
+        dv = DataValidation(type="list", formula1=f"DB_Setup!{ref}", allow_blank=True)
+        ws15.add_data_validation(dv)
+        dv.add(f"{col}2:{col}200")
+
+    # ------------------------------------------------- 16. DB_1_Ideation (prose + multi-value)
+    # Long German free text under a genuine Beschreibung column (so the whole cell is
+    # a description by design), with names planted inside it, plus a MULTI-VALUE cell
+    # written the way Excel writes one: parts joined by the U+001E record separator,
+    # which openpyxl hands back as a literal `_x001E_` escape.
+    ws16 = wb.create_sheet("DB_1_Ideation")
+    ws16.append(["Projekt_ID", "Beschreibung", "Kern_Problem_Pain", "Persona_1_Rolle"])
+    for i in range(2, 8):
+        (f1, l1), (f2, l2) = rng.sample(de_people, 2)
+        tool = rng.choice(TOOLS)
+        ws16.append([
+            f"INNO-26-{rng.randint(2,9):03d}",
+            f"Fachliche Begleitung durch {f1} {l1}; technische Bewertung durch Frau {f2} {l2}. "
+            f"Die Anbindung an {tool} ist Voraussetzung fuer den Piloten.",
+            f"Manuelle Nacharbeit bindet Kapazitaet; {l1} schaetzt den Folgeaufwand als hoch ein.",
+            rng.choice(PERSONA_ROLES),
+        ])
+        secret("DB_1_Ideation", f"B{i}", f"{f1} {l1}", "people", "name inside a description cell")
+        secret("DB_1_Ideation", f"B{i}", f"{f2} {l2}", "people", "second name in the same description")
+        secret("DB_1_Ideation", f"C{i}", l1, "people", "bare surname in a second free-text column")
+    # A multi-value cell whose parts are EMPTY: nothing but separators. Excel writes
+    # the separator as a literal `_x001E_` escape, whose x and E are word characters,
+    # so an emptiness guard written as `^[\W\d_]*$` cannot match it -- measured, 7
+    # entirely empty cells were flagged at the auto-accept tier because of this.
+    sep = "_x001E_"
+    r = ws16.max_row + 1
+    ws16.cell(row=r, column=1, value="INNO-26-099")
+    ws16.cell(row=r, column=2, value=sep * 4)
+    decoy("DB_1_Ideation", f"B{r}", sep * 4, "multi-value cell with only EMPTY parts -- no content at all")
+    # ...and one whose parts are real, with a name in the second part: the same escape
+    # previously fused onto the adjacent token and got the whole span rejected as a
+    # snake_case identifier, hiding the name entirely.
+    mv_fn, mv_ln = de_people[5]
+    r += 1
+    ws16.cell(row=r, column=1, value="INNO-26-098")
+    ws16.cell(row=r, column=2, value=f"Kein Beitrag{sep}Fachkontakt {mv_fn} {mv_ln}{sep}offen")
+    secret("DB_1_Ideation", f"B{r}", f"{mv_fn} {mv_ln}", "people",
+           "name fused to an Excel _x001E_ escape in a multi-value cell")
 
     # De-duplicate: the same value planted twice at the same cell adds nothing.
     seen = set()

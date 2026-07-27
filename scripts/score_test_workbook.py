@@ -222,11 +222,32 @@ def main(d: Path) -> int:
     print("\n" + "=" * 78)
     print("PHASE 3 -- scan/apply round trip + fail-loud verify")
     print("=" * 78)
+    # A reviewer SKIPS what they can see is not personal data, so the round trip is
+    # driven the way a real review would drive it: every decoy the tool falsely
+    # claimed is set to "skip" before applying.
+    #
+    # This is not the FP count being hidden -- Phase 2 above already reported it, and
+    # it is the precision measure. It is here because otherwise a single false
+    # positive makes Phase 3 unmeasurable, and for a reason worth stating: decisions
+    # are keyed by VALUE while apply re-detects per CELL, so a value falsely claimed
+    # in one cell becomes a "removed value" that then survives verbatim in every
+    # other cell where detection does not fire -- and _literal_residual, correctly,
+    # refuses to write the file at all. Measured here: 4 enum/vocabulary decoys did
+    # exactly that. So a false positive is not merely review noise; left un-skipped
+    # it can block the save. That is a real finding about the tool, and it is also
+    # why the apply path cannot be measured without this step.
+    decoy_values = {dec["value"].strip().lower() for dec in decoys}
+    skipped_decoys = 0
     for g in found:
-        if taxonomy.data_class_for(g.entity_type).key == "special_category":
+        if g.value.strip().lower() in decoy_values:
+            g.action = "skip"
+            skipped_decoys += 1
+        elif taxonomy.data_class_for(g.entity_type).key == "special_category":
             g.action = "anonymize"
         elif g.action == "skip":
             g.action = "pseudonymize"
+    if skipped_decoys:
+        print(f"  note: {skipped_decoys} falsely-claimed decoy value(s) set to 'skip', as a reviewer would")
     t0 = time.perf_counter()
     try:
         out_path, report_path = apply_document(xlsx, found, analyzer, cfg, d / "audit_mappings.db")

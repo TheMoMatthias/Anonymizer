@@ -72,11 +72,19 @@ _NAME_HEADER_TERMS = (
 # every name under Owner/Einreicher/MDX_Lead/MDX_Proxy leaked, because the
 # whole-cell override never fired and bare spaCy misses a first name in a cell.
 # Measured on that workbook: 83 real people recovered, 0 false positives.
+#
+# "user"/"users" earns its place the same way: an audit-log sheet carried the
+# person who made each change in a column headed `User`, and on the reported
+# workbook ONE name sat there 318 times. It was caught only because spaCy happened
+# to recognise it, which is exactly the fragile path this override exists to
+# replace. A login id rather than a name in such a column is harmless -- it is
+# lowercase, so _looks_like_name rejects it.
 _NAME_HEADER_WORDS = (
     "owner", "einreicher", "lead", "leads", "proxy", "submitter", "requester",
     "assignee", "reporter", "approver", "author", "creator", "manager",
     "contact", "kontakt", "responsible", "holder", "beneficiary", "signatory",
     "employee", "participant", "bearbeiter", "sponsor", "recipient", "applicant",
+    "user", "users", "bearbeitet", "geaendert",
 )
 
 
