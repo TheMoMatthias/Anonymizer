@@ -397,3 +397,45 @@ def test_scrub_metadata_clears_the_save_timestamps(tmp_path):
     import re
 
     assert not re.search(r"\d{4}-\d{2}-\d{2}", after), after
+
+
+def test_a_value_that_is_also_a_column_header_does_not_fail_the_save(tmp_path):
+    """Row 1 is used only as the schema label and never scanned as data
+    (_iter_cell_units), but _literal_residual read the WHOLE package -- so the tool
+    could demand removal of text it had already decided never to touch, and then
+    refuse to write any output because it was still there.
+
+    Measured: a finding on the German word "Lizenzgeber" (licensor), claimed from
+    ordinary prose on one sheet, collided with the row-1 header `Lizenzgeber` on
+    another. Any value coinciding with a header word hits this, and the failure is
+    total -- no file at all.
+    """
+    import openpyxl
+
+    from anonymizer.pipeline import _column_header_texts, _literal_residual
+
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws["A1"] = "Lizenzgeber"          # schema label -- never redacted by design
+    ws["A2"] = "[LICENSEE_1]"         # the data cell WAS redacted
+    ws["B1"] = "Kunde Klaus Mueller"  # a header that CONTAINS a name
+    path = tmp_path / "headers.xlsx"
+    wb.save(path)
+
+    assert "lizenzgeber" in _column_header_texts(path)
+
+    # Exempt: the removed value is exactly a header's own text.
+    assert _literal_residual(path, ["Lizenzgeber"]) == []
+    # NOT exempt: a name merely contained in a header is still a leak.
+    assert _literal_residual(path, ["Klaus Mueller"]) == ["Klaus Mueller"]
+    # NOT exempt: a deny-list term the user asserted is PII wins over the exemption.
+    assert _literal_residual(path, ["Lizenzgeber"], always_check=["Lizenzgeber"]) == ["Lizenzgeber"]
+
+
+def test_column_header_exemption_is_spreadsheet_only(tmp_path):
+    """Other formats have no row-1 concept; the helper must not guess at one."""
+    from anonymizer.pipeline import _column_header_texts
+
+    p = tmp_path / "x.docx"
+    p.write_bytes(b"not really a docx")
+    assert _column_header_texts(p) == set()

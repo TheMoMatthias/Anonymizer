@@ -679,6 +679,42 @@ def _strip_whitespace_with_map(blob: str) -> tuple[str, list[int]]:
     return "".join(chars), index
 
 
+def _column_header_texts(out_path: Path) -> set[str]:
+    """The row-1 schema labels of every sheet, lowercased.
+
+    These are the one text in a spreadsheet the tool DELIBERATELY never redacts:
+    `_iter_cell_units` uses row 1 only as the header/schema label and never scans it
+    as data, because a label ("NewValue", "Projekt_ID") is structure, not user
+    content. `_literal_residual`, however, reads the whole package -- so the tool
+    could demand the removal of text it had already decided never to touch, and then
+    refuse to write ANY output because that text was still there.
+
+    Measured: a finding on the German word "Lizenzgeber" (licensor), claimed from
+    ordinary prose on one sheet, collided with the row-1 header `Lizenzgeber` on
+    another. The value could not be removed from the header by construction, so the
+    save failed with nothing wrong. Any value coinciding with a header word hits this.
+
+    Returns an empty set for non-spreadsheet formats, which have no such concept.
+    """
+    if out_path.suffix.lower() not in (".xlsx", ".xlsm", ".xls"):
+        return set()
+    try:
+        import openpyxl
+
+        wb = openpyxl.load_workbook(out_path, read_only=True, data_only=False)
+    except Exception:  # noqa: BLE001 -- unreadable here means "exempt nothing", the safe way to fail
+        return set()
+    headers: set[str] = set()
+    try:
+        for ws in wb.worksheets:
+            for cell in next(ws.iter_rows(min_row=1, max_row=1), []):
+                if isinstance(cell.value, str) and cell.value.strip():
+                    headers.add(cell.value.strip().lower())
+    finally:
+        wb.close()
+    return headers
+
+
 def _literal_residual(out_path: Path, removed_values: list[str], always_check=()) -> list[str]:
     """Recognizer-INDEPENDENT backstop: for every value the reviewer chose to
     remove, confirm its literal text is truly gone from the WHOLE output, not
@@ -697,6 +733,10 @@ def _literal_residual(out_path: Path, removed_values: list[str], always_check=()
     that run. Deciding per match, per value, has neither."""
     blob = _output_text_blob(out_path)
     always = {v.strip().lower() for v in always_check}
+    # Schema labels the tool never redacts by design -- see _column_header_texts.
+    # A deny-list term always wins: the user asserted it is PII, so if they put it in
+    # a header too, that is a leak we must still report rather than quietly exempt.
+    header_texts = _column_header_texts(out_path) - always
     inners = _token_inner_spans(blob)
     starts = [s for s, _e in inners]
     low = blob.lower()
@@ -723,6 +763,12 @@ def _literal_residual(out_path: Path, removed_values: list[str], always_check=()
     for value in removed_values:
         v = value.strip().lower()
         if len(v) < 4 and v not in always:
+            continue
+        if v in header_texts:
+            # The value IS a column header's own text. Row 1 is never scanned, so
+            # this can never be removed and demanding it would fail every save. The
+            # exemption is exact-match only: a header CONTAINING a name still has
+            # that name reported, and a deny-list term is never exempted at all.
             continue
         # Cheap membership test first: the overwhelmingly common (clean) case then
         # costs one substring scan per value, exactly as before, and the precise

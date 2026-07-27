@@ -215,6 +215,28 @@ def main(d: Path) -> int:
             first = first or hit
         return first
 
+    def claims(value: str):
+        """The finding that claimed any part of this DECOY, or None.
+
+        A DIFFERENT question from covered(), and it needs the opposite direction as
+        well. For a secret we ask "was all of it removed", so only a finding at least
+        as wide as the plant counts. For a decoy we ask "did the tool touch this
+        innocuous text at all", and a finding NARROWER than the decoy is a false
+        positive too -- it still redacts part of a sentence that should have been left
+        alone.
+
+        Sharing one directional helper between the two silently under-reported
+        precision: GLiNER claimed 'Nationwide Building Society' out of the decoy
+        'Credit Union: Nationwide Building Society', and 'Ruecklage' out of
+        'Ruecklage von 66450 Euro gebildet.', and neither was counted."""
+        v = value.strip().lower()
+        if v in found_vals:
+            return found_vals[v]
+        for fv, g in found_vals.items():
+            if (v in fv and _whole_token(v, fv)) or (fv in v and _whole_token(fv, v)):
+                return g
+        return None
+
     by_class: dict[str, list[bool]] = {}
     by_sheet: dict[str, list[bool]] = {}
     misses = []
@@ -257,7 +279,7 @@ def main(d: Path) -> int:
     fps = []
     benign = []
     for dec in decoys:  # not `d` -- that is the fixture directory, in scope here
-        g = covered(dec["value"])
+        g = claims(dec["value"])
         if g is None:
             continue
         (benign if taxonomy.data_class_for(g.entity_type).key in harmless else fps).append((dec, g))

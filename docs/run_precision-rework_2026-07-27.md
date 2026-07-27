@@ -221,6 +221,115 @@ alone. The v9 schema resync preserves user-owned lists and the `enabled` toggle.
 Anything not listed above — in particular no changes to the mapping DB, the
 encrypted lists, the OCR path, or the review UI beyond the demoted band.
 
+## Phase 2 — ML measured. GLiNER earns its place; the ONNX shrink does not pay for itself yet
+
+### The plan changed twice, both times because a measurement contradicted it
+
+1. **The "torch-free ONNX first" decision from this grill was already dead.**
+   `run_gliner-completion_2026-07-26.md:178` had recorded, from measurement, that
+   PyPI's Windows torch wheel is CPU-only and there is no CUDA trap to escape.
+   Re-verified here: `torch==2.13.0`, `onnxruntime==1.28.0`, **zero
+   `nvidia-*`/`cuda-*`**. I had been acting on the stale KNOWN-ISSUE framing in
+   `GLINER_VERIFICATION_CHECKLIST.md` rather than the newer run-file.
+2. **ONNX+int8 cannot remove torch from the RUNTIME.** `gliner/model.py:11` imports
+   torch, and so does `gliner/onnx/model.py:14` — gliner's own ONNX wrapper. The
+   export therefore buys pack size only: **1.85 GB → ~0.98 GB**, not the ~520 MB I
+   projected. Reaching 520 MB means dropping `gliner` and owning tokenization plus
+   span decoding, which 2026-07-26 rejected and which still looks right.
+
+Real sizes (my earlier figures were estimates): pack **1.16 GB** — already minimal,
+since `fetch_gliner_model.py` excludes `pytorch_model.bin` as "1.1 GB of nothing", so
+the "trim the duplicate weights" option I offered was already implemented — and
+runtime **693 MB** (torch 497 of it).
+
+### The pack works air-gapped
+
+| check | result |
+|---|---|
+| loads with `HF_HUB_OFFLINE=1` | yes — 5.7 s, `UniEncoderSpanGLiNER` |
+| pack size | 1126 MB |
+| inference | 107–126 ms/text on CPU |
+| deterministic over repeated inference | yes, 5/5 identical — the parity precondition |
+| full suite with ML installed | 489 passed, no numpy/torch/spaCy conflict |
+
+### The audit workbook is the WRONG instrument for the ML question
+
+It scores **293/293 without ML**, so there is no headroom for a model to recover
+anything. With ML: recall unchanged, the false-positive list **byte-identical**, scan
+**2.6 s → 110 s (42×)**. That is not evidence GLiNER is useless — it is evidence of
+measuring against a ceiling. Recorded because the mistake is easy to repeat: a 100%
+instrument cannot score a recall improvement.
+
+### `measure_recall.py` HAS headroom, and there GLiNER is decisive
+
+| stratum | without ML | with ML |
+|---|---|---|
+| german_common_noun / prose_oblique | **25%** | **95%** |
+| german_common_noun / prose_full_name | 90% | 100% |
+| german_rare / prose_full_name | 88% | 100% |
+| german_common_noun / bare_cell | 25% | **30%** |
+| **OVERALL (isolated)** | **86%** | **93%** |
+
+Recovered: Weber, Klein, Schwarz, Koch, Wolf, Berg, Fischer, Vogel, Hahn, Kaiser,
+Fuchs, Sommer, Mueller, Bauer in oblique prose; Schwanitz and Stein in full-name prose.
+
+**The honest limit: `bare_cell` barely moved (25% → 30%).** A lone common-noun surname
+in a spreadsheet cell — the most frequent shape in the real workbooks — is irreducibly
+ambiguous. Note `german_rare/bare_cell` was already 100% while
+`german_common_noun/bare_cell` stays ~30%: the problem is the WORD, not the model.
+"Koch" alone is the word for cook. No model quality fixes that; the fix is structural,
+which is exactly what the Phase 1 header override did (83 people recovered on the real
+workbook). Stated plainly so nobody later expects ML to close this stratum.
+
+### …but on the structured workbook GLiNER is actively harmful right now
+
+The 9 findings it added to the audit workbook, and ~8 are wrong:
+
+| added | problem |
+|---|---|
+| `LICENSEE 'Lizenzgeber'` 0.65 | the German word for *licensor* — also a column HEADER |
+| `LOCATION 'Camunda'` 0.89, `LOCATION 'OpenClaw'` 0.85 | tools mistyped as locations |
+| `ORGANIZATION 'European Union'` 0.85 | a planted DECOY ("EU regulations apply") |
+| `ORGANIZATION 'Nationwide Building Society'` 0.79 | a planted DECOY (counterparty) |
+| `ORGANIZATION 'Ruecklage'` 0.61 | a planted DECOY — German for "reserve" |
+| `PERSON 'Marschall'` 0.86 | a PROJECT name, and it DISPLACED the correct `PROJECT 'Marschall'` |
+| `PERSON 'Sachbearbeiter'` 0.85 | "caseworker" — a role word |
+
+So GLiNER is strong on PROSE recall and unhelpful-to-harmful on structured business
+data. That shapes Phase 3: the veto is worth having, but ML's *additive* output on
+spreadsheet-shaped text needs its own gate, and mistyping (tool → LOCATION, project →
+PERSON) is a distinct failure from over-claiming.
+
+### Two bugs this surfaced, both fixed
+
+**a) The scorer under-reported PRECISION (mine, from the honest-metrics commit).**
+`covered()` was reused for decoys, but the two questions need opposite directions: a
+secret is covered only by a finding at least as WIDE, whereas a decoy is falsely
+claimed even by a NARROWER finding — it still redacts part of a sentence that should
+have been untouched. GLiNER claiming `Nationwide Building Society` out of the decoy
+`Credit Union: Nationwide Building Society` went uncounted. Split into `covered()` and
+`claims()`. **Honest non-ML precision baseline is therefore 28/84, not 21/84.**
+
+**b) A value that is also a COLUMN HEADER made every save fail** — general, not
+ML-specific. Row 1 is used only as a schema label and never scanned
+(`_iter_cell_units`), but `_literal_residual` read the whole package, so the tool could
+demand removal of text it had already decided never to touch and then write NO file at
+all. `Lizenzgeber`, claimed from prose on one sheet, collided with the row-1 header on
+another. Fixed by exempting exact column-header text from the residual check
+(`_column_header_texts`). Deliberately narrow: a header CONTAINING a name still
+reports that name, and a deny-list term is never exempted — the user asserted it is
+PII, so a leak stays a leak. Three regression tests.
+
+### Open
+
+- **Cost vs the 5-minute ceiling.** 110 s on the 16-sheet fixture; the real 20-sheet
+  workbook is 23 s without ML. This is the documented trigger for the DEFERRED
+  content-keyed soft cap.
+- **Two Art. 9 word-list gaps**, unrelated to ML, both in the BARE form:
+  `neuapostolisch` (religion) and `Bandscheibenvorfall` (health).
+- **The ONNX/int8 export is NOT started**, pending the size decision: it buys
+  1.85 GB → ~0.98 GB and nothing else.
+
 ## RESOLVED (2026-07-27): honest metrics, and a CRITICAL Art. 9 config bug found behind them
 
 Chasing the over-reported recall below led to the worst bug in this repo's history,
