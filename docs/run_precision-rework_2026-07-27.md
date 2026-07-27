@@ -4,6 +4,81 @@ Spec + resumable run-file. Grilled 2026-07-27 (25 questions, 6 rounds + 1
 reconciliation). Supersedes the precision posture set in
 `run_detection-precision_2026-07-23.md` where the two conflict.
 
+## ⇢ WHAT IS LEFT (single source of truth — read this first)
+
+State as of 2026-07-27, suite **495 passed**, everything below verified by measurement
+rather than assertion. Phases 1 and 2 are DONE; 2.5 (ML speed) is DONE.
+
+### Next up — Phase 3, the precision rework. Nothing else is blocking it.
+
+This is the phase that actually removes the false positives. Signed off in the grill,
+not yet started. In dependency order:
+
+1. **PERSON becomes corroboration-only, DEMOTED not dropped** (grill decisions 4/7/15).
+   `_CORROBORATION_ONLY_ENTITIES` (core.py:81) currently holds NER_MISC/ORGANIZATION/
+   LOCATION. Adding PERSON is a one-line change with a large blast radius — read the
+   note under WHAT THE AUDIT ACTUALLY FOUND first: on the reported export EVERY real
+   person had `is_ner_guess=True`, so this MUST land together with item 2 or it drops
+   every name.
+2. **The four corroboration sources** (grill decision 5): repaired name-column headers
+   (DONE in Phase 1 — 83 people recovered), a curated given-name gazetteer (NOT built),
+   GLiNER hits (already count, core.py:810), and column-level name inference (NOT built).
+3. **The enum / controlled-vocabulary signal** (grill decisions 3/10): read Excel's
+   declared data validations AND value repetition, as a content-keyed set precomputed
+   once per workbook, passed via config. The fixture already declares 3 real validation
+   lists pointing at `DB_Setup`, verified to survive the save/load round trip, so this
+   is measurable the day it is written.
+4. **The ML veto as a DEMOTION** (grill decisions 14/15): model ran on a text and saw
+   no person ⇒ demote the bare spaCy PERSON hit. Evidence it will work: GLiNER scores
+   all three decoy classes BELOW the 0.3 threshold (`Die Effizienz der
+   Reaktionszeiten` 0.057, `Datenfeeds` 0.276, `Portfoliobeitrag` 0.197).
+5. **Demoted band as its own export section** (grill decision 9), like `possible_miss`.
+
+**Target:** the 31 false positives on the 84 decoys. That number is reproducible today
+(`scripts/score_test_workbook.py`), so progress is measurable per change.
+
+### Then, in order
+
+6. **Flip `gliner.enabled: true`** — the user's steer is to use ML by default where it
+   is better, gated on Phase 3 landing, because today ML is measurably HARMFUL on
+   structured workbooks (claims 3 decoys, mistypes tools as LOCATION, turned the project
+   `Marschall` into a PERSON and displaced the correct finding). Needs a `-WithML`
+   bundle verified on a second machine.
+7. **Re-measure the real workbook.** Canonical file is
+   `Downloads/mdx-big-beautiful-innovation-spreadsheet.xlsm`; baseline **442 flagged
+   values / 200 PERSON / 194 bare-guess values**, taken with the pre-Phase-1 commit on
+   that exact file. NOTE the exported CSV is NOT a valid baseline — it came from a
+   different version of the workbook (`Malcom Werther` and `Ukom` are not in the file's
+   bytes at all).
+
+### Known bugs, unfixed, with evidence
+
+- **Two Art. 9 word-list gaps**, both in the BARE form: `neuapostolisch` (religion) and
+  `Bandscheibenvorfall` (health). Found by `scripts/measure_recall.py`. Art. 9 is the
+  most damaging class to miss, so this is the highest-severity open item.
+- **`*_Kommentar` columns are never treated as DESCRIPTION columns.**
+  `_topical_header_res` uses `\b`, and `_` is a word character, so `\bkommentar\b` never
+  matches `Strat_Innovation_Kommentar`. Free-text commentary columns are therefore never
+  summarized — the same `\b`-vs-`_` defect fixed for PEOPLE headers in Phase 1, still
+  present for TOPICAL ones. Deliberately not fixed: it changes what gets wholesale
+  summarized, which is a behaviour decision, not a bug fix.
+- **`bare_cell` recall is 30%** and no model will fix it (`german_rare/bare_cell` is
+  already 100%; the obstacle is the word — "Koch" IS the word for cook). Structural
+  signals only.
+- **2 planted secrets still leak at apply** on the fixture: `Alteryx`, `OpenClaw` — tool
+  names in prose, reached only via propagation. ML fixed `OpenClaw`; `Alteryx` remains.
+
+### Closed, do not reopen without new evidence
+
+- **ONNX/int8 export — DROPPED.** Its size win is partial (torch cannot leave the
+  runtime: `gliner/model.py:11` AND `gliner/onnx/model.py:14` both import it) and its
+  speed win is spent, since batching + memo replay already gave 3.4×.
+- **The <5-minute ceiling — no longer a hard gate** (user, 2026-07-27). Quality wins
+  ties. The DEFERRED content-keyed soft cap is dropped with it: it reduces coverage.
+- **Label pruning (13 → 6, worth 1.8×) and skipping short structured cells** — both
+  trade quality for speed, which the steer rules out. Available if that ever changes.
+- **spaCy lg → sm** — tried and reverted (`d74d52c`).
+
 ## GOAL
 
 Cut the German-common-noun false positives that dominate the flagged export, and
@@ -229,8 +304,13 @@ encrypted lists, the OCR path, or the review UI beyond the demoted band.
    `run_gliner-completion_2026-07-26.md:178` had recorded, from measurement, that
    PyPI's Windows torch wheel is CPU-only and there is no CUDA trap to escape.
    Re-verified here: `torch==2.13.0`, `onnxruntime==1.28.0`, **zero
-   `nvidia-*`/`cuda-*`**. I had been acting on the stale KNOWN-ISSUE framing in
-   `GLINER_VERIFICATION_CHECKLIST.md` rather than the newer run-file.
+   `nvidia-*`/`cuda-*`**.
+   *Correction on the cause:* I first blamed a stale KNOWN-ISSUE framing in
+   `GLINER_VERIFICATION_CHECKLIST.md`. That was wrong — the checklist's step 1 already
+   said "the feared trap does not exist here". The real cause was that I trusted a
+   summary of an earlier session instead of reading the file, then recommended the
+   torch-free path in the grill on that basis. Worth recording because the failure mode
+   is subtle and repeatable: a carried-over summary can be stale in ways the repo is not.
 2. **ONNX+int8 cannot remove torch from the RUNTIME.** `gliner/model.py:11` imports
    torch, and so does `gliner/onnx/model.py:14` — gliner's own ONNX wrapper. The
    export therefore buys pack size only: **1.85 GB → ~0.98 GB**, not the ~520 MB I

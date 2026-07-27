@@ -6,6 +6,26 @@ working on a real document". Depth and rationale live in
 `docs/run_gliner-completion_2026-07-26.md` (what actually happened on a connected
 machine, including three offline failures the design could not have found).
 
+> **⚠️ SUPERSEDED 2026-07-27.** Most of this is now done, and the open items moved.
+> **Read `docs/run_precision-rework_2026-07-27.md` first** — its "WHAT IS LEFT"
+> section at the top is the single source of truth for remaining work. This file is
+> kept for the step-by-step detail and for what was learned on the connected machine.
+>
+> What changed on 2026-07-27:
+> * ML is installed, the pack is rebuilt (1126 MB) and **re-verified air-gapped**.
+> * GLiNER was **measured on scored corpora**: decisive on prose (oblique-prose recall
+>   25% → 95%, overall isolated 86% → 93%) and measurably **harmful on structured
+>   workbooks** (claims 3 planted decoys, mistypes tools as LOCATION, turned a project
+>   into a PERSON). Step 5's success criteria below are therefore **obsolete** — see
+>   the run-file. In particular "total flagged ≤ ~445" was written against an export
+>   that came from a DIFFERENT version of the workbook and is not a valid baseline.
+> * The **<5-minute ceiling in step 5 is no longer a hard gate** (user decision).
+> * Step 8's soft cap is **dropped**, and the int8 ONNX export is **dropped** — see
+>   the run-file for why (torch cannot leave the runtime; batching + memo replay
+>   already delivered 3.4×).
+> * Step 9 (flip the default) is now gated on **Phase 3**, not on step 5.
+> * Suite is **495 passed**, not 418.
+
 **Current state (2026-07-26, after the merge at `1ac90e4`):** Phases A+B+C done.
 The model pack is **built and verified loading fully offline**, and the loader is
 fixed for the air-gap. GLiNER still ships **disabled** (`gliner.enabled: false`)
