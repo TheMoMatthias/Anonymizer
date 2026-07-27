@@ -320,11 +320,37 @@ another. Fixed by exempting exact column-header text from the residual check
 reports that name, and a deny-list term is never exempted — the user asserted it is
 PII, so a leak stays a leak. Three regression tests.
 
-### Open
+### Final scored comparison, and the ceiling breach
 
-- **Cost vs the 5-minute ceiling.** 110 s on the 16-sheet fixture; the real 20-sheet
-  workbook is 23 s without ML. This is the documented trigger for the DEFERRED
-  content-keyed soft cap.
+With the header fix in place the ML round trip completes:
+
+| | without ML | with ML |
+|---|---|---|
+| recall | 293/293 | 293/293 |
+| false positives on decoys | 28/84 | **31/84** |
+| scan | 4.5 s | **130.1 s** |
+| apply | 4.5 s | **167.3 s** |
+| planted secrets leaking into the output | 2 (`Alteryx`, `OpenClaw`) | **1 (`Alteryx`)** |
+
+ML **fixed one of the two apply-level leaks** -- `OpenClaw`, a tool named in prose that
+propagation missed. That is a genuine byte-level win, not a scan-side number. It cost
+3 net false positives, all three decoys claimed as ORGANIZATION.
+
+### DEFERRED TRIGGER HAS FIRED: the 5-minute ceiling
+
+Round trip **9 s -> 297 s (~5 min) on the 16-sheet FIXTURE**. The real workbook has
+roughly 8x the cells, so it is far over. The content-keyed soft cap is no longer
+deferred -- its trigger condition is met.
+
+But the cap is the second-best lever. **`apply` spent 167 s RE-RUNNING inference**,
+which is pure waste: scan already computed exactly those spans, and the model is
+deterministic (verified 5/5 identical), which is what makes replay safe. Memo-replay
+was explicitly part of the 2026-07-26 determinism decision -- "Pin CPU execution
+provider + thread counts, add a repeated-inference determinism test, AND memo-replay so
+apply never re-infers" -- and it is NOT implemented. Doing it removes ~56% of the round
+trip on its own AND strengthens parity (replaying scan's spans cannot diverge from
+them, whereas re-inferring can only be argued to be identical). Recommended before the
+soft cap, which merely reduces coverage.
 - **Two Art. 9 word-list gaps**, unrelated to ML, both in the BARE form:
   `neuapostolisch` (religion) and `Bandscheibenvorfall` (health).
 - **The ONNX/int8 export is NOT started**, pending the size decision: it buys
