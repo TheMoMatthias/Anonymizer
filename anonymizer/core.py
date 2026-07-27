@@ -245,6 +245,17 @@ def _rejected_by_precision(
     that don't pass it keep byte-identical behaviour."""
     if source == GLINER_SOURCE and score >= trust_override:
         return False
+    # A snake_case identifier is not a DATE. Every filter below is keyed on
+    # _NER_ENTITIES, which deliberately excludes DATE_TIME -- so a spaCy DATE guess
+    # had NO gate at all. Measured on a real workbook: the ENGLISH model (reached
+    # via per-sheet language routing) tagged "MDX_PROXY_20", "MDX_LEAD_51" and
+    # "PROJEKT_ID_37" as DATE_TIME at its flat 0.85, above the 0.5 threshold.
+    #
+    # Restricted to the shape and the sources where it is certain: no real date
+    # contains an underscore, and the anchored DateRecognizer (not in
+    # _GATED_NER_SOURCES) is untouched, so a genuine "24.03.2026" still lands.
+    if entity_type == "DATE_TIME" and source in _GATED_NER_SOURCES and "_" in value:
+        return True
     # An ANCHORED PATTERN hit is not a bare NER guess, even when its entity type
     # happens to be one spaCy also produces. Every filter below exists to clean up
     # spaCy's flat-score noise; a config pattern that demanded a literal
@@ -271,6 +282,26 @@ def _rejected_by_precision(
 
 _STRUCTURAL_MARKER = re.compile(r"(?m)^([-*+#]+)(?=\S)")
 
+# Excel stores a character it cannot represent literally as an `_xHHHH_` escape,
+# and openpyxl hands that escape through VERBATIM as the cell's text. The common
+# one by far is `_x001E_` (U+001E RECORD SEPARATOR), which Excel writes between
+# the parts of a multi-value cell -- so a cell holding only empty parts reads as
+# `_x001E__x001E__x001E_`, and a real one as
+# `Kein Beitrag_x001E_Reiner Backoffice-Prozess`.
+#
+# Left alone this breaks detection in BOTH directions, measured on the reported
+# workbook: 7 entirely EMPTY cells were flagged DESCRIPTION at the auto-accept
+# tier (the emptiness guard `^[\W\d_]*$` cannot match, since `x` and `E` are word
+# characters), and any name fused to such an escape is rejected outright by
+# _is_structural_nonname's `"_" in v` rule -- a silent false NEGATIVE.
+#
+# Safe to treat as never-content: a genuine literal `_x001E_` typed into a cell is
+# itself escaped by Excel (as `_x005F_x001E_`), so an unescaped one in the value
+# is always a real control character. Replaced by the SAME NUMBER of spaces, for
+# the same reason the bullet markers are -- every later character keeps its index,
+# so a finding's start/end stays a correct offset into the real, untouched text.
+_XML_CHAR_ESCAPE = re.compile(r"_x[0-9A-Fa-f]{4}_")
+
 
 def neutralize_structural_noise(text: str) -> str:
     """Same-length normalization used ONLY to decide what to feed the NLP
@@ -288,8 +319,13 @@ def neutralize_structural_noise(text: str) -> str:
     This is deliberately narrow (line-start bullet/heading fusion only) --
     punctuation fused onto a word MID-sentence (e.g. a file-extension-style
     ".iboflow") is a different shape and is instead handled generically,
-    post-detection, by _LEADING_NOISE trimming any free-text finding's span."""
-    return _STRUCTURAL_MARKER.sub(lambda m: " " * len(m.group(1)), text)
+    post-detection, by _LEADING_NOISE trimming any free-text finding's span.
+
+    Also neutralizes Excel's `_xHHHH_` character escapes -- see
+    _XML_CHAR_ESCAPE for why those are never content and why same-length
+    replacement is what keeps offsets (and therefore parity) intact."""
+    cleaned = _STRUCTURAL_MARKER.sub(lambda m: " " * len(m.group(1)), text)
+    return _XML_CHAR_ESCAPE.sub(lambda m: " " * len(m.group()), cleaned)
 
 
 @functools.lru_cache(maxsize=8)
@@ -717,9 +753,52 @@ def detect_unit(analyzer, unit: TextUnit, config: dict, nlp_artifacts=None) -> l
 _MISS_PATTERNS = [
     re.compile(r"[A-Z]{2}\d{2}[A-Z0-9]{10,30}"),  # IBAN-shaped
     re.compile(r"[\w.+-]+@[\w-]+\.[\w.-]+"),  # email-shaped
-    re.compile(r"\d[\d ./-]{3,}\d"),  # 5+ char digit-ish runs (phones, ids, ...)
+    # 5+ char digit-ish runs (phones, ids, ...). The optional LETTERS- prefix makes
+    # the reported value the whole structured code: without it a "BP-26-001" project
+    # id was reported as the bare tail "26-001", which reads as meaningless noise
+    # and gives the reviewer nothing to act on.
+    re.compile(r"(?:\b[A-Za-z]{2,12}-)?\d[\d ./-]{3,}\d"),
     re.compile(r"\b[A-Z]{4}[A-Z]{2}[A-Z0-9]{2}(?:[A-Z0-9]{3})?\b"),  # BIC/SWIFT-shaped
+    # Links, as a backstop only: URL is a configured entity with a real recognizer,
+    # so a matched link is a normal finding and the overlap check below suppresses
+    # it here. This fires when the URL entity is switched off or its data class is
+    # skipped -- i.e. exactly when a leak would otherwise be invisible.
+    re.compile(r"(?:https?://|www\.)\S{4,}"),
 ]
+
+# Shapes that are NUMBERS, not identifiers. The digit-run pattern above is
+# deliberately broad, and on a financial workbook that made this bucket almost
+# pure noise: measured, 100 of 100 rows were money amounts ("10000", "750000",
+# "36.000", "178.4") and it surfaced NONE of the values that actually leaked. A
+# bucket that is entirely noise trains the reviewer to ignore it, which is worse
+# than not having one -- so these are subtracted by SHAPE, and only shapes that
+# have been characterised. Nothing that could be an identifier is removed.
+_GROUPED_NUMBER = re.compile(r"^\d{1,3}(?:[.\s]\d{3})+(?:,\d+)?$")  # 36.000 / 1 250,50
+_DECIMAL_NUMBER = re.compile(r"^\d+[.,]\d+$")  # 178.4
+_PLAIN_INTEGER = re.compile(r"^\d+$")
+# A bare integer is identifier-SHAPED once it reaches the length of the real ID
+# classes (Kontonummer 8-10, Steuer-ID 11, SV-Nummer 12, card 16, IBAN 22).
+_MIN_BARE_DIGITS = 8
+
+
+def _is_just_a_number(value: str, whole_unit: bool) -> bool:
+    """True for a value whose shape is a quantity rather than an identifier.
+
+    `whole_unit` -- the value IS the entire text unit, i.e. a lone number in its
+    own spreadsheet cell. That is what separates the two cases a length threshold
+    alone cannot: a 6-digit number sitting by itself in a `..._Kosten_EUR` column
+    is an amount, while the same 6 digits inside "Vertrag 998877 fuer ..." is a
+    reference number worth surfacing. An earlier attempt used a flat 8-digit floor
+    and silently broke the second case -- see test_core.py's completeness test.
+
+    The grouped/decimal shapes are quantities in ANY position, so they are
+    excluded regardless: German thousands grouping ("36.000", "1.100") and
+    decimals ("178.4") are never identifiers."""
+    if _GROUPED_NUMBER.match(value) or _DECIMAL_NUMBER.match(value):
+        return True
+    if not _PLAIN_INTEGER.match(value):
+        return False
+    return whole_unit and len(value) < _MIN_BARE_DIGITS
 
 
 def _covered_ranges(findings: list[Finding]) -> dict[str, list[tuple[int, int]]]:
@@ -744,9 +823,13 @@ def completeness_scan(units: list[TextUnit], kept: list[Finding]) -> list[Groupe
                 if (
                     sum(c.isdigit() for c in value) < 4
                     and "@" not in value
+                    and "//" not in value
+                    and not value.lower().startswith("www.")
                     and not validators.bic_valid(value)
                 ):
-                    continue  # too few digits, not an email, not a BIC -> not risky enough
+                    continue  # too few digits, not an email/link, not a BIC -> not risky
+                if _is_just_a_number(value, whole_unit=value == unit.text.strip()):
+                    continue  # an amount or a count, not an identifier
                 if any(cs < end and ce > start for cs, ce in unit_covered):
                     continue  # overlaps a real finding -> already handled
                 key = value.lower()

@@ -11,6 +11,8 @@ from openpyxl.utils import column_index_from_string, get_column_letter
 from .. import language, taxonomy
 from ..actions import decisions_lookup, resolve_replacement, token_label
 from ..core import (
+    _CORROBORATION_ONLY_ENTITIES,
+    _GATED_NER_SOURCES,
     _NER_ENTITIES,
     _resolve_overlaps,
     detect_unit,
@@ -51,17 +53,65 @@ _NAME_HEADER_TERMS = (
     "vorname", "nachname", "familienname", "teilnehmer", "kontaktperson",
 )
 
+# WHOLE-WORD people-column stems -- a SECOND class, not more entries above.
+#
+# Substring matching is deliberate and load-bearing for the German stems (one
+# "leiter" covers Projekt-/Team-/Abteilungsleiter), but it is wrong for these:
+# measured on a real workbook, a substring "owner" also matches
+# "Ownership_geklaert_Status", whose values are statuses ("Ausstehend"), and
+# spaCy tags those ADJ -- which _NON_NAME_POS does not reject (it must not: Klein,
+# Gross, Lang and Weiss are all real surnames spaCy can tag ADJ). So the shape
+# gate cannot save us here and the header match itself has to be precise.
+#
+# Matched with a lowercase-letter boundary on each side rather than \b, because
+# the real headers are `_`-joined ("Rollout_Owner", "MDX_Lead") and `_` is a word
+# character -- \b would reject exactly the shape a database sheet uses.
+#
+# These are ENGLISH-language equivalents of the German stems above plus the four
+# words this workbook actually uses. English headers were the whole recall gap:
+# every name under Owner/Einreicher/MDX_Lead/MDX_Proxy leaked, because the
+# whole-cell override never fired and bare spaCy misses a first name in a cell.
+# Measured on that workbook: 83 real people recovered, 0 false positives.
+_NAME_HEADER_WORDS = (
+    "owner", "einreicher", "lead", "leads", "proxy", "submitter", "requester",
+    "assignee", "reporter", "approver", "author", "creator", "manager",
+    "contact", "kontakt", "responsible", "holder", "beneficiary", "signatory",
+    "employee", "participant", "bearbeiter", "sponsor", "recipient", "applicant",
+)
+
 
 @functools.lru_cache(maxsize=8)
 def _name_header_re(extra_terms: tuple[str, ...] = ()):
     """Compiled people-column-header matcher for the built-in stems plus any
     workbook-specific extras. lru_cached on the extra-terms tuple so the per-cell
-    hot path never recompiles."""
-    terms = _NAME_HEADER_TERMS + tuple(t.strip().lower() for t in extra_terms if t.strip())
-    return re.compile("|".join(re.escape(t) for t in terms), re.IGNORECASE)
+    hot path never recompiles.
+
+    User-supplied `extra_terms` keep the documented SUBSTRING semantics (see the
+    `name_column_headers` comment in default_recognizers.yaml) -- only the
+    built-in _NAME_HEADER_WORDS class is boundary-matched."""
+    loose = _NAME_HEADER_TERMS + tuple(t.strip().lower() for t in extra_terms if t.strip())
+    words = "|".join(re.escape(t) for t in _NAME_HEADER_WORDS)
+    alts = [re.escape(t) for t in loose] + [rf"(?<![a-z])(?:{words})(?![a-z])"]
+    return re.compile("|".join(alts), re.IGNORECASE)
 # Cell contents that a name column can still hold but which are not names.
 _NOT_A_NAME = re.compile(r"^[\W\d_]*$|^(unbekannt|n/?a|keine?|leer|-{1,3}|divers)$", re.IGNORECASE)
 _NAME_COLUMN_SCORE = 0.8
+
+# A value that is ONE snake_case token is a field/placeholder identifier, not a
+# real name: measured, a "Team" column held team_1 .. team_5 and each was claimed
+# as a DEPARTMENT at the auto-accept tier. The whole-cell PERSON override already
+# rejects these via _looks_like_name; the TOPICAL override had no shape gate at all.
+#
+# Deliberately "is a single snake_case token", NOT "contains an underscore": a real
+# DESCRIPTION cell is prose that may well mention a snake_case field name, and
+# refusing to claim it for that reason would leave a confidential description
+# unsummarized -- trading a cosmetic false positive for an actual leak.
+_SNAKE_TOKEN = re.compile(r"^\w*_\w[\w-]*$")
+
+
+def _is_placeholder_token(value: str) -> bool:
+    v = value.strip()
+    return " " not in v and bool(_SNAKE_TOKEN.match(v))
 
 # --- topical (non-personal) category detection --------------------------------
 # Header-confirmed, so scored into the auto-accept tier; source-tagged so it is
@@ -151,6 +201,15 @@ def topical_gazetteer(path: Path, config: dict) -> list[tuple[str, str]]:
                     if not cat:
                         continue
                     v = str(cell.value).strip()
+                    # A single snake_case token is a field/placeholder identifier,
+                    # never a real team or tool NAME -- measured, a "Team" column
+                    # held team_1 .. team_5 and each was learned as a DEPARTMENT and
+                    # then propagated document-wide. Excluded here as well as in the
+                    # whole-cell override, because the gazetteer is the path that
+                    # actually produced them (it spreads a learned term everywhere,
+                    # so one bad entry costs far more than one bad cell).
+                    if _is_placeholder_token(v):
+                        continue
                     if 2 <= len(v) <= _MAX_GAZETTEER_LEN and any(ch.isalpha() for ch in v):
                         pairs.add((cat, v))
     finally:
@@ -525,32 +584,59 @@ def _analyze_cell_text(text: str, header: str | None, analyzer, config, unit_id:
         f.end -= offset
         result.append(f)
 
-    # The column header declares this cell is a person. Trust it over the model,
-    # but only where the whole cell isn't already claimed end-to-end.
+    # The column header declares this cell is a person. Trust it over the model --
+    # including over a weaker guess that already claimed the whole cell (below).
     value = text.strip()
+    # `value` is sliced from the REAL text (it has to be -- it becomes the
+    # Finding's value and its span), but the "is there anything here at all"
+    # question must be asked of the neutralized copy: a cell holding only Excel
+    # `_xHHHH_` escapes is empty, yet reads as word characters. Same-length
+    # neutralization means this probe never shifts an offset.
+    # Measured: 7 empty cells were flagged DESCRIPTION at the auto-accept tier.
+    probe = neutralize_structural_noise(value).strip()
     header_re = _name_header_re(tuple(config.get("name_column_headers", ())))
     languages = config.get("languages") or list(DEFAULT_LANGUAGES)
     lang = languages[0] if len(languages) == 1 else None
-    if (
+    header_says_people = bool(
         header_re.search(header or "")
-        and value
-        and not _NOT_A_NAME.match(value)
+        and probe
+        and not _NOT_A_NAME.match(probe)
         and _looks_like_name(value, analyzer, lang)
-        and not any(f.start == 0 and f.end >= len(value) for f in result)
-    ):
-        start = text.index(value)
-        result.append(
-            Finding(
-                entity_type="PERSON",
-                value=value,
-                score=_NAME_COLUMN_SCORE,
-                context=f"{header}: {value}",
-                unit_id=unit_id,
-                start=start,
-                end=start + len(value),
-                source="whole_cell_override",
+    )
+    whole_cell = [f for f in result if f.start == 0 and f.end >= len(value)]
+    if header_says_people:
+        # A WEAKER guess must not silently veto the header. spaCy types some real
+        # names NER_MISC rather than PERSON ("Constanza Hiemenz", measured on the
+        # reported workbook): that MISC hit covers the whole cell, which suppressed
+        # the override, and MISC -- being a bare guess -- was then dropped outright
+        # by corroboration_only. Net effect, a name sitting in a column literally
+        # headed "Owner" left the tool in the clear.
+        #
+        # Retyped IN PLACE rather than added alongside: a second finding on the same
+        # span would lose the overlap contest to MISC's higher flat 0.85 and change
+        # nothing. The column header is the stronger evidence about the TYPE, and
+        # re-sourcing it also makes the value corroborated, which is what stops
+        # corroboration_only from discarding it.
+        for f in whole_cell:
+            if f.entity_type in _CORROBORATION_ONLY_ENTITIES and f.source in _GATED_NER_SOURCES:
+                f.entity_type = "PERSON"
+                f.source = "whole_cell_override"
+                f.score = max(f.score, _NAME_COLUMN_SCORE)
+                f.context = f"{header}: {value}"
+        if not whole_cell:
+            start = text.index(value)
+            result.append(
+                Finding(
+                    entity_type="PERSON",
+                    value=value,
+                    score=_NAME_COLUMN_SCORE,
+                    context=f"{header}: {value}",
+                    unit_id=unit_id,
+                    start=start,
+                    end=start + len(value),
+                    source="whole_cell_override",
+                )
             )
-        )
 
     # Topical header override: a column whose header maps to a category (Tool,
     # Abteilung, Lizenzgeber, Projekt, ...) makes the WHOLE cell that category --
@@ -559,8 +645,12 @@ def _analyze_cell_text(text: str, header: str | None, analyzer, config, unit_id:
     # description is claimed for redact/summarize). Source-tagged so it bypasses
     # the NER noise/corroboration filters (those gate only NER entity types).
     category = _category_for_header(header, config)
-    if category and value and not _NOT_A_NAME.match(value) and not any(
-        f.start == 0 and f.end >= len(value) for f in result
+    if (
+        category
+        and probe
+        and not _NOT_A_NAME.match(probe)
+        and not _is_placeholder_token(probe)
+        and not any(f.start == 0 and f.end >= len(value) for f in result)
     ):
         start = text.index(value)
         result.append(

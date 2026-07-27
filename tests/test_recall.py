@@ -697,3 +697,99 @@ def test_bare_cell_probe_carries_no_filler_context():
 
     assert evaluation.probe_text("bare_cell", "Anna", "Müller") == "Müller"
     assert evaluation.FILLER in evaluation.probe_text("prose_oblique", "Anna", "Müller")
+
+
+# --- 2026-07-27 audit of a real internal workbook (docs/run_precision-rework_
+# 2026-07-27.md). Every case below is a value that LEAKED out of that file. ---
+
+
+def _wb_scan(tmp_path, analyzer, base_config, cells, name="audit.xlsx"):
+    """Builds a one-sheet workbook from {coord: value} and returns the actionable
+    finding values, so a leak is asserted end-to-end through the real pipeline
+    rather than against a single recognizer."""
+    import openpyxl
+
+    from anonymizer.pipeline import scan_document
+
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    for coord, value in cells.items():
+        ws[coord] = value
+    path = tmp_path / name
+    wb.save(path)
+    return {g.value for g in scan_document(path, analyzer, base_config).all_actionable()}
+
+
+def test_english_people_column_headers_catch_names(tmp_path, analyzer, base_config):
+    """The measured recall gap: _NAME_HEADER_TERMS was German-only, so every name
+    under Owner / Einreicher / MDX_Lead / MDX_Proxy leaked. 83 distinct people in
+    221 cells went out in the clear on the reported workbook -- including full
+    names, which the German NER model also missed in a bare cell."""
+    found = _wb_scan(tmp_path, analyzer, base_config, {
+        "A1": "Owner", "A2": "Ulf Gericke",
+        "B1": "Einreicher", "B2": "Cordula",
+        "C1": "MDX_Lead", "C2": "Marco",
+        "D1": "MDX_Proxy", "D2": "Mirijam",
+    })
+    for name in ("Ulf Gericke", "Cordula", "Marco", "Mirijam"):
+        assert name in found, f"{name!r} leaked from its own people column: {found}"
+
+
+def test_url_is_detected(tmp_path, analyzer, base_config):
+    """41 internal links leaked from the reported workbook. Presidio's
+    UrlRecognizer was always loaded -- URL was simply not in the `entities` block,
+    and detect_unit only requests configured entities, so it was never asked for."""
+    found = _wb_scan(tmp_path, analyzer, base_config, {
+        "A1": "Confluence Link",
+        "A2": "https://emma.intern.example.com/x/Oim3JQ",
+    })
+    assert "https://emma.intern.example.com/x/Oim3JQ" in found, found
+
+
+def test_url_entity_is_configured_and_labelled():
+    """A URL finding must reach a data class and a token label, or it renders as
+    an unreversible/unlabelled token."""
+    import yaml
+
+    from anonymizer.actions import TOKEN_LABELS
+    from anonymizer.config import DEFAULT_CONFIG_PATH
+
+    shipped = yaml.safe_load(DEFAULT_CONFIG_PATH.read_text(encoding="utf-8"))
+    assert "URL" in shipped["entities"]
+    assert TOKEN_LABELS["URL"] == "LINK"
+    assert taxonomy.data_class_for("URL").key == taxonomy.BANK_INTERNAL.key
+
+
+def test_name_fused_to_an_excel_escape_is_still_found(tmp_path, analyzer, base_config):
+    """Excel writes a control character as a literal `_xHHHH_` escape and openpyxl
+    passes it through verbatim, so a multi-value cell reads as
+    "Ulf Gericke_x001E_". Before neutralization the fused token was rejected
+    outright by _is_structural_nonname's underscore rule -- a silent false
+    negative on a name column."""
+    found = _wb_scan(tmp_path, analyzer, base_config, {
+        "A1": "Owner", "A2": "Ulf Gericke_x001E_",
+    })
+    assert "Ulf Gericke" in found, f"the escape hid the name: {found}"
+
+
+def test_a_weaker_guess_cannot_veto_a_people_column_header(tmp_path, analyzer, base_config):
+    """spaCy types some real names NER_MISC rather than PERSON. That whole-cell
+    MISC hit suppressed the header override, and MISC -- a bare guess -- was then
+    dropped outright by corroboration_only, so the name left in the clear from a
+    column literally headed "Owner". Measured on the reported workbook with
+    'Constanza Hiemenz'."""
+    from anonymizer.formats.xlsx_handler import _analyze_cell_text
+
+    cfg = {**base_config, "languages": ["de"]}
+    findings = _analyze_cell_text("Constanza Hiemenz", "Einreicher", analyzer, cfg)
+    assert [(f.entity_type, f.source) for f in findings] == [("PERSON", "whole_cell_override")], findings
+
+    # No people header -> no retype. The header is what carries the evidence, so
+    # this must not become a blanket "MISC is really PERSON" rule.
+    plain = _analyze_cell_text("Constanza Hiemenz", "Notiz", analyzer, cfg)
+    assert [f.entity_type for f in plain] == ["NER_MISC"], plain
+
+    found = _wb_scan(tmp_path, analyzer, base_config, {
+        "A1": "Einreicher", "A2": "Constanza Hiemenz",
+    }, name="misc_name.xlsx")
+    assert "Constanza Hiemenz" in found, found

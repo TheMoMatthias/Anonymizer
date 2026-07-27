@@ -360,3 +360,125 @@ def test_nominalization_filter_spares_real_names(analyzer, base_config):
     for name in ("Müller", "Weber", "Bauer", "Metzler", "Jung"):
         findings = detect_unit(analyzer, TextUnit("u", f"Sehr geehrter Herr {name},"), cfg)
         assert any(name in f.value for f in findings), f"{name} was wrongly filtered"
+
+
+# --- 2026-07-27 precision audit of a real internal workbook. Baseline: 453
+# flagged values / 1931 occurrences, 84% of PERSON values not people.
+# See docs/run_precision-rework_2026-07-27.md. ---
+
+
+def _wb_values(tmp_path, analyzer, base_config, cells, name="audit.xlsx"):
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    for coord, value in cells.items():
+        ws[coord] = value
+    path = tmp_path / name
+    wb.save(path)
+    return {g.value for g in scan_document(path, analyzer, base_config).all_actionable()}
+
+
+def test_people_header_words_are_whole_word_matched():
+    """The English people-column stems are a SECOND, boundary-matched class --
+    substring matching them was measured to claim "Ownership_geklaert_Status"
+    (whose values are statuses) via "owner". The German stems must keep their
+    substring behaviour, since one "leiter" is meant to cover Projektleiter."""
+    from anonymizer.formats.xlsx_handler import _name_header_re
+
+    rx = _name_header_re(())
+    for header in ("Owner", "Rollout_Owner", "MDX_Lead", "MDX Lead", "MDX_Proxy", "Einreicher"):
+        assert rx.search(header), f"{header!r} is a people column and must match"
+    for header in ("Ownership_geklaert_Status", "Leadtime", "Downloader"):
+        assert not rx.search(header), f"{header!r} must NOT match as a people column"
+    # The German substring behaviour is unchanged.
+    for header in ("Projektleiter", "zeichnungsberechtigt", "Verantwortlich"):
+        assert rx.search(header), f"{header!r} regressed: German compound stems are substrings"
+
+
+def test_status_value_under_an_ownership_header_is_not_a_person(tmp_path, analyzer, base_config):
+    """End-to-end guard for the same thing: 'Ausstehend' appeared 30x in that
+    column and must not become a person. spaCy tags it ADJ, which _NON_NAME_POS
+    deliberately does not reject (Klein/Gross/Lang/Weiss are real surnames), so
+    the header match itself has to be precise."""
+    found = _wb_values(tmp_path, analyzer, base_config, {
+        "A1": "Ownership_geklaert_Status", "A2": "Ausstehend",
+    })
+    assert "Ausstehend" not in found, found
+
+
+def test_excel_char_escapes_are_neutralized_same_length():
+    """Same-length is the whole point: a finding's start/end is computed against
+    this cleaned copy but sliced out of the REAL text, so any length change would
+    corrupt every later span -- and with it scan/apply parity."""
+    raw = "Kein Beitrag_x001E_Reiner Backoffice-Prozess"
+    cleaned = neutralize_structural_noise(raw)
+    assert len(cleaned) == len(raw)
+    assert "_x001E_" not in cleaned
+    assert cleaned.startswith("Kein Beitrag") and cleaned.endswith("Reiner Backoffice-Prozess")
+
+
+def test_content_free_cell_is_not_flagged(tmp_path, analyzer, base_config):
+    r"""7 entirely EMPTY cells were flagged DESCRIPTION at the auto-accept tier:
+    the emptiness guard is `^[\W\d_]*$`, which cannot match "_x001E_" because x
+    and E are word characters."""
+    found = _wb_values(tmp_path, analyzer, base_config, {
+        "A1": "Beschreibung", "A2": "_x001E__x001E__x001E_",
+    })
+    assert not any("_x001E_" in v for v in found), found
+
+
+def test_snake_case_identifier_is_never_a_date(analyzer, base_config):
+    """Every filter is keyed on _NER_ENTITIES, which excludes DATE_TIME -- so a
+    spaCy DATE guess had no gate at all, and the ENGLISH model (reached by
+    per-sheet language routing) tags these at its flat 0.85."""
+    for lang in ("de", "en"):
+        cfg = {**base_config, "languages": [lang]}
+        for text in ("MDX_Proxy: MDX_PROXY_20", "MDX_Lead: MDX_LEAD_51", "Projekt_ID: PROJEKT_ID_37"):
+            types = {(f.entity_type, f.value) for f in detect_unit(analyzer, TextUnit("u1", text), cfg)}
+            assert not any(t == "DATE_TIME" for t, _ in types), f"{text!r} in {lang}: {types}"
+
+
+def test_a_real_date_still_survives_the_snake_case_rule(analyzer, base_config):
+    """The rule is restricted to the shape and to model-guess sources, so the
+    anchored DateRecognizer is untouched."""
+    cfg = {**base_config, "languages": ["de"]}
+    found = {f.value for f in detect_unit(analyzer, TextUnit("u1", "Konzept_Start_Datum: 01.02.2026"), cfg)}
+    assert any("01.02.2026" in v for v in found), found
+
+
+def test_placeholder_token_is_not_a_department(tmp_path, analyzer, base_config):
+    """A 'Team' column held team_1 .. team_5; the gazetteer learned each as a
+    DEPARTMENT and propagated it document-wide."""
+    from anonymizer.formats.xlsx_handler import topical_gazetteer
+
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws["A1"] = "Team"
+    ws["A2"] = "team_1"
+    ws["A3"] = "Currency Overlay"
+    path = tmp_path / "teams.xlsx"
+    wb.save(path)
+
+    learned = dict((v, c) for c, v in topical_gazetteer(path, base_config))
+    assert "team_1" not in learned, learned
+    assert learned.get("Currency Overlay") == "DEPARTMENT", learned
+
+
+def test_lone_number_in_a_cell_is_not_a_possible_miss():
+    """100 of 100 possible-miss rows were money amounts. A lone number in its own
+    cell is a quantity; the SAME digits inside prose stay surfaced (see
+    test_core.py's completeness test, which this must not break)."""
+    from anonymizer.core import completeness_scan
+
+    lone = completeness_scan([TextUnit("u1", "227755"), TextUnit("u2", "10000")], [])
+    assert not lone, [g.value for g in lone]
+    in_prose = completeness_scan([TextUnit("u3", "Vertrag 998877 wurde geschlossen.")], [])
+    assert any("998877" in g.value for g in in_prose), [g.value for g in in_prose]
+
+
+def test_formatted_amounts_are_never_a_possible_miss():
+    """German thousands grouping and decimals are quantities in ANY position, so
+    they are excluded regardless of surrounding prose."""
+    from anonymizer.core import completeness_scan
+
+    misses = completeness_scan([TextUnit("u1", "konservativ als ~10.000 EUR bzw. 178.4 Monate")], [])
+    assert not misses, [g.value for g in misses]

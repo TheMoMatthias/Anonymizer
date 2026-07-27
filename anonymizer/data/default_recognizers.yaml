@@ -8,7 +8,7 @@
 # lists, sensitivity, name_column_headers, user-ADDED recognizers). Without this,
 # the additive-only merge left every existing config permanently stuck on the
 # first-run defaults -- e.g. NER_MISC at 0.5 long after it shipped at 0.75.
-config_schema_version: 8
+config_schema_version: 9
 
 languages:
   - de
@@ -168,6 +168,25 @@ entities:
     default_action: pseudonymize
     confidence_threshold: 0.5
   DE_PHONE:
+    default_action: pseudonymize
+    confidence_threshold: 0.5
+  # Links. Presidio ships a UrlRecognizer and the engine has always LOADED it --
+  # but detect_unit only requests the entities listed in this block, so with URL
+  # absent it was never asked for and every link sailed through. Measured on a real
+  # internal workbook: 41 distinct links leaked, e.g. an internal Confluence space
+  # and a document-management deep link carrying its own document id.
+  #
+  # Pseudonymized whole, host included, for every host rather than only "internal"
+  # ones: the hostname is itself the disclosure (it names the internal estate to
+  # whatever AI service receives the file), and any host-based rule silently fails
+  # open on the one host nobody thought to list. A reversible token also keeps the
+  # link recoverable via re-identify, so nothing is destroyed.
+  #
+  # Detection is engine._URL_PATTERNS (scheme- or www-anchored, score 0.7), which
+  # REPLACES Presidio's UrlRecognizer -- see that constant for why. 0.5 leaves the
+  # sensitivity slider room to move in both directions without admitting anything,
+  # since 0.7 is now the only score a link can carry.
+  URL:
     default_action: pseudonymize
     confidence_threshold: 0.5
   DATE_TIME:

@@ -101,6 +101,12 @@ _ENTITY_TO_CLASS: dict[str, DataClass] = {
     "BANK_INTERNAL_REF": BANK_INTERNAL,
     "DE_KUNDENNUMMER": BANK_INTERNAL,
     "DENY_LIST": BANK_INTERNAL,
+    # A link is grouped with the bank-internal references rather than with contact
+    # details: what actually leaks through one is the internal estate (which
+    # Confluence space, which document-management system) plus a document id that
+    # is a direct pointer into it -- the same kind of disclosure as an internal
+    # reference number, and not a way to contact anybody.
+    "URL": BANK_INTERNAL,
     "ORGANIZATION": ORG_PLACES,
     "ORG": ORG_PLACES,
     "LOCATION": ORG_PLACES,

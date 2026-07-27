@@ -93,6 +93,28 @@ _ANCHORED_NAME_PATTERNS = [
     Pattern(name="labelled_name", regex=rf"(?<=\b{_NAME_LABELS}\s*:\s*){_NAME}", score=0.70),
 ]
 
+# Links, SCHEME- or www-anchored. This replaces Presidio's own UrlRecognizer,
+# which is removed below: its non-scheme pattern matches any `word.tld`-ish run at
+# score 0.5, and measured on a real workbook that produced not just noise
+# ("v1.md" from "Prompt v1.md", "bank.de" from inside an email address) but BROKEN
+# SPANS -- "d.ve" out of the middle of "d.velop". A partial span is worse than a
+# false positive: applying it writes "[LINK_1]lop" into the output.
+#
+# Requiring a scheme or a www. prefix removes that whole class. The cost is a bare
+# "metzler.com" with neither, which is indistinguishable from a filename
+# ("Datei.xlsx") without a hostname list -- and the completeness scan carries a
+# link pattern as a backstop for it.
+#
+# The trailing character class excludes sentence punctuation so a link at the end
+# of a sentence does not swallow the full stop (Presidio's did: it matched
+# "https://api.openai.com/v1/responses." including the period, and redacting that
+# span deletes the sentence boundary from the output).
+_URL_TAIL = r"[^\s<>\"'\]\)]*[^\s<>\"'\]\),.;:!?]"
+_URL_PATTERNS = [
+    Pattern(name="url_scheme", regex=rf"\bhttps?://{_URL_TAIL}", score=0.7),
+    Pattern(name="url_www", regex=rf"\bwww\.{_URL_TAIL}", score=0.7),
+]
+
 # German system exports routinely transliterate umlauts (this repo's own fixtures
 # say "Mueller", not "Müller"), and a word-list recognizer written with umlauts
 # only silently misses every one of those spellings -- measured: 'arbeitsunfaehig',
@@ -222,6 +244,23 @@ def build_analyzer(config: dict, *, gliner_backend=None) -> AnalyzerEngine:
                 patterns=_ANCHORED_NAME_PATTERNS,
                 supported_language=lang,
                 global_regex_flags=_CASE_SENSITIVE_FLAGS,
+            )
+        )
+
+    # Links. Presidio's UrlRecognizer is dropped in favour of the anchored patterns
+    # above -- see _URL_PATTERNS for the measured broken-span problem it caused.
+    # Removed per language so no loose variant survives in a multi-language config.
+    for lang in languages:
+        try:
+            analyzer.registry.remove_recognizer("UrlRecognizer", language=lang)
+        except Exception:  # noqa: BLE001 -- absent is the desired end state either way
+            pass
+        analyzer.registry.add_recognizer(
+            PatternRecognizer(
+                supported_entity="URL",
+                patterns=_URL_PATTERNS,
+                context=["link", "url", "confluence", "intranet", "sharepoint", "seite", "webseite"],
+                supported_language=lang,
             )
         )
 
