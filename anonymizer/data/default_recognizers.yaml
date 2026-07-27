@@ -8,7 +8,14 @@
 # lists, sensitivity, name_column_headers, user-ADDED recognizers). Without this,
 # the additive-only merge left every existing config permanently stuck on the
 # first-run defaults -- e.g. NER_MISC at 0.5 long after it shipped at 0.75.
-config_schema_version: 9
+# v10: REPAIR. Every schema bump up to and including v9 silently rewrote the
+# GERMAN Art. 9 word lists (DE_RELIGION / DE_HEALTH_DATA / DE_UNION_PARTY /
+# DE_SEX_LIFE / NRP) as their ENGLISH counterparts, because _resync_builtins keyed
+# the shipped recognizers by name and a name maps to SEVERAL entries -- one per
+# language. Any config that took a bump therefore had no German Art. 9 detection at
+# all. This bump exists to run the fixed, group-aware re-sync over those configs and
+# put the German word lists back.
+config_schema_version: 10
 
 languages:
   - de

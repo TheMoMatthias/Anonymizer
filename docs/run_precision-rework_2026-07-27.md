@@ -221,7 +221,87 @@ alone. The v9 schema resync preserves user-owned lists and the `enabled` toggle.
 Anything not listed above — in particular no changes to the mapping DB, the
 encrypted lists, the OCR path, or the review UI beyond the demoted band.
 
-## FINDING (2026-07-27, blocking the DONE-WHEN gate): the audit workbook over-reports recall
+## RESOLVED (2026-07-27): honest metrics, and a CRITICAL Art. 9 config bug found behind them
+
+Chasing the over-reported recall below led to the worst bug in this repo's history,
+and to three fixes. All landed before Phase 2, on the principle that an evaluation
+gate which over-reports would happily certify the ML work as fine.
+
+### 1. CRITICAL -- German GDPR Art. 9 detection did not run at all
+
+`config.py::_resync_builtins` keyed the shipped recognizers by NAME:
+
+```python
+shipped_recs = {r["name"]: r for r in shipped.get("custom_recognizers", [])}
+```
+
+A recognizer name is deliberately NOT unique -- one entity type is emitted by
+several entries, a GERMAN word list and an ENGLISH one (`DE_RELIGION` ships 1 de +
+2 en), plus case-sensitive twins for `DE_HEALTH_DATA` / `DE_UNION_PARTY`. Keying by
+name collapsed the shipped **27 entries to 17**, and because the `en` variants sit
+last in the file, every GERMAN Art. 9 word list was overwritten by its English
+counterpart.
+
+Measured on the live config: `DE_RELIGION`, `DE_HEALTH_DATA`, `DE_UNION_PARTY`,
+`DE_SEX_LIFE` and `NRP` were all registered for **`en` only**. So health data,
+religion, union/party membership, sex life and ethnic origin were **not detected in
+German documents at all** -- the exact class of leak `356337c` fixed in the other
+direction, re-introduced on any schema bump. `merge_new_recognizers` already had
+this right (see `recognizer_fingerprint`, which fingerprints the GROUP for exactly
+this reason); this second path had been left behind.
+
+Fixed group-aware, provenance refreshed so the two paths agree, and
+`config_schema_version` bumped **9 -> 10** purely so the repair reaches configs
+already in the broken state. Verified: 17 -> 27 recognizers, all five types
+registered for `de` and `en`, and `Konfession: muslimisch` /
+`Diagnose: chronische Migraene` / `Gewerkschaft: ver.di` detect again. Two
+regression tests in `test_config.py`.
+
+### 2. The scorer over-reported recall
+
+`covered()` credited a secret when the DETECTED value was a substring of it
+(`fv in v`), so planted German `muslimisch` scored as caught because an unrelated
+finding on a DIFFERENT SHEET matched the English `Muslim`. That is what hid bug 1
+for as long as it did. Now one-directional and whole-token, reusing
+`evaluation._whole_token` (which already had the honest matcher, and the same
+lesson in its docstring).
+
+Tightening it initially swung the error the other way -- 12 postal addresses
+reported as missed although DE_ADDRESS claims them as TWO spans ("Kirchweg 55" +
+"60311 Frankfurt am Main", only the ", " unclaimed). So coverage may now come from
+several findings together, by token union, with the limitation stated in the code.
+
+### 3. A false positive could block the save entirely
+
+Decisions are keyed by VALUE while apply re-detects per CELL, so a value falsely
+claimed in one cell becomes a "removed value" that survives verbatim wherever
+detection does not fire, and `_literal_residual` correctly refuses to write
+anything. Four enum decoys did exactly that. Phase 3 of the scorer now skips
+falsely-claimed decoys as a reviewer would, or one FP makes the apply path
+unmeasurable.
+
+The same investigation turned up a second, sharper instance: **openpyxl stamps
+today's date into `dcterms:created`/`modified` on every save**, so a document
+containing today's date as a data value, with dates being redacted, failed the
+verify and produced NO output file -- nothing actually wrong. Date-dependent and
+intermittent. Both fields are now scrubbed (privacy AND correctness); regression
+test in `test_xlsx.py`.
+
+### Honest baseline, as of this commit
+
+`scripts/score_test_workbook.py` now exits 0 on the 16-sheet fixture:
+
+| | value |
+|---|---|
+| recall | **293/293 (100%)** -- honestly matched |
+| false positives on decoys | **21/84** |
+| apply + fail-loud verify | passes |
+| known leaks | 2 (`Alteryx`, `OpenClaw` -- tool names in prose, propagation) |
+
+The 21 FPs are the enum-vocabulary and German-compound-noun classes. That is the
+number Phase 3 has to move, and it is now reproducible.
+
+## ORIGINAL FINDING (superseded by the above, kept for the record)
 
 Discovered while extending the fixture. `scripts/score_test_workbook.py:165` counts a
 planted secret as found when the detected value is a **substring** of it:

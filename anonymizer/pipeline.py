@@ -324,6 +324,19 @@ _META_CLEAR_TAGS = frozenset(
         "manager",
         "company",
         "lastprinted",
+        # Save timestamps (dcterms:created / dcterms:modified). Kept for the same
+        # reason lastPrinted is -- when a file was produced is itself metadata an
+        # anonymized copy has no reason to carry.
+        #
+        # It is ALSO a correctness fix. openpyxl stamps today's date into these on
+        # every save, so if the document happens to contain today's date as a DATA
+        # value and dates are being redacted, _literal_residual finds that value
+        # "surviving" in the output and the whole save fails loud -- with nothing
+        # actually wrong. Measured on the audit workbook, which carries generated
+        # 2026-xx-xx timestamps: the save failed on `2026-07-27` and no file was
+        # written. A date-dependent, intermittent hard failure is the worst kind.
+        "created",
+        "modified",
         # Descriptive fields -- never body text, so neither the redaction nor the
         # recognizer re-scan ever looked at them.
         "title",

@@ -357,3 +357,43 @@ def test_xlsx_configured_name_header_claims_bare_surname(analyzer, base_config):
     cfg = {**base_config, "languages": ["de"], "name_column_headers": ["Sachwalter"]}
     findings = xlsx_handler._analyze_cell_text("Weber", "Sachwalter", analyzer, cfg)
     assert any("Weber" in f.value for f in findings), f"configured header did not claim the cell: {findings}"
+
+
+def test_scrub_metadata_clears_the_save_timestamps(tmp_path):
+    """dcterms:created / dcterms:modified are scrubbed for two reasons.
+
+    Privacy: when a file was produced is metadata an anonymized copy has no reason
+    to carry, exactly like lastPrinted (already scrubbed).
+
+    Correctness: openpyxl stamps TODAY into both on every save. If the document
+    also contains today's date as a DATA value and dates are being redacted, the
+    fail-loud verify finds that value "surviving" in the output and refuses to
+    write the file -- with nothing actually wrong. Measured on the audit workbook,
+    whose generated timestamps collided with the save date: the whole apply failed.
+    A date-dependent, intermittent hard failure is the worst kind to leave in.
+    """
+    import zipfile
+
+    import openpyxl
+
+    from anonymizer.pipeline import _scrub_metadata
+
+    wb = openpyxl.Workbook()
+    wb.active["A1"] = "x"
+    wb.properties.creator = "Klaus Mueller"
+    path = tmp_path / "meta.xlsx"
+    wb.save(path)
+
+    with zipfile.ZipFile(path) as zf:
+        before = zf.read("docProps/core.xml").decode("utf-8", "ignore")
+    assert "dcterms:created" in before and "T" in before  # a timestamp really is written
+
+    _scrub_metadata(path)
+
+    with zipfile.ZipFile(path) as zf:
+        after = zf.read("docProps/core.xml").decode("utf-8", "ignore")
+    assert "Klaus Mueller" not in after
+    # The elements may remain, but they must no longer carry a date.
+    import re
+
+    assert not re.search(r"\d{4}-\d{2}-\d{2}", after), after

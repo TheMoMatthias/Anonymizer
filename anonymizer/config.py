@@ -225,17 +225,43 @@ def _resync_builtins(cfg: dict, shipped: dict) -> bool:
     if "tiers" in shipped:
         cfg["tiers"] = shipped["tiers"]
 
-    shipped_recs = {r["name"]: r for r in shipped.get("custom_recognizers", [])}
-    if shipped_recs:
-        merged = [
-            dict(shipped_recs[r["name"]]) if r["name"] in shipped_recs else r
-            for r in cfg.get("custom_recognizers", [])
-        ]
-        have = {r["name"] for r in merged}
-        for name, rec in shipped_recs.items():
-            if name not in have:
-                merged.append(dict(rec))
+    # Re-sync recognizers by NAME GROUP, never entry-by-name.
+    #
+    # A recognizer name is deliberately NOT unique: one entity type is emitted by
+    # several entries -- a GERMAN word list and an ENGLISH one (DE_RELIGION ships
+    # 1 de + 2 en), plus case-sensitive twins for DE_HEALTH_DATA / DE_UNION_PARTY.
+    # Keying a dict by name collapsed the shipped 27 entries to 17 and, because the
+    # `en` variants sit last in the file, rewrote every GERMAN Art. 9 word list as
+    # its English counterpart. Measured consequence: DE_RELIGION, DE_HEALTH_DATA,
+    # DE_UNION_PARTY, DE_SEX_LIFE and NRP all ended up registered for `en` ONLY, so
+    # GDPR Art. 9 detection did not run on German documents at all -- the exact leak
+    # 356337c fixed in the other direction, re-introduced here on any schema bump.
+    #
+    # merge_new_recognizers() already got this right (see recognizer_fingerprint,
+    # which fingerprints the GROUP for precisely this reason); this second path had
+    # been left behind. Both now agree, and the provenance state is refreshed here
+    # too -- otherwise the next merge_new_recognizers() would compare the group we
+    # just installed against a stale fingerprint, read it as a user edit, and
+    # refuse to ever upgrade it again.
+    shipped_groups = _group_by_name(shipped.get("custom_recognizers", []))
+    if shipped_groups:
+        merged: list[dict] = []
+        placed: set[str] = set()
+        for rec in cfg.get("custom_recognizers", []):
+            name = rec["name"]
+            if name not in shipped_groups:
+                merged.append(rec)  # user-ADDED recognizer: never touched
+                continue
+            if name not in placed:  # insert the whole shipped group at its position
+                placed.add(name)
+                merged.extend(dict(r) for r in shipped_groups[name])
+        for name, group in shipped_groups.items():
+            if name not in placed:
+                merged.extend(dict(r) for r in group)
         cfg["custom_recognizers"] = merged
+        state = cfg.setdefault(SHIPPED_STATE_KEY, {})
+        for name, group in shipped_groups.items():
+            state[name] = recognizer_fingerprint(group)
 
     # Topical block: re-sync the CODE-OWNED parts (which categories exist + their
     # header_terms) so a shipped category added after the user's config was

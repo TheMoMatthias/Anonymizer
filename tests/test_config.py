@@ -265,3 +265,65 @@ def test_undecryptable_lists_raises_and_is_not_overwritten(tmp_path, monkeypatch
     with pytest.raises(RuntimeError):
         cfg_mod._load_secure_lists()
     assert (base / "lists.enc").read_bytes() == corrupt, "corrupt lists.enc must not be overwritten"
+
+
+def test_schema_resync_keeps_every_language_variant_of_a_recognizer(tmp_path, monkeypatch):
+    """A recognizer NAME maps to SEVERAL shipped entries -- a German word list and an
+    English one both emit DE_RELIGION, and DE_HEALTH_DATA/DE_UNION_PARTY each ship a
+    case-sensitive twin. _resync_builtins keyed them by name, which collapsed the
+    shipped 27 entries to 17 and, because the `en` variants sit last in the file,
+    rewrote every GERMAN Art. 9 word list as its English counterpart. The measured
+    result was DE_RELIGION / DE_HEALTH_DATA / DE_UNION_PARTY / DE_SEX_LIFE / NRP all
+    registered for `en` ONLY -- no GDPR Art. 9 detection on German documents at all,
+    triggered by any schema bump.
+    """
+    import yaml
+
+    from anonymizer.config import DEFAULT_CONFIG_PATH, _group_by_name, _resync_builtins
+
+    shipped = yaml.safe_load(DEFAULT_CONFIG_PATH.read_text(encoding="utf-8"))
+    shipped_groups = _group_by_name(shipped["custom_recognizers"])
+    # The premise of the test: names really are non-unique in the shipped file.
+    multi = {n: g for n, g in shipped_groups.items() if len(g) > 1}
+    assert multi, "shipped file no longer has multi-entry recognizer groups; revisit this test"
+
+    # A config one version behind, holding the shipped recognizers verbatim.
+    cfg = {
+        "config_schema_version": shipped["config_schema_version"] - 1,
+        "custom_recognizers": [dict(r) for r in shipped["custom_recognizers"]],
+        "entities": dict(shipped["entities"]),
+        # A recognizer the USER added must survive the re-sync untouched.
+        "allow_list": [],
+    }
+    cfg["custom_recognizers"].append({"name": "MY_OWN", "language": "de", "patterns": [{"regex": "x", "score": 0.5}]})
+
+    assert _resync_builtins(cfg, shipped) is True
+
+    after = _group_by_name(cfg["custom_recognizers"])
+    for name, group in shipped_groups.items():
+        assert len(after.get(name, [])) == len(group), f"{name}: {len(after.get(name, []))} != {len(group)}"
+        assert {r.get("language") for r in after[name]} == {r.get("language") for r in group}, name
+    assert len(cfg["custom_recognizers"]) == len(shipped["custom_recognizers"]) + 1
+    assert any(r["name"] == "MY_OWN" for r in cfg["custom_recognizers"]), "user-added recognizer was dropped"
+
+
+def test_german_art9_recognizers_are_registered_for_german(tmp_path, monkeypatch):
+    """End-to-end guard on the same bug, at the level that actually matters: after a
+    re-sync, can the analyzer see German Art. 9 data in German text at all."""
+    import yaml
+
+    from anonymizer.config import DEFAULT_CONFIG_PATH, _resync_builtins
+    from anonymizer.engine import build_analyzer
+
+    shipped = yaml.safe_load(DEFAULT_CONFIG_PATH.read_text(encoding="utf-8"))
+    cfg = {**{k: v for k, v in shipped.items()}, "config_schema_version": shipped["config_schema_version"] - 1}
+    cfg["custom_recognizers"] = [dict(r) for r in shipped["custom_recognizers"]]
+    _resync_builtins(cfg, shipped)
+
+    cfg["languages"] = ["de"]
+    analyzer = build_analyzer(cfg)
+    supported = {
+        e for r in analyzer.registry.recognizers if r.supported_language == "de" for e in r.supported_entities
+    }
+    for entity in ("DE_RELIGION", "DE_HEALTH_DATA", "DE_UNION_PARTY", "DE_SEX_LIFE", "NRP"):
+        assert entity in supported, f"{entity} is not registered for German -- Art.9 would not fire"

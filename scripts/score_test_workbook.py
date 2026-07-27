@@ -25,6 +25,7 @@ catches that, because the fail-loud verify checks the written bytes.
 from __future__ import annotations
 
 import json
+import re
 import sys
 import time
 import zipfile
@@ -37,6 +38,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from anonymizer import taxonomy  # noqa: E402
 from anonymizer.config import DEFAULT_CONFIG_PATH  # noqa: E402
+# Reused rather than re-implemented: evaluation.py already had the honest matcher
+# (and the same lesson in its docstring) while this scorer did not.
+from anonymizer.evaluation import _whole_token  # noqa: E402
 from anonymizer.engine import build_analyzer  # noqa: E402
 from anonymizer.pipeline import apply_document, scan_document  # noqa: E402
 from anonymizer.validators import iban_valid  # noqa: E402
@@ -156,15 +160,60 @@ def main(d: Path) -> int:
           f"{len(result.columns or [])} columns offered a policy")
 
     def covered(value: str):
+        """The finding that actually covers this planted value, or None.
+
+        ONE-DIRECTIONAL on purpose. A finding whose span CONTAINS the planted value
+        does cover it -- an address block or an Art. 9 label:value line legitimately
+        claims more text than the plant. The reverse does not hold, and asserting it
+        made this instrument lie: the old code also returned a match when the
+        DETECTED value was a substring of the plant (`fv in v`), so the planted German
+        `muslimisch` scored as caught because an unrelated finding on a DIFFERENT
+        SHEET had detected the English `Muslim`. That inflated special_category to a
+        reported 34/34 while four German Art. 9 values were not detected at all, and
+        it is what hid the config bug fixed in the same commit (the German Art. 9
+        word lists were being overwritten by their English counterparts on every
+        schema bump).
+
+        A shorter detection cannot cover a longer secret: redacting `Muslim` out of
+        `muslimisch` leaves `isch` behind, and the value it was supposed to remove is
+        still legible. Whole-token containment, checked in the sound direction only.
+
+        Coverage is also allowed to come from SEVERAL findings together, because it
+        genuinely does: a German postal address is claimed as two spans, DE_ADDRESS
+        on "Kirchweg 55" and a second on "60311 Frankfurt am Main", with only the
+        ", " between them unclaimed. Requiring one finding to span the whole plant
+        under-reported those 12 addresses as missed while every part of them was in
+        fact removed -- the opposite error to the one above, and just as misleading.
+        So the union rule: every significant TOKEN of the plant must be covered.
+
+        KNOWN LIMITATION, stated so the number is not over-read: this is
+        token-based, not span-based, so in principle two unrelated findings
+        elsewhere in the document could each supply one token. It is an upper bound
+        on coverage. The byte-level truth is Phase 3, which re-reads the written
+        output and is not fooled by any of this.
+        """
         v = value.strip().lower()
         if v in found_vals:
             return found_vals[v]
-        # A finding that CONTAINS the planted value still covers it (the span may be
-        # wider, e.g. an address block or an Art.9 line).
         for fv, g in found_vals.items():
-            if v in fv or fv in v:
+            if v in fv and _whole_token(v, fv):
                 return g
-        return None
+        # Union of findings. Short function words ("am" in a street address) are not
+        # required to be claimed -- they are not the identifying part and no
+        # recognizer should be claiming them on their own.
+        tokens = [
+            t for t in re.findall(r"[0-9A-Za-zÀ-ɏ.\-+/']{2,}", v)
+            if len(t) >= 3 or any(ch.isdigit() for ch in t)
+        ]
+        if not tokens:
+            return None
+        first = None
+        for tok in tokens:
+            hit = next((g for fv, g in found_vals.items() if _whole_token(tok, fv)), None)
+            if hit is None:
+                return None
+            first = first or hit
+        return first
 
     by_class: dict[str, list[bool]] = {}
     by_sheet: dict[str, list[bool]] = {}
