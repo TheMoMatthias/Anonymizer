@@ -333,3 +333,106 @@ def test_load_backend_uses_the_pack_local_hf_cache(monkeypatch, tmp_path):
     monkeypatch.setitem(sys.modules, "gliner", _fake_gliner_module(record2))
     load_gliner_backend({"model_path": str(no_cache)})
     assert "cache_dir" not in record2["kwargs"]
+
+
+# --- batched priming + memo replay (2026-07-27 perf work) --------------------
+
+
+class _CountingBackend:
+    """Records how many single vs batched inferences it was asked for, so a test can
+    assert that priming actually batched and that apply replayed instead of re-running."""
+
+    def __init__(self):
+        self.single_calls = 0
+        self.batches = []
+        self._memo = {}
+
+    def _spans(self, text):
+        return [{"label": "person", "start": 0, "end": len(text), "score": 0.9}] if "Mueller" in text else []
+
+    def prime(self, texts, labels):
+        todo = [t for t in dict.fromkeys(texts) if (t, tuple(labels)) not in self._memo]
+        if todo:
+            self.batches.append(len(todo))
+        for t in todo:
+            self._memo[(t, tuple(labels))] = self._spans(t)
+        return len(todo)
+
+    def predict(self, text, labels):
+        hit = self._memo.get((text, tuple(labels)))
+        if hit is not None:
+            return hit
+        self.single_calls += 1
+        return self._spans(text)
+
+
+def test_prime_gliner_batches_and_predict_then_replays(gliner_config):
+    """Priming must batch, and every later predict for a primed text must be served
+    from the memo -- that is what makes apply stop re-inferring (167s of a measured
+    297s round trip) and it is why parity gets STRONGER: apply reuses scan's spans
+    rather than re-deriving spans merely argued to be identical."""
+    from anonymizer.engine import build_analyzer
+    from anonymizer.gliner_recognizer import prime_gliner
+
+    backend = _CountingBackend()
+    analyzer = build_analyzer(gliner_config, gliner_backend=backend)
+    texts = ["Herr Mueller kam an.", "Nichts hier.", "Herr Mueller kam an."]
+
+    primed = prime_gliner(analyzer, texts)
+    assert primed == 2, "duplicate texts must be primed once"
+    assert backend.batches == [2]
+
+    labels = list(gliner_config["gliner"]["labels"].keys())
+    for t in texts:
+        backend.predict(t, labels)
+    assert backend.single_calls == 0, "a primed text must never trigger single inference"
+
+
+def test_prime_gliner_is_a_no_op_without_ml(base_config):
+    """No ML registered -> nothing to prime, and no crash. Guards the shipped
+    default: priming is called unconditionally by the xlsx handler."""
+    from anonymizer.engine import build_analyzer
+    from anonymizer.gliner_recognizer import prime_gliner
+
+    analyzer = build_analyzer({**base_config, "languages": ["de"]})
+    assert prime_gliner(analyzer, ["irgendein Text"]) == 0
+
+
+def test_prime_tolerates_a_backend_without_prime(gliner_config):
+    """The injected fakes in this file implement only predict(). Priming must skip
+    them rather than requiring every backend to grow a method."""
+    from anonymizer.engine import build_analyzer
+    from anonymizer.gliner_recognizer import prime_gliner
+
+    analyzer = build_analyzer(gliner_config, gliner_backend=FakeBackend({}))
+    assert prime_gliner(analyzer, ["x"]) == 0
+
+
+def test_ml_scan_texts_is_identical_for_scan_and_apply(tmp_path):
+    """Priming is only parity-safe if both passes derive the SAME text set. They call
+    the same helper on the same workbook, and this pins that."""
+    import openpyxl
+
+    from anonymizer.formats.xlsx_handler import _ml_scan_texts
+
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws["A1"] = "Owner"
+    ws["A2"] = "Klaus Mueller"
+    ws["B1"] = "Notiz"
+    # A line-start bullet FUSED to the next word (no space) -- the shape
+    # neutralize_structural_noise exists for, and the only one it touches.
+    ws["B2"] = "Punkte:\n-Erstellung folgt"
+    path = tmp_path / "p.xlsx"
+    wb.save(path)
+
+    first = _ml_scan_texts(openpyxl.load_workbook(path))
+    second = _ml_scan_texts(openpyxl.load_workbook(path))
+    assert first == second
+    # The ML pass sees header+value, neutralized -- what detect_unit actually analyzes.
+    assert "Owner: Klaus Mueller" in first
+    fused = [t for t in first if "Erstellung" in t]
+    assert fused and all("-Erstellung" not in t for t in fused), fused
+    # Same length, so a span computed against this is still a valid offset into the
+    # real text -- the property parity depends on.
+    assert all(len(t) == len(t.replace(" Erstellung", "-Erstellung")) for t in fused)

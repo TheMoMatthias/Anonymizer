@@ -356,6 +356,69 @@ soft cap, which merely reduces coverage.
 - **The ONNX/int8 export is NOT started**, pending the size decision: it buys
   1.85 GB → ~0.98 GB and nothing else.
 
+## Phase 2.5 — ML speed, 3.4× with byte-identical output
+
+### Policy change (user, 2026-07-27)
+
+The <5-minute ceiling is **no longer a hard blocker**: "I would rather have a quality
+output and wait 5 minutes longer than being bound to an unreasoned time threshold.
+However we should optimize whatever we can." So quality wins ties, ML should be used
+by default where it is measurably better, and speed work is still expected — but only
+where it costs nothing. The DEFERRED soft cap (which reduces COVERAGE) is therefore
+dropped in favour of optimisations that change nothing about what is detected.
+
+### The levers, measured before building anything
+
+| lever | effect | quality cost |
+|---|---|---|
+| batch inference (batch 8–16) | 126.9 → 52.9 ms/text (**2.4×**) | **none** — verified byte-identical spans AND scores |
+| memo-replay at apply | removes the whole 167 s | none; strengthens parity |
+| label count 13 → 6 | 59.6 → 32.6 ms (1.8×) | real — drops Art.9/licensee/division |
+| skip short structured cells | short cells cost 50 ms vs 78.7 ms for prose | improves precision, small recall loss |
+
+Two results that stopped me guessing: **batch 32 is SLOWER than 16** (59.5 vs
+53.0 ms/text), so the batch is pinned at 16 rather than "bigger is better"; and torch
+already used all 8 cores, so thread tuning was a dead end before any time went into it.
+
+**Built:** memo-replay + batched priming. **Not built:** label pruning and the
+short-cell skip — both trade quality, and the user's steer was explicitly the opposite.
+
+### Result
+
+| | before | after |
+|---|---|---|
+| scan | 130.1 s | **63.4 s** (2.1×) |
+| apply | 167.3 s | **24.4 s** (6.9×) |
+| **round trip** | **297 s** | **88 s (3.4×)** |
+| recall / FPs / leaks | 293/293 · 31/84 · 1 | **identical** |
+
+### Batching under-delivered at first, and instrumenting said why
+
+Priming only the xlsx handler's header+value texts still left **337 of 801 predictions
+unprimed**, and every one was a bare cell value with no header — `'Fischer'`,
+`'K-14655'`, `'Kirchweg 55, 60311 Frankfurt am Main'`. Cause: **`_with_propagation`
+runs a SECOND full detection sweep over raw unit text** to seed the propagate list, so
+with ML on it silently doubles the inference bill. Primed there too, in the same
+function, so scan and apply still derive an identical set — parity holds by the same
+argument that function already rests on.
+
+Worth keeping in mind generally: any pre-pass that re-detects is now an ML-cost
+multiplier, not just a spaCy one.
+
+### Design notes
+
+* The memo lives on the BACKEND and the GUI caches one analyzer per session
+  (`gui/app.py::_ensure_analyzer`), so scan's predictions are still resident when apply
+  re-detects. That is what makes replay free rather than a persistence problem.
+* Replay makes parity **stronger**: apply reuses scan's exact spans instead of
+  re-deriving spans that are only *argued* identical (they are — determinism verified
+  5/5 — but reusing beats arguing).
+* Memo eviction (`_MEMO_MAX`) can only cost speed, never correctness: a miss re-infers,
+  and inference is deterministic.
+* `prime_gliner` is duck-typed and returns 0 on anything without a registry or a
+  priming backend. The hardening tests caught this — they use stand-in analyzers, and
+  an optimisation must never be able to break a caller.
+
 ## RESOLVED (2026-07-27): honest metrics, and a CRITICAL Art. 9 config bug found behind them
 
 Chasing the over-reported recall below led to the worst bug in this repo's history,

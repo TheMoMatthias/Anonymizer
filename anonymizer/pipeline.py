@@ -16,7 +16,7 @@ from . import language
 from . import ocr as ocr_mod
 from . import xmlsafe
 from .engine import SPACY_MODELS, DEFAULT_LANGUAGES
-from .gliner_recognizer import resolve_model_path
+from .gliner_recognizer import prime_gliner, resolve_model_path
 from .actions import decisions_lookup
 from .formats import docx_handler, legacy, pdf_handler, pptx_handler, xlsx_handler
 from .mapping import MappingStore
@@ -180,6 +180,17 @@ def _with_propagation(config: dict, units: list, analyzer) -> dict:
         if len(languages) == 1
         else {}
     )
+    # And batch the ML pass over the same cleaned texts, for the same reason.
+    #
+    # This pre-pass is a SECOND full sweep over the document -- on raw unit text, with
+    # no column header -- so with ML on it doubles the inference bill. Measured on the
+    # audit workbook: priming only the handler's header+value texts still left 337 of
+    # 801 predictions unprimed, and every one of them was a bare cell value from this
+    # sweep ('Fischer', 'K-14655', 'Kirchweg 55, 60311 Frankfurt am Main').
+    #
+    # Parity-safe by the same argument as the rest of this function: scan and apply
+    # both call it with the same units, so both prime the identical set.
+    prime_gliner(analyzer, [core.neutralize_structural_noise(t) for t in distinct_texts])
     for text in distinct_texts:
         unit = TextUnit(id="propagate", text=text)
         artifacts = artifacts_by_clean.get(core.neutralize_structural_noise(text))

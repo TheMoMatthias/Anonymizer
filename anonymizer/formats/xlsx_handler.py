@@ -20,6 +20,7 @@ from ..core import (
     precompute_nlp_artifacts,
 )
 from ..engine import DEFAULT_LANGUAGES
+from ..gliner_recognizer import prime_gliner
 from ..models import CellInfo, ColumnInfo, Finding, ProcessingError, TextUnit
 from .run_replace import apply_aux_parts, aux_text_units
 
@@ -545,6 +546,19 @@ def _combined_cell_text(text: str, header: str | None) -> str:
     return prefix + text
 
 
+def _ml_scan_texts(wb) -> list[str]:
+    """Every distinct text the ML pass will be asked about, in the exact form it will
+    see it: the header+value combination, neutralized, i.e. what detect_unit hands to
+    analyzer.analyze(). Derived from the workbook alone, so scan and apply produce the
+    SAME list -- which is what makes priming parity-safe rather than a parity risk."""
+    combined = {
+        neutralize_structural_noise(_combined_cell_text(text, header))
+        for _key, text, header in _iter_cell_units(wb)
+    }
+    combined |= {neutralize_structural_noise(text) for _key, text in _iter_defined_name_units(wb)}
+    return sorted(combined)
+
+
 def _precompute_cell_artifacts(wb, analyzer, config) -> dict[tuple[str | None, str], object]:
     """One spaCy pipe() batch over every DISTINCT (header, cell-text) combo in
     the workbook, instead of one analyze() call per cell -- measured ~5x faster
@@ -792,6 +806,8 @@ def scan(path: Path, analyzer, config) -> list:
     # would silently give whichever sheet ran second the other one's answer.
     cache: dict[tuple[str, str | None, str], list] = {}
     artifacts_by_key = _precompute_cell_artifacts(wb, analyzer, config)
+    # Batch the ML pass over the same text set BOTH passes derive (see _ml_scan_texts).
+    prime_gliner(analyzer, _ml_scan_texts(wb))
 
     def detect(text, header, key, sheet=None):
         lang = _text_language(text, sheet_langs.get(sheet or "", doc_lang), supported)
@@ -1017,6 +1033,8 @@ def apply(path: Path, out_path: Path, decisions: dict, analyzer, config, mapping
     # string on a German and an English sheet is two different problems.
     redact_cache: dict[tuple[str, str | None, str], str] = {}
     artifacts_by_key = _precompute_cell_artifacts(wb, analyzer, config)
+    # Batch the ML pass over the same text set BOTH passes derive (see _ml_scan_texts).
+    prime_gliner(analyzer, _ml_scan_texts(wb))
     sheet_langs = _sheet_languages(wb, config)
     doc_lang = (config.get("languages") or list(DEFAULT_LANGUAGES))[0]
     supported = tuple(sorted(set(config.get("languages") or ()) | set(DEFAULT_LANGUAGES)))
