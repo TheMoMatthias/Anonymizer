@@ -284,8 +284,46 @@ contract number in prose must still surface. The test was protecting something
 real, so the constant changed, not the test: a lone number in its own cell is a
 quantity, the same digits inside prose are not.
 
-**`DESCRIPTION` 237 → 145 is a precision win, not a regression** (verified, not
-assumed): 80 of the 237 baseline rows were single snake_case field identifiers
-(`Beschreibung_1` … `Beschreibung_N`) plus the 7 `_x001E_` empties. Separately
-confirmed that a URL inside a description cell does NOT suppress the whole-cell
-DESCRIPTION claim, which would have been a leak.
+Separately confirmed that a URL inside a description cell does NOT suppress the
+whole-cell DESCRIPTION claim, which would have been a leak.
+
+#### The exported CSV is NOT a valid baseline — and two conclusions drawn from it were wrong
+
+`Malcom Werther` and `Ukom` appear in the exported CSV but are **not present in
+`Downloads/mdx-big-beautiful-innovation-spreadsheet.xlsm` at all** (searched the
+raw parts, not just the cell model). The export therefore came from a DIFFERENT
+version of the workbook, and every before/after count taken against it is
+confounded. Re-measured properly instead: the pre-Phase-1 commit and HEAD, both
+scanning the identical file with the identical shipped config, in a git worktree.
+
+| | before (22443bf) | after (34b23ad) |
+|---|---|---|
+| flagged values | 442 | **481** |
+| flagged occurrences | 2723 | 2770 |
+| PERSON | 200 | 203 |
+| DESCRIPTION | 150 | 145 |
+| URL | 0 | **41** |
+| DATE_TIME | 32 | 32 |
+| possible-miss rows | 107 | **74** |
+| bare-guess values / occurrences | 194 / 1593 | **183 / 1560** |
+| scan | 22.6s | 23.2s |
+
+Two claims made against the CSV baseline and now retracted:
+
+* **"PERSON went 96 → 203, so fixing the `_x001E_` escape unmasked a flood of
+  German-noun noise."** Wrong. On this file PERSON is **200 → 203** — flat. The
+  `Must-Haves` / `Datenfeeds` / `Kernworkflow` values were already being flagged
+  before Phase 1; they were absent from the old CSV only because it is a different
+  workbook. Phase 1 added no measurable noise.
+* **"DESCRIPTION 237 → 145, of which 80 were snake_case field identifiers."** True
+  of the old CSV, not of this file: the real change here is **150 → 145**.
+
+What Phase 1 actually did to the totals: **the entire flagged increase is the 41
+links** that previously left in the clear. Bare-guess values went DOWN (194 → 183)
+and possible-misses fell by a third, so precision improved slightly rather than
+degrading. The German-common-noun flood is untouched and remains Phase 3's job.
+
+(The two names the check reports as missing, `Florian Brueckner` and
+`Nils Braeunlich`, are transliteration artifacts in the probe list — the workbook
+spells them `Brückner` and `Bräunlich`, and both ARE caught. `Constanza Hiemenz`
+went missing → caught, confirming the NER_MISC retype.)
