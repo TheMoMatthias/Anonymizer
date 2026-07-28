@@ -15,7 +15,7 @@ from . import core
 from . import language
 from . import ocr as ocr_mod
 from . import xmlsafe
-from .engine import SPACY_MODELS, DEFAULT_LANGUAGES
+from .engine import SPACY_MODELS, DEFAULT_LANGUAGES, HONORIFIC_PREFIX_RE
 from .gliner_recognizer import prime_gliner, resolve_model_path
 from .actions import decisions_lookup
 from .formats import docx_handler, legacy, pdf_handler, pptx_handler, xlsx_handler
@@ -139,9 +139,9 @@ def _narrow_language(config: dict, units: list) -> dict:
 # nothing to gain and would only add false positives.
 _PROPAGATABLE = ("PERSON",)
 _MIN_PROPAGATE_LEN = 4
-# `Herrn?` covers the dative "Herrn" address-block form; kept in sync with
-# core._HONORIFIC_PREFIX and engine._HONORIFICS.
-_HONORIFIC_PREFIX = re.compile(r"^(?:Herrn?|Frau|Hr\.|Fr\.|Dr\.|Prof\.)\s+")
+# Derived from engine._HONORIFICS rather than restated, so it cannot drift out of sync
+# the way it previously had (English titles were recognised but never stripped).
+_HONORIFIC_PREFIX = HONORIFIC_PREFIX_RE
 # Every line-break form a document can leave INSIDE one detected span: CR/LF, the
 # vertical tab OOXML uses for a soft break, a form feed, and the Unicode
 # line/paragraph separators. A propagation seed must never straddle one of these.

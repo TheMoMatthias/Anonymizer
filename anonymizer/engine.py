@@ -82,6 +82,19 @@ _NAME = r"\p{Lu}\p{L}+(?:[-\s]\p{Lu}\p{L}+){0,2}"
 # strategy: dominant-language NER + language-independent anchors, rather than
 # running a second full NER model (which re-tags ordinary German words as noise).
 _HONORIFICS = r"(?:Herrn?|Frau|Hr\.|Fr\.|Dr\.|Prof\.|Mr\.?|Mrs\.?|Ms\.?|Miss|Sir|Madam)"
+
+# The STRIPPER, derived from the same alternation so the two can never drift apart.
+#
+# They had drifted: this list has recognised English honorifics all along, but both
+# strippers (core and pipeline) were German-only, so an English name kept its title
+# INSIDE the finding value -- "Ms Priya Whitfield", "Mr Amina Adeyemi". Two measured
+# consequences, both real:
+#   * the pseudonym is keyed on the title, so the same person is [PERSON_1] as
+#     "Mr Amina Adeyemi" and [PERSON_2] as a bare "Adeyemi" elsewhere;
+#   * the given-name gazetteer tests the FIRST token, which was "Mr" -- so the name
+#     could not be corroborated, and under corroboration-only it would be demoted and
+#     LEAK. That is how this was found.
+HONORIFIC_PREFIX_RE = regex.compile(rf"^{_HONORIFICS}\s+")
 _NAME_LABELS = (
     r"(?:Name|Kunde|Kundin|Kontoinhaber|Sachbearbeiter|Ansprechpartner|Empfänger|"
     r"Berater|Beraterin|Mitarbeiter|Antragsteller|Versicherungsnehmer|Vertragspartner|"

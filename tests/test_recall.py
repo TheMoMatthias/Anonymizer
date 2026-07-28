@@ -829,3 +829,68 @@ def test_art9_bare_values_that_were_leaking_are_detected(analyzer, base_config, 
 ])
 def test_art9_bare_lists_do_not_claim_org_names_or_ordinary_prose(analyzer, base_config, text):
     assert not _art9(analyzer, base_config, text), text
+
+
+def test_propagation_does_not_erase_an_anchor_it_wins_over(analyzer, base_config):
+    """Propagation scores 0.85 while the anchored name patterns score 0.70-0.75, so a
+    propagated occurrence WINS the overlap on the very span an anchor corroborated.
+    _absorb_corroborating_source only transferred a dropped source when the KEPT one was
+    spaCy, so that anchor was silently destroyed -- every occurrence ended up
+    source="propagation", the group read as a bare guess, and under corroboration-only
+    the name was demoted and LEAKED. Propagation must not create corroboration, but it
+    must not erase it either."""
+    from docx import Document
+
+    from anonymizer.pipeline import scan_document
+
+    import tempfile
+    from pathlib import Path
+    with tempfile.TemporaryDirectory() as td:
+        doc = Document()
+        doc.add_paragraph("Sehr geehrter Herr Müller,")
+        doc.add_paragraph("Die Unterlagen wurden von Müller geprüft.")
+        path = Path(td) / "letter.docx"
+        doc.save(path)
+        result = scan_document(path, analyzer, base_config)
+
+    persons = [g for g in result.all_actionable() if g.entity_type == "PERSON"]
+    assert any(g.value == "Müller" for g in persons), (
+        f"the anchored salutation must keep the name actionable: "
+        f"actionable={[(g.entity_type, g.value) for g in result.all_actionable()]} "
+        f"demoted={[(g.entity_type, g.value) for g in result.demoted]}"
+    )
+
+
+def test_english_honorifics_are_stripped_and_the_name_corroborated(analyzer, base_config):
+    """engine._HONORIFICS recognised Mr/Mrs/Ms all along, but both STRIPPERS were
+    German-only -- so an English name kept its title inside the finding value. That
+    keyed the pseudonym on the title AND stopped the given-name gazetteer (which tests
+    the first token) from corroborating it, so under corroboration-only the name was
+    demoted and leaked."""
+    cfg = {**base_config, "languages": ["en"]}
+    found = {f.value: f.source for f in _findings(analyzer, cfg, "Ms Priya Whitfield approved the request.")}
+    assert "Priya Whitfield" in found, f"honorific not stripped: {found}"
+    assert "Ms Priya Whitfield" not in found
+
+
+def test_a_german_genitive_inherits_its_base_name_corroboration():
+    """"Kochs Team" is the same person as "Koch", but NER reports it as its own value,
+    so it formed its own uncorroborated group. Demoting it left the surname legible
+    while "Koch" was redacted everywhere else -- a leak the fail-loud verify caught."""
+    from anonymizer import core
+    from anonymizer.models import Finding as F
+
+    cfg = {"entities": {}, "tiers": {"high": 0.9, "medium": 0.5}, "corroboration_only": True}
+    result = core.build_scan_result(
+        [
+            F("PERSON", "Koch", 0.85, "c", "u1", 0, 4, source="whole_cell_override"),
+            F("PERSON", "Kochs", 0.85, "c", "u2", 0, 5, source="SpacyRecognizer"),
+            # A word merely ENDING in s must not inherit from a stem that is not itself
+            # a corroborated name.
+            F("PERSON", "Prozess", 0.85, "c", "u3", 0, 7, source="SpacyRecognizer"),
+        ],
+        [TextUnit("u", "x")], cfg,
+    )
+    vals = {g.value for g in result.all_actionable()}
+    assert vals == {"Koch", "Kochs", "Prozess"}, vals  # PERSON not gated yet; the rule is still pinned
+    assert not result.demoted

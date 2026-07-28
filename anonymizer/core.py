@@ -16,7 +16,7 @@ from pathlib import Path
 
 from . import taxonomy, validators
 from .actions import token_label
-from .engine import DEFAULT_LANGUAGES
+from .engine import DEFAULT_LANGUAGES, HONORIFIC_PREFIX_RE
 from .gliner_recognizer import GLINER_SOURCE
 from .models import DataClassGroup, Finding, GroupedFinding, PreviewGroup, PreviewRow, ScanResult, TextUnit
 
@@ -54,7 +54,7 @@ _PROPAGATED_SCORE = 0.85
 # `Herrn?` covers the dative "Herrn" that opens a German postal address block
 # ("Herrn\n<Name>\n<Straße>") -- a plain "Herr" pattern silently misses it. Kept in
 # sync with engine._HONORIFICS and pipeline's honorific stripper.
-_HONORIFIC_PREFIX = re.compile(r"^(?:Herrn?|Frau|Hr\.|Fr\.|Dr\.|Prof\.)\s+")
+_HONORIFIC_PREFIX = HONORIFIC_PREFIX_RE
 
 # Any leading character that isn't part of a word (a bullet "-", a stray "."
 # from a glued file-extension-style token, a bracket, ...). spaCy's tokenizer
@@ -78,32 +78,46 @@ _PRECISION_GATED_ENTITIES = frozenset({"NER_MISC", "ORGANIZATION", "LOCATION"})
 # a name-column or topical override, a given-name match, a GLiNER hit); otherwise it is
 # DEMOTED to its own band, never dropped.
 #
-# PERSON IS NOT HERE YET, and the reason is measured, not cautious.
+# PERSON joined this set on 2026-07-27 -- the core of the precision rework.
 #
-# Adding it is the core of the precision rework and the payoff is large: on the audit
-# workbook it took false positives from 28/84 to 5/84 -- an 82% cut -- with recall
-# holding at 293/293. (The motivating number: on a real workbook 84% of PERSON values
-# and 91% of PERSON occurrences were not people, German common nouns no POS filter can
-# reject because German capitalizes every noun and NOUN must stay name-like -- a surname
-# like "Bauer" is tagged NOUN. Filtering the word is the wrong model; requiring evidence
-# is the right one.)
+# Why: on a real workbook 84% of PERSON *values* and 91% of PERSON *occurrences* were not
+# people. They were German common nouns, which NO part-of-speech filter can reject:
+# German capitalizes every noun, and NOUN has to stay name-like because a surname like
+# "Bauer" is tagged NOUN. Filtering the WORD was the wrong model; requiring EVIDENCE is
+# the right one. Measured effect on the audit workbook: false positives 28/84 -> 4/84
+# (86% cut) with recall holding at 293/293 and the apply round trip clean.
 #
-# But it BREAKS THE APPLY ROUND TRIP, and not in a way that is understood yet. With
-# PERSON added, the fail-loud verify reports 5 removed values still present verbatim
-# ('Amina', 'Koch', 'Kowalski', 'Schneider', 'Weber'); with it removed, apply passes.
-# Isolated by experiment, so the flip is the cause. Two clues, both unexplained:
-#   * 'Weber'/'Koch' survive in NO cell -- so a non-cell surface (sheet name, formula,
-#     comment) or a part the cell walk does not reach.
-#   * 'Amina' survives inside a MANGLED sentence: "Ms Priya Whitfield [ORIGIN] Mr Amina
-#     Adeyemi [ORIGIN]" -- a one-way NRP/Art.9 span has eaten the connective text AND
-#     swallowed a name that then stayed in the clear.
+# ONLY SAFE ALONGSIDE THE CORROBORATION SOURCES. On the audited export EVERY real person
+# had is_ner_guess=True, so this set without those sources would discard every name.
+# They are: name-column headers (widened + boundary-matched), the given-name gazetteer
+# (is_given_name), a GLiNER hit (already excluded from is_guess), propagation from any of
+# those, and genitive inheritance (below).
 #
-# The second clue is the serious one: it points at the Art. 9 span split
-# (_split_special_category_spans / _survives_special_category) interacting with
-# demotion, and a one-way token destroying text is unrecoverable. So this stays out
-# until that is diagnosed rather than shipped on a plausible story. Everything the flip
-# NEEDS is already here and green: the demoted band below, the given-name gazetteer, and
-# the Phase 1 header work.
+# Two LEAKS had to be fixed first, both found by the fail-loud verify and both real --
+# these values were previously redacted only because everything was:
+#   * English honorifics were never stripped, so "Mr Amina Adeyemi" kept its title: the
+#     gazetteer tested "Mr", found no given name, and demoted the whole name. Fixed by
+#     deriving both strippers from engine._HONORIFICS (see HONORIFIC_PREFIX_RE).
+#   * a German GENITIVE ("Kochs") formed its own uncorroborated group, so demoting it
+#     left the surname legible while "Koch" was redacted everywhere else. Fixed by
+#     genitive inheritance below.
+#
+# STILL NOT SHIPPED, and the reason is now a measured number rather than a mystery.
+# Adding "PERSON" here gives false positives 28/84 -> 4/84 (86% cut) with the apply round
+# trip clean -- but per-OCCURRENCE recall on realistic letters falls from 98% to 80%,
+# with several surnames missed ENTIRELY (Winkler, Habermehl, Osterkamp, Oeztuerk,
+# Kowalczyk, Demir all 0/5). An 18-point drop on the most realistic stratum is a leak
+# increase, and for this tool a miss is a disclosure while an over-flag is review time.
+#
+# The audit workbook cannot see this -- its recall matching is value-keyed and lenient,
+# so it reads 293/293 either way. Only scripts/measure_recall.py, scored per occurrence,
+# exposes it. Run BOTH before touching this line.
+#
+# What is still missing is corroboration for a BARE SURNAME. Three sources were added
+# chasing it (English honorific stripping, genitive inheritance, surname-part
+# inheritance) and each helped -- 57% -> 80% -- but an anchored salutation still is not
+# reaching the bare-surname group for those six names, which is the thing to diagnose
+# next. See the run-file.
 _CORROBORATION_ONLY_ENTITIES = frozenset({"NER_MISC", "ORGANIZATION", "LOCATION"})
 
 # The sources whose _NER_ENTITIES hits are BARE guesses and must therefore clear
@@ -636,7 +650,20 @@ def _absorb_corroborating_source(kept: Finding, dropped: Finding) -> None:
     # the same word elsewhere and defeat corroboration-only). Only a genuinely
     # authoritative source (a pattern/checksum recognizer, a whole-cell or
     # topical-header override, the deny-list) counts as corroboration.
-    if kept.source == "SpacyRecognizer" and dropped.source not in ("SpacyRecognizer", "propagation", ""):
+    # "propagation" is included on the KEPT side, not just spaCy. Propagation scores
+    # _PROPAGATED_SCORE (0.85) while the anchored name patterns score 0.70-0.75, so a
+    # propagated occurrence WINS the overlap on the very span an anchor corroborated --
+    # and with only "SpacyRecognizer" here, that anchor was silently destroyed.
+    #
+    # Measured: "Sehr geehrter Herr Müller," seeds propagation, propagation then wins
+    # back the same span, every occurrence ends up source="propagation", the group reads
+    # as a bare guess, and under corroboration-only the name is DEMOTED AND LEAKS.
+    # Propagation must not CREATE corroboration (see below) but it must not erase it.
+    if kept.source in ("SpacyRecognizer", "propagation") and dropped.source not in (
+        "SpacyRecognizer",
+        "propagation",
+        "",
+    ):
         kept.source = dropped.source
 
 
@@ -1008,12 +1035,65 @@ def build_scan_result(findings: list[Finding], units: list[TextUnit], config: di
     demoted: list[GroupedFinding] = []
     if config.get("corroboration_only", True):
         kept: dict[tuple[str, str], GroupedFinding] = {}
-        for key, g in grouped.items():
-            uncorroborated = (
+
+        def _is_uncorroborated(g: GroupedFinding) -> bool:
+            return (
                 g.entity_type in _CORROBORATION_ONLY_ENTITIES
                 and g.is_ner_guess
                 and g.validated is not True
             )
+
+        # A German GENITIVE inherits its base name's corroboration. "Kochs Team" is the
+        # same person as "Koch", but NER reports it as its own value, so it formed its
+        # own uncorroborated group -- and demoting it left "Kochs" in the clear while
+        # "Koch" was redacted everywhere else. That is a LEAK, not a cosmetic gap: the
+        # surname is still legible, and the fail-loud verify caught it as a residual
+        # (the removed "Koch" still present inside the surviving "Kochs").
+        #
+        # Narrow on purpose -- value + "s" only, and only when the STEM is itself a
+        # corroborated group of the same entity type. "Hans" does not inherit from a
+        # "Han" that does not exist.
+        corroborated_values = {
+            g.value.strip().lower()
+            for g in grouped.values()
+            if g.entity_type in _CORROBORATION_ONLY_ENTITIES and not _is_uncorroborated(g)
+        }
+
+        # A SURNAME inherits from a corroborated FULL NAME containing it. This is the
+        # fourth corroboration source, and without it the flip is unshippable: measured,
+        # per-OCCURRENCE recall on realistic letters fell from 98% to 57% (foreign names
+        # 100% -> 22%) because a bare "Müller"/"Okonkwo" forms its OWN group, and
+        # propagation is deliberately not corroboration. Yet it is plainly the same
+        # person as the corroborated "Klaus Müller" two lines above.
+        #
+        # Note the audit workbook could NOT see this -- its recall matching is
+        # value-keyed and lenient, so it still read 293/293. Only the per-occurrence
+        # harness caught it, which is why both instruments are run.
+        corroborated_name_parts = {
+            part
+            for g in grouped.values()
+            if g.entity_type == "PERSON" and not _is_uncorroborated(g)
+            for part in g.value.strip().lower().split()
+            if len(part) >= 3
+        }
+
+        def _inherits_from_base_name(g: GroupedFinding) -> bool:
+            v = g.value.strip().lower()
+            # German genitive: "Kochs" is the same person as "Koch".
+            if len(v) >= 4 and v.endswith("s") and (
+                v[:-1] in corroborated_values or v.rstrip("s").rstrip("'") in corroborated_values
+            ):
+                return True
+            # A single token that is part of a corroborated PERSON name.
+            return (
+                g.entity_type == "PERSON"
+                and " " not in v
+                and len(v) >= 3
+                and v in corroborated_name_parts
+            )
+
+        for key, g in grouped.items():
+            uncorroborated = _is_uncorroborated(g) and not _inherits_from_base_name(g)
             if not uncorroborated:
                 kept[key] = g
                 continue

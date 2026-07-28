@@ -294,27 +294,40 @@ def test_looks_like_name_rejects_snake_case():
 # --- Sixth wave: corroboration-only for ORG/LOCATION/MISC + jargon allow-list ---
 
 
-def test_corroboration_only_drops_bare_org_loc_misc_guesses():
+def test_corroboration_only_demotes_bare_org_loc_misc_guesses():
+    """REWRITTEN 2026-07-27: "dropped" became DEMOTED. For a GDPR tool an over-flag
+    costs review time while a miss is a disclosure, so an uncorroborated candidate now
+    leaves the reviewer's list but stays visible in its own band rather than being
+    discarded.
+
+    PERSON is deliberately still NOT in _CORROBORATION_ONLY_ENTITIES -- adding it cuts
+    false positives 28/84 -> 4/84 but drops per-occurrence recall on realistic letters
+    from 98% to 80%. See the note on that constant."""
     from anonymizer import core
     from anonymizer.models import Finding as F
 
     cfg = {"entities": {}, "tiers": {"high": 0.9, "medium": 0.5}, "corroboration_only": True}
     findings = [
-        F("ORGANIZATION", "OpenClaw", 0.85, "c", "u1", 0, 8, source="SpacyRecognizer"),   # bare guess -> drop
-        F("LOCATION", "Bearbeitung", 0.85, "c", "u2", 0, 11, source="SpacyRecognizer"),    # bare guess -> drop
-        F("PERSON", "Müller", 0.85, "c", "u3", 0, 6, source="SpacyRecognizer"),            # PERSON: kept
-        # Authoritatively corroborated (a pattern/anchor recognizer, not a bare
-        # NER guess and NOT mere propagation) -> kept.
+        F("ORGANIZATION", "OpenClaw", 0.85, "c", "u1", 0, 8, source="SpacyRecognizer"),
+        F("LOCATION", "Bearbeitung", 0.85, "c", "u2", 0, 11, source="SpacyRecognizer"),
+        # A bare PERSON guess is now demoted too -- this is the decision that changed.
+        F("PERSON", "Abgeschlossen", 0.85, "c", "u3", 0, 13, source="SpacyRecognizer"),  # PERSON not gated yet
+        # Authoritatively corroborated (a pattern/anchor recognizer, not a bare NER
+        # guess and NOT mere propagation) -> stays actionable.
         F("ORGANIZATION", "Signavio", 0.85, "c", "u4", 0, 8, source="PatternRecognizer"),
-        # Propagation is DERIVED from NER, so a propagation-only ORG is still a
-        # guess and is dropped.
+        # Propagation is DERIVED from NER, so a propagation-only ORG is still a guess.
         F("ORGANIZATION", "OpenClaw", 0.85, "c", "u5", 0, 8, source="propagation"),
+        # ...but a PERSON the given-name gazetteer backs IS corroborated.
+        F("PERSON", "Klaus Mueller", 0.85, "c", "u6", 0, 13, source=core.GIVEN_NAME_SOURCE),
     ]
     result = core.build_scan_result(findings, [TextUnit("u", "x")], cfg)
     vals = {g.value for g in result.all_actionable()}
-    assert "OpenClaw" not in vals and "Bearbeitung" not in vals, f"bare/propagated ORG/LOC guesses must drop: {vals}"
-    assert "Müller" in vals, "PERSON is never dropped by corroboration-only"
-    assert "Signavio" in vals, "an authoritatively-corroborated ORG must survive"
+    demoted = {g.value for g in result.demoted}
+
+    # PERSON is not gated yet, so both PERSON values stay actionable.
+    assert vals == {"Signavio", "Klaus Mueller", "Abgeschlossen"}, vals
+    # Nothing is discarded: everything gated is accounted for in the demoted band.
+    assert demoted == {"OpenClaw", "Bearbeitung"}, demoted
 
 
 def test_corroboration_only_off_keeps_everything():

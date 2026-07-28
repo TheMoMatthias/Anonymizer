@@ -6,37 +6,45 @@ reconciliation). Supersedes the precision posture set in
 
 ## ⇢ WHAT IS LEFT (single source of truth — read this first)
 
-State as of 2026-07-27, suite **512 passed**, everything below verified by measurement
+State as of 2026-07-27, suite **515 passed**, everything below verified by measurement
 rather than assertion. Phases 1 and 2 are DONE; 2.5 (ML speed) is DONE.
 
-### ⛔ BLOCKER — diagnose before flipping PERSON to corroboration-only
+### ⛔ BLOCKER — the PERSON flip trades a big precision win for a real recall loss
 
-The flip is built, measured and **reverted**, because it breaks the apply round trip.
+Diagnosed 2026-07-27. The apply-round-trip failure recorded here previously is **SOLVED**
+(three real bugs, all fixed and shipped — see below). What remains is a genuine
+**quality trade-off**, not a defect, and it is the user's call rather than mine.
 
-**The prize is large and confirmed:** false positives **28/84 → 5/84** (82% cut) with
-recall holding at **293/293**. Reproduce by adding `"PERSON"` to
-`core._CORROBORATION_ONLY_ENTITIES` — one line, everything else is already in place.
+Reproduce with one line: add `"PERSON"` to `core._CORROBORATION_ONLY_ENTITIES`.
 
-**The blocker:** with PERSON added, the fail-loud verify reports **5 removed values still
-present verbatim** — `Amina`, `Koch`, `Kowalski`, `Schneider`, `Weber`. Isolated by
-experiment, not assumed: removing PERSON from the set makes apply pass again.
+| | without PERSON (shipped) | with PERSON |
+|---|---|---|
+| false positives on decoys | 27/84 | **4/84 (86% cut)** |
+| audit-workbook recall | 293/293 | 293/293 |
+| apply + fail-loud verify | passes | **passes** |
+| **per-occurrence recall, realistic letters** | **98%** | **80%** |
+| — german_common_noun | 98% | 88% |
+| — german_rare | 98% | 72% |
+| — foreign | 100% | 70% |
 
-Two clues, both unexplained:
-- `Weber` / `Koch` survive in **no cell at all** → a non-cell surface (sheet name,
-  formula literal, comment) or a package part the cell walk does not reach.
-- `Amina` survives inside a **mangled sentence**:
-  `"Ms Priya Whitfield [ORIGIN] Mr Amina Adeyemi [ORIGIN]"`. A one-way NRP/Art. 9 span
-  has eaten the connective text **and swallowed a name that then stayed in the clear**.
+**Why it is not shipped:** an 18-point drop on the most realistic stratum is a leak
+increase, and for this tool a miss is a disclosure while an over-flag is review time.
+Fully missed with the flip on: `Winkler`, `Habermehl`, `Osterkamp`, `Öztürk`,
+`Kowalczyk`, `Demir` — all **0/5**.
 
-The second clue is the serious one and the place to start: it points at
-`_split_special_category_spans` / `_survives_special_category` interacting with demotion.
-`_survives_special_category` keys on `entity_type == "PERSON" or validated is True`, so
-anything that changes which PERSON findings exist changes what survives inside a one-way
-Art. 9 span. A one-way token destroying text is unrecoverable, which is why this must be
-understood rather than worked around.
+**Note the instrument trap:** the audit workbook reads 293/293 *either way*, because its
+recall matching is value-keyed and lenient. Only `scripts/measure_recall.py`, scored per
+occurrence, exposes the loss. **Run both before touching that line.**
 
-Suggested order: reproduce with the one-line change, then dump the findings for
-`Board Minutes EN!C2` before and after to see which span wins overlap resolution.
+**What is still missing:** corroboration for a **bare surname**. Three sources were added
+chasing it, taking the stratum 57% → 80%, but an anchored salutation
+("Sehr geehrter Herr Winkler,") still is not reaching the bare-surname group for those
+six names. That is the next thing to diagnose — start by dumping the findings and their
+`source` for one such letter and seeing why the anchor does not corroborate the
+single-token group.
+
+The grill's fourth corroboration source, **column-level name inference**, is still
+unbuilt and is the most likely remaining lever.
 
 ### Then — the rest of Phase 3
 
