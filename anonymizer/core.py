@@ -72,13 +72,38 @@ _LEADING_NOISE = re.compile(r"^[^\w]+", re.UNICODE)
 # blanket case/stopword filter there would risk real lowercase surnames.
 _PRECISION_GATED_ENTITIES = frozenset({"NER_MISC", "ORGANIZATION", "LOCATION"})
 
-# ORGANIZATION/LOCATION/NER_MISC are "medium sensitivity" free-text NER guesses,
-# and on a business document they are overwhelmingly non-PII (product names,
-# jargon, common nouns). In corroboration-only mode a finding of these types is
-# surfaced ONLY when something beyond a bare spaCy guess backs it: a
-# pattern/anchor/propagation source, a checksum verdict, or a name-column
-# override -- i.e. NOT is_ner_guess. PERSON and all structured-ID entities are
-# never gated this way (they are the core PII targets).
+# Free-text NER types with NO structural validation behind them -- a raw model span at
+# a flat score. In corroboration-only mode one of these is surfaced in the main list
+# ONLY when something beyond a bare guess backs it (a pattern/anchor source, a checksum,
+# a name-column or topical override, a given-name match, a GLiNER hit); otherwise it is
+# DEMOTED to its own band, never dropped.
+#
+# PERSON IS NOT HERE YET, and the reason is measured, not cautious.
+#
+# Adding it is the core of the precision rework and the payoff is large: on the audit
+# workbook it took false positives from 28/84 to 5/84 -- an 82% cut -- with recall
+# holding at 293/293. (The motivating number: on a real workbook 84% of PERSON values
+# and 91% of PERSON occurrences were not people, German common nouns no POS filter can
+# reject because German capitalizes every noun and NOUN must stay name-like -- a surname
+# like "Bauer" is tagged NOUN. Filtering the word is the wrong model; requiring evidence
+# is the right one.)
+#
+# But it BREAKS THE APPLY ROUND TRIP, and not in a way that is understood yet. With
+# PERSON added, the fail-loud verify reports 5 removed values still present verbatim
+# ('Amina', 'Koch', 'Kowalski', 'Schneider', 'Weber'); with it removed, apply passes.
+# Isolated by experiment, so the flip is the cause. Two clues, both unexplained:
+#   * 'Weber'/'Koch' survive in NO cell -- so a non-cell surface (sheet name, formula,
+#     comment) or a part the cell walk does not reach.
+#   * 'Amina' survives inside a MANGLED sentence: "Ms Priya Whitfield [ORIGIN] Mr Amina
+#     Adeyemi [ORIGIN]" -- a one-way NRP/Art.9 span has eaten the connective text AND
+#     swallowed a name that then stayed in the clear.
+#
+# The second clue is the serious one: it points at the Art. 9 span split
+# (_split_special_category_spans / _survives_special_category) interacting with
+# demotion, and a one-way token destroying text is unrecoverable. So this stays out
+# until that is diagnosed rather than shipped on a plausible story. Everything the flip
+# NEEDS is already here and green: the demoted band below, the given-name gazetteer, and
+# the Phase 1 header work.
 _CORROBORATION_ONLY_ENTITIES = frozenset({"NER_MISC", "ORGANIZATION", "LOCATION"})
 
 # The sources whose _NER_ENTITIES hits are BARE guesses and must therefore clear
@@ -980,12 +1005,25 @@ def build_scan_result(findings: list[Finding], units: list[TextUnit], config: di
     # (propagated, anchored, validated, or name-column) has is_ner_guess False
     # and survives; PERSON and structured IDs are never dropped here. Toggleable
     # so a recall-first deployment can turn it off.
+    demoted: list[GroupedFinding] = []
     if config.get("corroboration_only", True):
-        grouped = {
-            key: g
-            for key, g in grouped.items()
-            if not (g.entity_type in _CORROBORATION_ONLY_ENTITIES and g.is_ner_guess and g.validated is not True)
-        }
+        kept: dict[tuple[str, str], GroupedFinding] = {}
+        for key, g in grouped.items():
+            uncorroborated = (
+                g.entity_type in _CORROBORATION_ONLY_ENTITIES
+                and g.is_ner_guess
+                and g.validated is not True
+            )
+            if not uncorroborated:
+                kept[key] = g
+                continue
+            # DEMOTE, never drop. Previously these were discarded outright. For a GDPR
+            # redaction tool that is the wrong direction of error: an over-flag costs
+            # review time, a miss is a disclosure. So they leave the list the reviewer
+            # reads (and the set apply redacts) but stay visible in their own band.
+            g.tier = taxonomy.TIER_LOW
+            demoted.append(g)
+        grouped = kept
 
     # Bucket the grouped findings into data classes, ordered most-sensitive first.
     class_map: dict[str, DataClassGroup] = {}
@@ -1017,8 +1055,14 @@ def build_scan_result(findings: list[Finding], units: list[TextUnit], config: di
         "possible_misses": len(possible_misses),
         "model_guess": model_guess,
         "likely_pii": len(grouped) - model_guess,
+        # Reported so the demoted band is never invisible: a reviewer who sees a
+        # suspiciously short list can tell at a glance that something was set aside.
+        "demoted": len(demoted),
     }
-    return ScanResult(groups=groups, possible_misses=possible_misses, stats=stats)
+    demoted.sort(key=lambda g: (-g.count, g.entity_type, g.value.lower()))
+    return ScanResult(
+        groups=groups, possible_misses=possible_misses, stats=stats, demoted=demoted
+    )
 
 
 def build_preview(groups: list[DataClassGroup]) -> list[PreviewGroup]:
@@ -1096,6 +1140,25 @@ def findings_export_rows(result: ScanResult) -> list[dict]:
                     "context": g.context,
                 }
             )
+    # The DEMOTED band, in its own bucket -- the shape the export already uses for
+    # possible_miss. Nothing is hidden: the export stays a complete record of what the
+    # tool saw, while the "flagged" section a reviewer actually reads stays short.
+    for g in result.demoted:
+        rows.append(
+            {
+                "bucket": "demoted",
+                "data_class": "(demoted — nothing corroborated this)",
+                "entity_type": g.entity_type,
+                "value": g.value,
+                "count": g.count,
+                "max_score": round(g.max_score, 3),
+                "tier": g.tier,
+                "is_ner_guess": g.is_ner_guess,
+                "validated": g.validated,
+                "default_action": "skip",
+                "context": g.context,
+            }
+        )
     for g in result.possible_misses:
         rows.append(
             {

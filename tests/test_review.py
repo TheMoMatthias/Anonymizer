@@ -877,3 +877,64 @@ def test_render_review_builds_for_a_large_multi_class_result():
 
     assert "People" in _texts(box)
     assert "Financial IDs" in _texts(box)
+
+
+# --- demoted band (Phase 3, 2026-07-27) --------------------------------------
+
+
+def test_uncorroborated_guesses_are_demoted_not_dropped():
+    """These used to be DISCARDED outright. For a GDPR redaction tool that is the wrong
+    direction of error -- an over-flag costs review time, a miss is a disclosure -- so
+    they now leave the reviewer's list but stay visible in their own band."""
+    from anonymizer import core
+    from anonymizer.models import Finding, TextUnit
+
+    cfg = {
+        "entities": {"ORGANIZATION": {"default_action": "pseudonymize"}},
+        "tiers": {"high": 0.9, "medium": 0.5},
+        "corroboration_only": True,
+    }
+    bare = Finding("ORGANIZATION", "Abdeckung", 0.85, "ctx", "u1", 0, 9, source="SpacyRecognizer")
+    result = core.build_scan_result([bare], [TextUnit("u1", "x")], cfg)
+
+    assert not result.all_actionable(), "a bare guess must not reach the actionable list"
+    assert [g.value for g in result.demoted] == ["Abdeckung"], result.demoted
+    assert result.stats["demoted"] == 1, "the count must be reported, or the band is invisible"
+
+
+def test_a_corroborated_finding_is_not_demoted():
+    from anonymizer import core
+    from anonymizer.models import Finding, TextUnit
+
+    cfg = {
+        "entities": {"ORGANIZATION": {"default_action": "pseudonymize"}},
+        "tiers": {"high": 0.9, "medium": 0.5},
+        "corroboration_only": True,
+    }
+    anchored = Finding("ORGANIZATION", "Aurexa Systems GmbH", 0.85, "ctx", "u1", 0, 19,
+                       source="topical_header")
+    result = core.build_scan_result([anchored], [TextUnit("u1", "x")], cfg)
+    assert [g.value for g in result.all_actionable()] == ["Aurexa Systems GmbH"]
+    assert not result.demoted
+
+
+def test_demoted_band_is_exported_in_its_own_bucket():
+    """Nothing is hidden: the export stays a complete record of what the tool saw,
+    while the 'flagged' section a reviewer reads stays short."""
+    from anonymizer import core
+    from anonymizer.models import Finding, TextUnit
+
+    cfg = {
+        "entities": {"ORGANIZATION": {"default_action": "pseudonymize"}},
+        "tiers": {"high": 0.9, "medium": 0.5},
+        "corroboration_only": True,
+    }
+    result = core.build_scan_result(
+        [Finding("ORGANIZATION", "Abdeckung", 0.85, "ctx", "u1", 0, 9, source="SpacyRecognizer")],
+        [TextUnit("u1", "x")], cfg,
+    )
+    rows = core.findings_export_rows(result)
+    demoted_rows = [r for r in rows if r["bucket"] == "demoted"]
+    assert [r["value"] for r in demoted_rows] == ["Abdeckung"], rows
+    # Never presented as something that will be removed.
+    assert demoted_rows[0]["default_action"] == "skip"

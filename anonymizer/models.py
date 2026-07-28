@@ -181,6 +181,12 @@ class ScanResult:
     columns: list["ColumnInfo"] = field(default_factory=list)
     # Spreadsheet cells that carry a finding, for the per-cell exception layer.
     cells: list["CellInfo"] = field(default_factory=list)
+    # The DEMOTED BAND: candidates nothing corroborated. Surfaced, never silently
+    # discarded -- for a GDPR tool an over-flag costs review time while a miss is a
+    # disclosure, so the asymmetry says keep them visible but out of the way. Held
+    # separately from `groups` so the list a reviewer actually reads stays short, and
+    # so `all_actionable()` (what apply redacts) does not include them.
+    demoted: list[GroupedFinding] = field(default_factory=list)
 
     def all_actionable(self) -> list[GroupedFinding]:
         return [g for grp in self.groups for g in grp.items]
