@@ -793,3 +793,39 @@ def test_a_weaker_guess_cannot_veto_a_people_column_header(tmp_path, analyzer, b
         "A1": "Einreicher", "A2": "Constanza Hiemenz",
     }, name="misc_name.xlsx")
     assert "Constanza Hiemenz" in found, found
+
+
+# --- Art.9 bare-value gaps found by scripts/measure_recall.py (2026-07-27) ----
+
+
+@pytest.mark.parametrize("text,needle", [
+    # A German HR sheet writes the diagnosis BARE in the cell; the label lives in the
+    # column header, which the xlsx handler prepends but docx/pdf prose never does.
+    ("neuapostolisch", "neuapostolisch"),
+    ("Bandscheibenvorfall L4/L5", "Bandscheibenvorfall"),
+    ("chronische Migraene", "Migraene"),
+    ("Herzinfarkt im Mai", "Herzinfarkt"),
+])
+def test_art9_bare_values_that_were_leaking_are_detected(analyzer, base_config, text, needle):
+    """These were measured as leaks in the BARE form -- the anchored 'Konfession: X'
+    and 'Diagnose: X' shapes already worked. Art.9 is the most damaging class to
+    miss, so a bare-cell gap here matters more than anywhere else."""
+    found = {f.value for f in _art9(analyzer, base_config, text)}
+    assert any(needle in v for v in found), f"{needle!r} leaked from {text!r}: {found}"
+
+
+@pytest.mark.parametrize("text", [
+    # The bare lists match UNINFLECTED forms only, which is what keeps organisation
+    # names intact -- \b fails on the trailing inflection. This is the property that
+    # makes the lists safe to extend at all, so it is pinned explicitly.
+    "Neuapostolische Kirchengemeinde Frankfurt",
+    "Evangelische Bank eG",
+    "Die Katholische Universitaet Eichstaett",
+    "Methodistische Gemeinde Berlin",
+    # Deliberately absent from the word lists -- each would one-way destroy ordinary
+    # text, which is unrecoverable.
+    "Herr Krebs hat angerufen",
+    "Covid-Massnahmen wurden aufgehoben",
+])
+def test_art9_bare_lists_do_not_claim_org_names_or_ordinary_prose(analyzer, base_config, text):
+    assert not _art9(analyzer, base_config, text), text

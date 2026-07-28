@@ -15,7 +15,10 @@
 # language. Any config that took a bump therefore had no German Art. 9 detection at
 # all. This bump exists to run the fixed, group-aware re-sync over those configs and
 # put the German word lists back.
-config_schema_version: 10
+# v11: German Art. 9 bare-value word lists gained the terms measure_recall.py
+# measured as leaking in the BARE form -- `neuapostolisch` (religion) and
+# `bandscheibenvorfall` / `migräne` (health) -- plus their unambiguous siblings.
+config_schema_version: 11
 
 languages:
   - de
@@ -672,7 +675,20 @@ custom_recognizers:
       # Deliberately NOT listed: "biometrisch"/"Gesichtserkennung"/"Biometrie" --
       # a bank's IT-security prose is full of them and they say nothing about a
       # PERSON, so one-way redacting them would be pure destruction.
-      - regex: '\b(?:arbeitsunfähigkeit|arbeitsunfähig|krankgeschrieben|krankschreibung|krankmeldung|schwerbehindertenausweis|schwerbehinderung|schwerbehindert|erwerbsminderung|erwerbsunfähig|berufsunfähigkeit|berufsunfähig|pflegebedürftig|schwangerschaft|schwanger|mutterschutz|dialyse|chemotherapie|psychotherapie|krebserkrankung|diabetes|epilepsie|depression|burnout|rehabilitation|reha|genomanalyse|genanalyse|gentest|erbkrankheit|erbgut|dna-analyse|dna-test|vaterschaftstest|fingerabdruck|iris-scan|retinascan)\b'
+      # Added 2026-07-27: `bandscheibenvorfall` and `migräne` were MISSING and
+      # measured as leaks by scripts/measure_recall.py (structured_bare/ART9_HEALTH --
+      # a bare "Bandscheibenvorfall L4/L5" and a bare "chronische Migraene" in a cell,
+      # which is exactly how a German HR sheet writes a diagnosis). The others are the
+      # same class: named conditions whose bare form states a health FACT about a
+      # person and collides with nothing.
+      #
+      # Deliberately still ABSENT, for the reason the list's own comment gives:
+      #   * "krebs"  -- also a common German SURNAME and the zodiac sign/crustacean
+      #   * "covid"  -- a bank's pandemic-policy prose is full of it and it says
+      #                 nothing about a person ("Covid-Massnahmen")
+      #   * "corona" -- same, plus the beer and the physics term
+      # Each of those would one-way destroy ordinary text, which is unrecoverable.
+      - regex: '\b(?:arbeitsunfähigkeit|arbeitsunfähig|krankgeschrieben|krankschreibung|krankmeldung|schwerbehindertenausweis|schwerbehinderung|schwerbehindert|erwerbsminderung|erwerbsunfähig|berufsunfähigkeit|berufsunfähig|pflegebedürftig|schwangerschaft|schwanger|mutterschutz|dialyse|chemotherapie|psychotherapie|krebserkrankung|bandscheibenvorfall|herzinfarkt|schlaganfall|bluthochdruck|migräne|arthrose|asthma|diabetes|epilepsie|depression|burnout|rehabilitation|reha|genomanalyse|genanalyse|gentest|erbkrankheit|erbgut|dna-analyse|dna-test|vaterschaftstest|fingerabdruck|iris-scan|retinascan)\b'
         score: 0.86
       # Naming a person's health insurer is health data. Only unambiguous names --
       # the short abbreviations (TK, BKK, IKK) are far too collision-prone to
@@ -712,7 +728,14 @@ custom_recognizers:
       # German document quoting it would still be one-way redacted for nothing. The
       # compounded forms are unambiguous, and a bare "orthodox" cell value is still
       # caught by the Konfession/Religion label pattern above.
-      - regex: '\b(?:evangelisch-lutherisch|römisch-katholisch|(?:griechisch|russisch|serbisch|syrisch)-orthodox|konfessionslos|Kirchenaustritt|altkatholisch|freikirchlich|hinduistisch|buddhistisch|israelitisch|evangelisch|moslemisch|lutherisch|muslimisch|katholisch|reformiert|islamisch|jüdisch)\b'
+      # Added 2026-07-27: `neuapostolisch` was MISSING and measured as a leak by
+      # scripts/measure_recall.py (structured_bare/ART9_RELIGION). The rest are the
+      # same class -- named German denominations whose BARE adjective form is
+      # unambiguous. Safe for the reason the whole list is safe: only the
+      # UNINFLECTED form is matched, so "neuapostolisch" is claimed while
+      # "Neuapostolische Kirche" (an organisation name) is not, because \b fails on
+      # the trailing inflection. That is what keeps "Evangelische Bank" intact.
+      - regex: '\b(?:evangelisch-lutherisch|römisch-katholisch|(?:griechisch|russisch|serbisch|syrisch)-orthodox|konfessionslos|Kirchenaustritt|altkatholisch|freikirchlich|hinduistisch|buddhistisch|israelitisch|neuapostolisch|methodistisch|adventistisch|mennonitisch|anglikanisch|evangelisch|moslemisch|lutherisch|muslimisch|katholisch|reformiert|islamisch|alevitisch|baptistisch|jesidisch|jüdisch)\b'
         score: 0.86
       # Colon-free "Kirchensteuermerkmal ev". The value is restricted to the ELStAM
       # confession CODES, which is what makes a colon-free anchor safe here: an
