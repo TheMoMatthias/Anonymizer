@@ -12,6 +12,7 @@ from __future__ import annotations
 import functools
 import re
 from dataclasses import replace
+from pathlib import Path
 
 from . import taxonomy, validators
 from .actions import token_label
@@ -89,6 +90,49 @@ _CORROBORATION_ONLY_ENTITIES = frozenset({"NER_MISC", "ORGANIZATION", "LOCATION"
 # Anything else reaching the gate with an NER entity type came from an ANCHORED
 # pattern recognizer, and is exempt -- see _rejected_by_precision.
 _GATED_NER_SOURCES = frozenset({"SpacyRecognizer", "propagation", GLINER_SOURCE, ""})
+
+
+# A PERSON candidate whose FIRST token is a known given name is corroborated: the
+# value has positive evidence behind it, not just a model's say-so. This is one of the
+# four corroboration sources the design calls for (name-column header, given-name
+# gazetteer, GLiNER hit, column-level inference), and it is the only one that works on
+# a name standing completely alone in prose with no header and no anchor.
+GIVEN_NAME_SOURCE = "given_name"
+_GIVEN_NAMES_PATH = Path(__file__).resolve().parent / "data" / "given_names.txt"
+
+
+@functools.lru_cache(maxsize=1)
+def _given_names() -> frozenset[str]:
+    """The shipped given-name list, lowercased. Cached: read once per process.
+
+    Missing or unreadable is NOT fatal -- it degrades to "this corroboration source
+    contributes nothing", exactly like a machine without the ML pack. A detection
+    input that can hard-fail a scan by being absent would be a worse bug than the
+    recall it buys."""
+    try:
+        lines = _GIVEN_NAMES_PATH.read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return frozenset()
+    return frozenset(
+        s for s in (line.strip().lower() for line in lines) if s and not s.startswith("#")
+    )
+
+
+def is_given_name(value: str) -> bool:
+    """True when the FIRST token of `value` is a known given name.
+
+    First token only, and never the surname: the list holds given names ONLY, because
+    German surnames collide massively with ordinary vocabulary (Stark, Gering, Koch,
+    Bauer, Berg, Winter, Fuchs, Wolf, Jung, Klein are all attested surnames AND
+    ordinary words). A surname list used as POSITIVE evidence would corroborate the
+    very false positives this exists to remove."""
+    first = value.strip().split(maxsplit=1)
+    if not first:
+        return False
+    # Trim an honorific so "Herr Klaus Mueller" tests "klaus", not "herr".
+    stripped = _HONORIFIC_PREFIX.sub("", value.strip()).strip()
+    token = (stripped.split(maxsplit=1) or first)[0]
+    return token.strip(".,;:!?()[]").lower() in _given_names()
 
 
 def _is_single_lowercase_word(value: str) -> bool:
@@ -675,6 +719,17 @@ def detect_unit(analyzer, unit: TextUnit, config: dict, nlp_artifacts=None) -> l
                 source=r_source, score=r.score, trust_override=gliner_override,
             ):
                 continue
+            # CORROBORATION, not detection: this never creates a finding, it only
+            # records that an existing PERSON candidate has positive evidence behind
+            # it (its first token is a known given name). Re-sourcing is how the rest
+            # of this codebase expresses corroboration -- see
+            # _absorb_corroborating_source -- and it is what will let PERSON become
+            # corroboration-only without discarding real names.
+            #
+            # PERSON only. A given name is evidence about a PERSON; it says nothing
+            # about whether an ORGANIZATION or LOCATION guess is real.
+            if r.entity_type == "PERSON" and r_source in _GATED_NER_SOURCES and is_given_name(value):
+                r_source = GIVEN_NAME_SOURCE
             finding = Finding(
                 entity_type=r.entity_type,
                 value=value,

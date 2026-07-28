@@ -482,3 +482,67 @@ def test_formatted_amounts_are_never_a_possible_miss():
 
     misses = completeness_scan([TextUnit("u1", "konservativ als ~10.000 EUR bzw. 178.4 Monate")], [])
     assert not misses, [g.value for g in misses]
+
+
+# --- given-name gazetteer as a CORROBORATION source (Phase 3, 2026-07-27) -----
+
+
+def test_given_name_list_loads_and_holds_no_surnames():
+    """The list is given names ONLY. Used as POSITIVE evidence, its precision matters
+    far more than its coverage: German surnames collide massively with ordinary
+    vocabulary, so a surname list would corroborate the exact false positives this
+    work exists to remove."""
+    from anonymizer.core import _given_names
+
+    names = _given_names()
+    assert len(names) > 400, f"list looks truncated: {len(names)}"
+    # Every one of these is an attested German SURNAME *and* an ordinary word. If any
+    # of them is ever in this list, it will corroborate noise.
+    for surname in ("stark", "gering", "koch", "bauer", "berg", "winter", "fuchs",
+                    "wolf", "richter", "jung", "klein", "schwarz", "sommer", "vogel"):
+        assert surname not in names, f"{surname!r} is a surname/common word -- must not corroborate"
+
+
+def test_is_given_name_matches_the_first_token_only():
+    from anonymizer.core import is_given_name
+
+    assert is_given_name("Klaus Mueller")
+    assert is_given_name("Herr Klaus Mueller"), "an honorific must be trimmed first"
+    assert is_given_name("Dr. Petra Weber")
+    # A lone SURNAME has no given-name evidence and must stay uncorroborated.
+    assert not is_given_name("Mueller")
+    assert not is_given_name("Koch")
+    # ...and neither does the German-compound-noun noise.
+    for noise in ("Datenfeeds", "Portfoliobeitrag", "Idee", "Gering", "Abgeschlossen"):
+        assert not is_given_name(noise), noise
+
+
+def test_a_given_name_corroborates_a_person_finding(analyzer, base_config):
+    """Corroboration, NOT detection: the gazetteer never creates a finding, it records
+    that an existing PERSON candidate has evidence behind it. Re-sourcing is how this
+    codebase expresses that (cf. _absorb_corroborating_source), and it is what lets
+    PERSON become corroboration-only without discarding real names."""
+    from anonymizer.core import GIVEN_NAME_SOURCE
+
+    cfg = {**base_config, "languages": ["de"]}
+    found = {f.value: f.source for f in detect_unit(analyzer, TextUnit("u1", "Sehr geehrter Herr Klaus Mueller,"), cfg)}
+    assert found.get("Klaus Mueller") == GIVEN_NAME_SOURCE, found
+
+    # A bare surname stays a bare guess -- no given name, no corroboration.
+    bare = {f.value: f.source for f in detect_unit(analyzer, TextUnit("u2", "Die Abstimmung mit Mueller erfolgte."), cfg)}
+    assert bare.get("Mueller") != GIVEN_NAME_SOURCE, bare
+
+
+def test_missing_given_name_file_degrades_instead_of_failing(monkeypatch, tmp_path):
+    """A detection INPUT that can hard-fail a scan by being absent would be a worse
+    bug than the recall it buys -- so an unreadable list contributes nothing and the
+    scan continues, exactly like a machine without the ML pack."""
+    from anonymizer import core
+
+    core._given_names.cache_clear()
+    monkeypatch.setattr(core, "_GIVEN_NAMES_PATH", tmp_path / "nope.txt")
+    try:
+        assert core._given_names() == frozenset()
+        assert core.is_given_name("Klaus Mueller") is False
+    finally:
+        core._given_names.cache_clear()
