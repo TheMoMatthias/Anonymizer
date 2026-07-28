@@ -6,22 +6,51 @@ reconciliation). Supersedes the precision posture set in
 
 ## ⇢ WHAT IS LEFT (single source of truth — read this first)
 
-State as of 2026-07-27, suite **495 passed**, everything below verified by measurement
+State as of 2026-07-27, suite **512 passed**, everything below verified by measurement
 rather than assertion. Phases 1 and 2 are DONE; 2.5 (ML speed) is DONE.
 
-### Next up — Phase 3, the precision rework. Nothing else is blocking it.
+### ⛔ BLOCKER — diagnose before flipping PERSON to corroboration-only
+
+The flip is built, measured and **reverted**, because it breaks the apply round trip.
+
+**The prize is large and confirmed:** false positives **28/84 → 5/84** (82% cut) with
+recall holding at **293/293**. Reproduce by adding `"PERSON"` to
+`core._CORROBORATION_ONLY_ENTITIES` — one line, everything else is already in place.
+
+**The blocker:** with PERSON added, the fail-loud verify reports **5 removed values still
+present verbatim** — `Amina`, `Koch`, `Kowalski`, `Schneider`, `Weber`. Isolated by
+experiment, not assumed: removing PERSON from the set makes apply pass again.
+
+Two clues, both unexplained:
+- `Weber` / `Koch` survive in **no cell at all** → a non-cell surface (sheet name,
+  formula literal, comment) or a package part the cell walk does not reach.
+- `Amina` survives inside a **mangled sentence**:
+  `"Ms Priya Whitfield [ORIGIN] Mr Amina Adeyemi [ORIGIN]"`. A one-way NRP/Art. 9 span
+  has eaten the connective text **and swallowed a name that then stayed in the clear**.
+
+The second clue is the serious one and the place to start: it points at
+`_split_special_category_spans` / `_survives_special_category` interacting with demotion.
+`_survives_special_category` keys on `entity_type == "PERSON" or validated is True`, so
+anything that changes which PERSON findings exist changes what survives inside a one-way
+Art. 9 span. A one-way token destroying text is unrecoverable, which is why this must be
+understood rather than worked around.
+
+Suggested order: reproduce with the one-line change, then dump the findings for
+`Board Minutes EN!C2` before and after to see which span wins overlap resolution.
+
+### Then — the rest of Phase 3
 
 This is the phase that actually removes the false positives. Signed off in the grill,
 not yet started. In dependency order:
 
-1. **PERSON becomes corroboration-only, DEMOTED not dropped** (grill decisions 4/7/15).
+1. ~~**PERSON becomes corroboration-only, DEMOTED not dropped**~~ — BUILT, MEASURED (28→5 FPs), REVERTED. See the BLOCKER above.
    `_CORROBORATION_ONLY_ENTITIES` (core.py:81) currently holds NER_MISC/ORGANIZATION/
    LOCATION. Adding PERSON is a one-line change with a large blast radius — read the
    note under WHAT THE AUDIT ACTUALLY FOUND first: on the reported export EVERY real
    person had `is_ner_guess=True`, so this MUST land together with item 2 or it drops
    every name.
 2. **The four corroboration sources** (grill decision 5): repaired name-column headers
-   (DONE in Phase 1 — 83 people recovered), a curated given-name gazetteer (NOT built),
+   (DONE in Phase 1 — 83 people recovered), a curated given-name gazetteer (DONE, 909e408),
    GLiNER hits (already count, core.py:810), and column-level name inference (NOT built).
 3. **The enum / controlled-vocabulary signal** (grill decisions 3/10): read Excel's
    declared data validations AND value repetition, as a content-keyed set precomputed
@@ -32,7 +61,7 @@ not yet started. In dependency order:
    no person ⇒ demote the bare spaCy PERSON hit. Evidence it will work: GLiNER scores
    all three decoy classes BELOW the 0.3 threshold (`Die Effizienz der
    Reaktionszeiten` 0.057, `Datenfeeds` 0.276, `Portfoliobeitrag` 0.197).
-5. **Demoted band as its own export section** (grill decision 9), like `possible_miss`.
+5. ~~**Demoted band as its own export section**~~ — DONE (c5f4e4c): ScanResult.demoted, a `demoted` export bucket, and a stats count.
 
 **Target:** the 31 false positives on the 84 decoys. That number is reproducible today
 (`scripts/score_test_workbook.py`), so progress is measurable per change.
@@ -53,9 +82,9 @@ not yet started. In dependency order:
 
 ### Known bugs, unfixed, with evidence
 
-- **Two Art. 9 word-list gaps**, both in the BARE form: `neuapostolisch` (religion) and
+- ~~Two Art. 9 word-list gaps~~ — FIXED (42da0e3): `neuapostolisch` (religion) and
   `Bandscheibenvorfall` (health). Found by `scripts/measure_recall.py`. Art. 9 is the
-  most damaging class to miss, so this is the highest-severity open item.
+  their unambiguous siblings. structured_bare Art.9 is now 100%.
 - **`*_Kommentar` columns are never treated as DESCRIPTION columns.**
   `_topical_header_res` uses `\b`, and `_` is a word character, so `\bkommentar\b` never
   matches `Strat_Innovation_Kommentar`. Free-text commentary columns are therefore never
