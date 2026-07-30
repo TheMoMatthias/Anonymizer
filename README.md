@@ -26,6 +26,11 @@ models; re-run `setup.ps1` to restore them.)
 scripts\run.ps1
 ```
 
+Or double-click **`Anonymizer.bat`** — it syncs dependencies first, so a fresh
+`git pull` just works. **`Anonymizer.exe`** and **`Install.exe`** are native
+equivalents of the two `.bat` files, for machines where policy blocks scripts
+but allows executables; see [Launcher executables](#launcher-executables).
+
 Opens the desktop window. **Drag one or more files in** (or click to browse, or
 paste a path), pick a **detection profile** if you like, and they enter the
 **queue**. Each file is scanned, then you review its findings **by category**,
@@ -92,11 +97,41 @@ recognizers, and **mapping administration** (reset, key rotation, per-entry
 erasure for GDPR). Detection **profiles** (Contracts, Client statements, HR
 documents, Maximize recall) are chosen per run on the main screen.
 
+## Launcher executables
+
+`Anonymizer.exe` and `Install.exe` sit in the repository root as native twins of
+`Anonymizer.bat` and `Install.bat`. They exist for one reason: some managed
+Windows machines block `.bat`/`.ps1` execution but still allow signed-or-unsigned
+executables, and a `.exe` is the only way to find out whether double-click launch
+works there at all.
+
+They are **launchers, not a packaged application** — they still require `uv` and
+this checked-out repository next to them, exactly like the `.bat` files do. Each
+is self-contained rather than shelling out to its `.bat` twin, so if scripts
+*are* blocked the `.exe` still works and the test result means something.
+
+To rebuild after editing `scripts/launcher_src/*.cs`:
+
+```powershell
+scripts\build_launchers.ps1
+```
+
+That uses the C# compiler built into Windows itself (`.NET Framework 4`, a
+Windows component since Windows 8) — no SDK or toolchain to install, and the
+~8 KB output needs nothing installed on the target machine. The built `.exe`
+files are committed so a `git pull` gets them without a build step.
+
+These are **test scaffolding and safe to delete** (all four files: the two
+`.exe`, `scripts/build_launchers.ps1`, `scripts/launcher_src/`) — the `.bat`
+files remain the supported path.
+
 ## Out of scope (v2)
 
-Standalone `.exe` packaging, macro editing, document-rendered preview,
-cloud/LLM-assisted detection. (Scanned PDFs are now supported via optional
-local OCR.)
+Standalone `.exe` packaging — i.e. a single-file bundle with Python and the
+models inside, needing no `uv`; the launchers above are not that. Also: macro
+editing, document-rendered preview, cloud/LLM-assisted detection. (Scanned PDFs
+are now supported via optional local OCR, and `scripts\build_offline_bundle.ps1`
+covers the air-gapped-install case.)
 
 ## Tests
 

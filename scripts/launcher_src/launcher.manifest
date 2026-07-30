@@ -1,0 +1,36 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Embedded win32 manifest for both launchers.
+
+  Two rules this file has already been broken by, both of which make Windows
+  refuse to start the .exe at all ("side by side configuration is incorrect"),
+  thrown by the loader before any managed code runs and with nothing useful in
+  the message. build_launchers.ps1 now validates both before compiling:
+    1. No byte order mark before the XML declaration.
+    2. No double hyphen inside an XML comment. It is illegal XML, and it is very
+       easy to type as a dash while writing an explanatory comment like this one.
+-->
+<assembly xmlns="urn:schemas-microsoft-com:asm.v1" manifestVersion="1.0">
+  <assemblyIdentity name="Anonymizer.Launcher" version="1.0.0.0" type="win32" />
+  <!--
+    Windows' installer detection heuristic auto elevates any .exe whose file
+    name looks like a setup program ("install", "setup", "update"). That would
+    make Install.exe throw a UAC prompt and then run as a different user, with
+    a different PATH and profile, so a per user `uv` install becomes invisible
+    to it. Declaring asInvoker explicitly turns the heuristic off. Applied to
+    both launchers so they behave identically.
+  -->
+  <trustInfo xmlns="urn:schemas-microsoft-com:asm.v3">
+    <security>
+      <requestedPrivileges>
+        <requestedExecutionLevel level="asInvoker" uiAccess="false" />
+      </requestedPrivileges>
+    </security>
+  </trustInfo>
+  <compatibility xmlns="urn:schemas-microsoft-com:compatibility.v1">
+    <application>
+      <!-- Windows 10 / 11 -->
+      <supportedOS Id="{8e0f7a12-bfb3-4fe8-b9a5-48fd50a15a9a}" />
+    </application>
+  </compatibility>
+</assembly>
