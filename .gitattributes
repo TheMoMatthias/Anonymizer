@@ -1,0 +1,6 @@
+# core.autocrlf is true here, so every checked-out text file gets CRLF endings.
+# Git's own heuristic correctly leaves the committed launcher executables alone,
+# but that is a heuristic and these binaries are checked out onto other people's
+# machines -- a single byte rewritten by line-ending conversion produces an .exe
+# that will not start. Pin them as binary rather than relying on detection.
+*.exe -text
