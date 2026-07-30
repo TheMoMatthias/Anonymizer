@@ -1173,3 +1173,37 @@ def test_a_multi_value_people_cell_claims_only_its_name_segment(tmp_path, analyz
     assert "Müller" in values, f"the everyday-word surname leaked: {values}"
     assert not any("geprüft" in v for v in values), f"commentary claimed as a name: {values}"
     assert not any(v.endswith(";") or v.endswith("|") for v in values), f"dirty span: {values}"
+
+
+@pytest.mark.parametrize("text", ["KUNDE: WINKLER", "kunde: Winkler", "Kunde: Winkler"])
+def test_a_shouted_label_still_anchors_the_name(analyzer, base_config, text):
+    """Forms and legacy exports shout their labels. With the whole anchored pattern
+    case-sensitive, "KUNDE: WINKLER" matched nothing -- measured at 30% for German
+    common-noun surnames against 100% for the ordinary "Kunde:" form. The flag is
+    SCOPED to the label alternation: a blanket IGNORECASE would let the name part match
+    ordinary lowercase German words, which is the bug BIC_CODE already documents."""
+    values = {f.value.lower() for f in _findings(analyzer, base_config, text)}
+    assert any("winkler" in v for v in values), f"label did not anchor in {text!r}: {values}"
+
+
+def test_a_known_name_is_found_inside_an_underscore_identifier():
+    """An underscore is a word character, so the `\w` boundary propagation used could
+    never see a name inside the identifiers a bank's systems generate. Measured: the
+    hyphen and UNC-path forms already propagated (those separators are non-word) while
+    "AKTE_Winkler_2024" and "Vertrag_Winkler_final_v2.pdf" silently did not."""
+    from anonymizer.core import _compiled_propagate_patterns
+
+    (_et, _v, rx), = _compiled_propagate_patterns((("PERSON", "Winkler"),))
+    for haystack in [
+        "AKTE_Winkler_2024",
+        "Vertrag_Winkler_final_v2.pdf",
+        "K-Winkler-2024",
+        r"\fileserver\Kunden\Winkler\2024",
+        "Winkler",
+    ]:
+        assert rx.search(haystack), f"known name not reached inside {haystack!r}"
+    # The alphanumeric half of the guard is unchanged -- a common-noun surname must
+    # still refuse to match inside a longer word.
+    for haystack in ["Bergstraße", "Winklerhof"]:
+        (_et2, _v2, rx2), = _compiled_propagate_patterns((("PERSON", "Berg" if "Berg" in haystack else "Winkler"),))
+        assert not rx2.search(haystack), f"over-matched inside {haystack!r}"

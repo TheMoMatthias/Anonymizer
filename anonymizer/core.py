@@ -429,8 +429,21 @@ def _compiled_propagate_patterns(propagate: tuple[tuple[str, str], ...]):
     measured as >90% of total scan time on a document with ~800 propagated
     names. lru_cache keeps this to one compile pass per scan (the propagate list
     is fixed for its duration), matching the pattern already used for
-    xlsx_handler's _name_header_re."""
-    return [(entity_type, value, re.compile(rf"(?<!\w){re.escape(value)}(?!\w)")) for entity_type, value in propagate]
+    xlsx_handler's _name_header_re.
+
+    The boundary is `[^\\W_]` (alphanumerics only), NOT `\\w`: an underscore is a
+    word character, so a `\\w` boundary could never see a name inside the
+    identifiers a bank's systems generate -- "AKTE_Winkler_2024",
+    "Vertrag_Winkler_final_v2.pdf". Measured: the hyphen and backslash forms
+    ("K-Winkler-2024", a UNC path) already propagated because those separators are
+    non-word, while the underscore forms silently did not. Treating `_` as a
+    boundary makes the behaviour consistent across separators; the alphanumeric
+    part of the guard is unchanged, so "Berg" still refuses to match inside
+    "Bergstraße"."""
+    return [
+        (entity_type, value, re.compile(rf"(?<![^\W_]){re.escape(value)}(?![^\W_])"))
+        for entity_type, value in propagate
+    ]
 
 
 def _snippet(text: str, start: int, end: int) -> str:

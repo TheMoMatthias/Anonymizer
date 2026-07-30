@@ -81,6 +81,24 @@ SURNAMES_TRANSLITERATED = [
     "Şahin", "García-Ñíguez",
 ]
 
+# OCR / transcription damage. Scanned correspondence, faxes and legacy exports do
+# not contain clean text, and none of the strata above measure what happens when a
+# name arrives corrupted. The corruptions here are the ones real OCR actually
+# makes: l/1/I confusion, rn->m, ii for an umlaut, O/0, dropped diacritics.
+# EXPECTED to score badly on the model and to be carried almost entirely by the
+# anchors -- which is the finding, because it says anchors are what protect a
+# scanned document.
+SURNAMES_OCR_NOISE = [
+    "Wlnkler",      # i -> l
+    "Mul1er",       # umlaut dropped, l -> 1
+    "Miiller",      # ue -> ii, the classic OCR umlaut
+    "0sterkamp",    # O -> 0
+    "Habermebl",    # h -> b
+    "Kretschrnar",  # m -> rn
+    "Nagelschmldt", # i -> l
+    "Sclnvanitz",   # hw -> lnv
+]
+
 SURNAME_STRATA: dict[str, list[str]] = {
     "german_common_noun": SURNAMES_COMMON_NOUN,
     "german_rare": SURNAMES_GERMAN_RARE,
@@ -88,6 +106,7 @@ SURNAME_STRATA: dict[str, list[str]] = {
     "particle": SURNAMES_PARTICLE,
     "hyphenated": SURNAMES_HYPHENATED,
     "transliterated": SURNAMES_TRANSLITERATED,
+    "ocr_noise": SURNAMES_OCR_NOISE,
 }
 
 # Leading particles carry no identifying information on their own.
@@ -174,6 +193,24 @@ def _after_preposition(given: str, surname: str) -> str:
     return f"Nach Rücksprache mit {surname} wurde der Vorgang abgeschlossen."
 
 
+# --- CASING variants ----------------------------------------------------------
+# Forms, mainframe exports and legacy banking systems store names in a single
+# case. Every shape gate in this codebase keys off an initial capital, and the
+# model was trained on running prose, so a name in one case has none of the
+# signal either relies on. Measured: a bare "WINKLER" was detected as NOTHING.
+
+def _bare_upper(given: str, surname: str) -> str:
+    return surname.upper()
+
+
+def _bare_lower(given: str, surname: str) -> str:
+    return surname.lower()
+
+
+def _labelled_upper(given: str, surname: str) -> str:
+    return f"KUNDE: {surname.upper()}"
+
+
 CONTEXTS = {
     "salutation": _salutation,
     "prose_full_name": _prose_full_name,
@@ -186,6 +223,9 @@ CONTEXTS = {
     "distribution_list": _distribution_list,
     "maiden_name": _maiden_name,
     "after_preposition": _after_preposition,
+    "bare_upper": _bare_upper,
+    "bare_lower": _bare_lower,
+    "labelled_upper": _labelled_upper,
 }
 
 # Contexts measured WITHOUT the neutral filler prose.
@@ -195,7 +235,7 @@ CONTEXTS = {
 # of German prose that a lone spreadsheet cell does not have, and made the
 # hardest and most common shape in the user's real workbooks score like prose.
 # Every bare_cell figure reported before this was optimistic.
-_NO_FILLER_CONTEXTS = frozenset({"bare_cell"})
+_NO_FILLER_CONTEXTS = frozenset({"bare_cell", "bare_upper", "bare_lower"})
 
 
 def probe_text(context: str, given: str, surname: str) -> str:
@@ -307,8 +347,12 @@ def _whole_token(needle: str, haystack: str) -> bool:
     """Whole-token match, NOT substring: a common-noun surname ("Berg", "Koch")
     must not count as found just because it is a substring of an unrelated finding
     ("Bergstraße", a "…berg" ORG) -- that over-reports recall for exactly the
-    stratum this harness exists to measure honestly."""
-    return re.search(rf"(?<!\w){re.escape(needle)}(?!\w)", haystack) is not None
+    stratum this harness exists to measure honestly.
+
+    CASE-INSENSITIVE: redacting "WINKLER" removes the plant just as completely as
+    redacting "Winkler", so scoring the casing strata case-sensitively would
+    report a correct catch as a leak."""
+    return re.search(rf"(?<!\w){re.escape(needle)}(?!\w)", haystack, re.IGNORECASE) is not None
 
 
 def _found(findings, needle: str) -> bool:
@@ -369,6 +413,32 @@ def measure_structured(analyzer, config: dict) -> list[StratumResult]:
     return results
 
 
+def _actionable_values(analyzer, cfg: dict, text: str) -> list[str]:
+    """What a REVIEWER would actually be shown for a piece of text.
+
+    Deliberately routed through build_scan_result rather than reading detect_unit
+    directly: corroboration-only DEMOTES uncorroborated guesses out of the
+    actionable list, and a measurement that skips that step reports coverage the
+    tool does not really give. This matters most for Art. 9 -- several of those
+    probes were only ever "caught" because spaCy mistyped a capitalized German
+    noun as a PERSON, and such a hit is exactly what demotion removes."""
+    from .core import build_scan_result
+
+    unit = TextUnit("u1", text)
+    findings = detect_unit(analyzer, unit, cfg)
+    result = build_scan_result(findings, [unit], cfg)
+    return [g.value for g in result.all_actionable()]
+
+
+class _ValueFinding:
+    """Minimal stand-in so _found() can score plain strings."""
+
+    __slots__ = ("value",)
+
+    def __init__(self, value: str) -> None:
+        self.value = value
+
+
 def measure_art9_oblique(analyzer, config: dict) -> list[StratumResult]:
     """Art. 9 facts stated in plain sentences, with no label and no list word.
     Scored on the one token that has to disappear for the fact to stay private."""
@@ -376,11 +446,111 @@ def measure_art9_oblique(analyzer, config: dict) -> list[StratumResult]:
     results: list[StratumResult] = []
     for label, (needle, text) in ART9_OBLIQUE_PROBES.items():
         r = StratumResult(stratum="art9_oblique", context=label, total=1)
-        findings = detect_unit(analyzer, TextUnit("u1", f"{FILLER} {text}"), cfg)
-        if _found(findings, needle):
+        claimed = [_ValueFinding(v) for v in _actionable_values(analyzer, cfg, f"{FILLER} {text}")]
+        if _found(claimed, needle):
             r.found = 1
         else:
             r.missed.append(needle)
+        results.append(r)
+    return results
+
+
+# Art. 9 values as a spreadsheet stores them: a bare cell, under a header that
+# gives detection nothing. This is the intersection of the tool's two weakest
+# areas -- special-category data and structured cells -- and nothing measured it.
+# The values are HELD OUT of the shipped word lists on purpose where possible, so
+# a hit means the mechanism generalizes rather than that the list contains itself.
+ART9_CELL_PROBES: dict[str, list[str]] = {
+    "health": ["Dialysepatient", "Rollstuhlfahrer", "Bandscheibenvorfall", "schwerbehindert"],
+    "religion": ["neuapostolisch", "alevitisch", "russisch-orthodox", "Zeuge Jehovas"],
+    "union": ["ver.di-Mitglied", "IG Metall", "Betriebsratsvorsitzender", "Streikkasse"],
+    "ethnic": ["Sinti", "kurdischer Herkunft", "Kontingentflüchtling", "Aramäer"],
+}
+
+
+def measure_art9_structured(analyzer, config: dict, workdir: Path) -> list[StratumResult]:
+    """Art. 9 values in bare spreadsheet cells, under headers that say nothing."""
+    import openpyxl
+
+    from .pipeline import scan_document
+
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.title = "Stammdaten"
+    ws.cell(row=1, column=1, value="Vorgang_ID")
+    headers = ["Merkmal_1", "Status", "Feld_3", "Bemerkung"]
+    for col, (cat, header) in enumerate(zip(ART9_CELL_PROBES, headers), start=2):
+        ws.cell(row=1, column=col, value=header)
+        for row, value in enumerate(ART9_CELL_PROBES[cat], start=2):
+            ws.cell(row=row, column=col, value=value)
+    for row in range(2, 6):
+        ws.cell(row=row, column=1, value=f"VG-{2000 + row}")
+    path = workdir / "art9_cells.xlsx"
+    wb.save(path)
+    wb.close()
+
+    claimed = [g.value for g in scan_document(path, analyzer, config).all_actionable()]
+    results: list[StratumResult] = []
+    for cat, values in ART9_CELL_PROBES.items():
+        r = StratumResult(stratum="art9_structured", context=cat)
+        for value in values:
+            r.total += 1
+            if any(_whole_token(tok, v) for v in claimed for tok in _identifying_tokens(value)):
+                r.found += 1
+            else:
+                r.missed.append(value)
+        results.append(r)
+    return results
+
+
+# A name wrapped inside an identifier, a path or an address. The name is fully
+# legible to any reader and there is nothing in this codebase that looks INSIDE a
+# delimited token for one.
+EMBEDDED_TEMPLATES: dict[str, str] = {
+    "id_hyphen": "Referenz: K-{n}-2024",
+    "id_underscore": "Ablage: AKTE_{n}_2024",
+    "ticket_ref": "Vorgang TICKET-4711-{n} ist offen.",
+    "unc_path": r"Pfad: \\fileserver\Kunden\{n}\2024\Vertrag.pdf",
+    "filename": "Datei: Vertrag_{n}_final_v2.pdf",
+}
+
+
+def measure_embedded_identifiers(analyzer, config: dict, workdir: Path) -> list[StratumResult]:
+    """Names inside identifiers, paths and filenames, in a document that ALSO
+    names the person normally.
+
+    The anchor sentence is not a kindness -- it is what makes the measurement mean
+    anything. An identifier probed in total isolation ("K-Winkler-2024" and
+    nothing else) is not solvable by any mechanism this tool has or could
+    reasonably have: there is no signal separating that from a product code, and
+    a surname list broad enough to decide it would flag every capitalized token in
+    every id. What IS solvable, and what a real document always provides, is the
+    same name appearing normally elsewhere -- so the question this asks is whether
+    a KNOWN name is still found once it is wrapped in an identifier. Scored on the
+    embedded occurrence only, by requiring a count of 2."""
+    from docx import Document
+
+    from .pipeline import scan_document
+
+    partition = _trap_partition()
+    pool = [n for names in partition.values() for n in names]
+    results: list[StratumResult] = []
+    for label, template in EMBEDDED_TEMPLATES.items():
+        r = StratumResult(stratum="embedded", context=label)
+        for i, surname in enumerate(pool[:12]):
+            doc = Document()
+            doc.add_paragraph(_salutation("", surname))  # establishes the name
+            doc.add_paragraph(FILLER)
+            doc.add_paragraph(template.format(n=surname))
+            path = workdir / f"embedded_{label}_{i}.docx"
+            doc.save(path)
+            r.total += 1
+            # 2 occurrences planted: the salutation and the identifier. Anything
+            # less than both means the embedded one was not reached.
+            if _occurrences_caught(scan_document(path, analyzer, config), surname) >= 2:
+                r.found += 1
+            else:
+                r.missed.append(surname)
         results.append(r)
     return results
 

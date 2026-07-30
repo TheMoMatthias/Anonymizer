@@ -110,8 +110,16 @@ _HONORIFICS = r"(?:Herrn?|Frau|Hr\.|Fr\.|Dr\.|Prof\.|Mr\.?|Mrs\.?|Ms\.?|Miss|Sir
 #     could not be corroborated, and under corroboration-only it would be demoted and
 #     LEAK. That is how this was found.
 HONORIFIC_PREFIX_RE = regex.compile(rf"^{_HONORIFICS}\s+")
+#
+# The LABEL alternation is case-INSENSITIVE (scoped `(?i:...)`, so the NAME after it
+# still has to be capitalized). Forms and legacy exports shout their labels --
+# "KUNDE: WINKLER" -- and with the whole pattern case-sensitive the anchor could
+# not fire on them. Measured before this: labelled_upper scored 30% for German
+# common-noun surnames against 100% for the ordinary "Kunde:" form. Scoping the
+# flag is what keeps this safe: a blanket IGNORECASE would let `_NAME` match
+# ordinary lowercase German words, which is the bug BIC_CODE already documents.
 _NAME_LABELS = (
-    r"(?:Name|Kunde|Kundin|Kontoinhaber|Sachbearbeiter|Ansprechpartner|Empfänger|"
+    r"(?i:Name|Kunde|Kundin|Kontoinhaber|Sachbearbeiter|Ansprechpartner|Empfänger|"
     r"Berater|Beraterin|Mitarbeiter|Antragsteller|Versicherungsnehmer|Vertragspartner|"
     # English labels for a mixed-language document:
     r"Customer|Client|Contact|Beneficiary|Applicant|Representative|Attn)"

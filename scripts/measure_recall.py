@@ -19,7 +19,9 @@ from anonymizer.engine import build_analyzer
 from anonymizer.evaluation import (
     format_report,
     measure_art9_oblique,
+    measure_art9_structured,
     measure_documents,
+    measure_embedded_identifiers,
     measure_isolated,
     measure_structured,
     measure_unanchored_documents,
@@ -48,6 +50,12 @@ def main() -> None:
     }
     with tempfile.TemporaryDirectory() as tmp:
         work = Path(tmp)
+        sections["NAMES INSIDE IDENTIFIERS / PATHS (name known elsewhere in the doc)"] = (
+            measure_embedded_identifiers(analyzer, config, work)
+        )
+        sections["ART. 9 IN BARE CELLS (special category + structured -- both weak areas)"] = (
+            measure_art9_structured(analyzer, config, work)
+        )
         sections["NAMES IN SPREADSHEET CELLS (header gives no help -- the real files)"] = (
             measure_workbook_traps(analyzer, config, work)
         )
