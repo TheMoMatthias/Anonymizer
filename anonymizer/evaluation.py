@@ -30,6 +30,7 @@ HONEST LIMITS -- report these numbers as an UPPER BOUND:
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -55,12 +56,58 @@ SURNAMES_FOREIGN = [
     "Öztürk", "Yılmaz", "Nguyen", "Kowalczyk", "Rossi", "Ivanov", "Popescu",
     "Hussein", "Demir", "Petrov",
 ]
+# Nobiliary / patronymic particles. The particle itself identifies nobody, so
+# only the CORE is scored (see _identifying_tokens) -- redacting "von [NAME]"
+# leaks nothing. What makes these hard is tokenization: the particle is a
+# lowercase function word, so a model that requires initial capitals, or a
+# shape gate that splits on whitespace, truncates the span mid-name.
+SURNAMES_PARTICLE = [
+    "von Bergen", "van der Berg", "de Vries", "zu Guttenberg", "von der Leyen",
+    "van den Broek", "de la Cruz", "von Hohenstein",
+]
+# Double-barrelled names. Scored on BOTH halves: catching only "Schmidt" and
+# leaving "Rottluff" standing is a disclosure, not a partial success, so the
+# harness refuses to credit a half-catch (see _identifying_tokens).
+SURNAMES_HYPHENATED = [
+    "Schmidt-Rottluff", "Müller-Lüdenscheidt", "Bergmann-Pohl", "Klein-Vogelsang",
+    "Sacher-Masoch", "Weizsäcker-Kohl",
+]
+# Non-ASCII orthography beyond the German umlauts a German model saw in
+# training: Vietnamese tone marks, Serbian/Icelandic/Slovak/Romanian letters.
+# These break naive normalization and casing rules, and no German gazetteer
+# contains them.
+SURNAMES_TRANSLITERATED = [
+    "Nguyễn", "Đorđević", "Þórsdóttir", "Kováčová", "Ceaușescu", "Åkerlund",
+    "Şahin", "García-Ñíguez",
+]
 
 SURNAME_STRATA: dict[str, list[str]] = {
     "german_common_noun": SURNAMES_COMMON_NOUN,
     "german_rare": SURNAMES_GERMAN_RARE,
     "foreign": SURNAMES_FOREIGN,
+    "particle": SURNAMES_PARTICLE,
+    "hyphenated": SURNAMES_HYPHENATED,
+    "transliterated": SURNAMES_TRANSLITERATED,
 }
+
+# Leading particles carry no identifying information on their own.
+_PARTICLES = frozenset({"von", "van", "de", "der", "den", "zu", "zur", "zum", "la", "le", "di", "da"})
+
+
+def _identifying_tokens(surname: str) -> list[str]:
+    """The tokens that MUST be redacted for this plant to count as caught.
+
+    Two asymmetric rules, both deliberate:
+      * leading particles are DROPPED -- "von Bergen" reduced to "Bergen",
+        because leaving a bare "von" behind discloses nothing;
+      * hyphen halves are KEPT SEPARATE and all are required -- leaving
+        "Rottluff" behind after redacting "Schmidt-" discloses the person.
+    Without this split the harness would either punish correct behaviour or
+    credit a genuine leak."""
+    parts = [p for p in re.split(r"[\s\-]+", surname) if p]
+    while len(parts) > 1 and parts[0].lower() in _PARTICLES:
+        parts.pop(0)
+    return parts
 
 GIVEN_NAMES = ["Björn", "Petra", "Thomas", "Ayşe", "Mehmet", "Anna", "Lukas", "Sofia"]
 
@@ -99,6 +146,34 @@ def _signature(given: str, surname: str) -> str:
     return f"Mit freundlichen Grüßen {given} {surname}"
 
 
+# --- the OBLIQUE contexts: a person named with no honorific to anchor on ------
+# Every one of these is ordinary German bank correspondence, and every one
+# withholds the single cue ("Herr"/"Frau"/"Kunde:") that the anchored patterns
+# key on. This is the axis where a redaction tool quietly leaks: the name is
+# present, unambiguous to a human, and invisible to a context-gated recognizer.
+
+def _initials(given: str, surname: str) -> str:
+    return f"{given[:1]}. {surname} hat den Vorgang gezeichnet."
+
+
+def _role_reference(given: str, surname: str) -> str:
+    return f"Der Einreicher {surname} aus Frankfurt bestätigte den Sachverhalt."
+
+
+def _distribution_list(given: str, surname: str) -> str:
+    # The plant sits BETWEEN two department names, so a model leaning on
+    # "items in a list are alike" is actively pushed toward the wrong answer.
+    return f"Verteiler: Rechtsabteilung, {surname}, Innenrevision"
+
+
+def _maiden_name(given: str, surname: str) -> str:
+    return f"Die Kundin, geb. {surname}, führt das Konto seit 2011."
+
+
+def _after_preposition(given: str, surname: str) -> str:
+    return f"Nach Rücksprache mit {surname} wurde der Vorgang abgeschlossen."
+
+
 CONTEXTS = {
     "salutation": _salutation,
     "prose_full_name": _prose_full_name,
@@ -106,6 +181,11 @@ CONTEXTS = {
     "labelled_field": _labelled_field,
     "bare_cell": _bare,
     "signature": _signature,
+    "initials": _initials,
+    "role_reference": _role_reference,
+    "distribution_list": _distribution_list,
+    "maiden_name": _maiden_name,
+    "after_preposition": _after_preposition,
 }
 
 # Contexts measured WITHOUT the neutral filler prose.
@@ -149,6 +229,67 @@ STRUCTURED_PROBES: dict[str, tuple[str, str]] = {
 }
 
 
+# --- Art. 9 stated OBLIQUELY --------------------------------------------------
+# GDPR Art. 9 data carries the heaviest consequence of any category here, and the
+# recognizers find it two ways: a literal word list, or a LABEL:VALUE anchor
+# ("Konfession: …"). Real correspondence supplies NEITHER. It states the fact in
+# a plain sentence, and the sensitive part is a perfectly ordinary noun.
+#
+# The needle is the single token that MUST be removed for the fact to stay
+# private. Leave "Rollstuhl" standing and the reader learns the customer's
+# disability regardless of what else was redacted.
+#
+# These are EXPECTED to score badly. That is the finding, not a harness bug: it
+# says the word-list approach does not generalize, and it quantifies by how much.
+ART9_OBLIQUE_PROBES: dict[str, tuple[str, str]] = {
+    "health_disability": ("Rollstuhl", "Der Kunde ist seit dem Unfall dauerhaft auf den Rollstuhl angewiesen."),
+    "health_treatment": ("Chemotherapie", "Die Termine mussten wegen der laufenden Chemotherapie verschoben werden."),
+    "health_psych": ("Burnout", "Er ist nach einem Burnout seit März nicht im Dienst."),
+    "religion_practice": ("Moschee", "Er besucht jeden Freitag die Moschee in der Innenstadt."),
+    "religion_observance": ("Ramadan", "Während des Ramadan bittet sie um spätere Gesprächstermine."),
+    "union_membership": ("Betriebsrat", "Er wurde in den Betriebsrat gewählt und ist dafür freigestellt."),
+    "union_strike": ("Streikgeld", "Für die Ausfalltage wurde Streikgeld an das Mitglied ausgezahlt."),
+    "sex_life_partner": ("Ehefrau", "Sie lebt mit ihrer Ehefrau in einer eingetragenen Partnerschaft."),
+    "ethnic_origin": ("Kontingentflüchtlinge", "Die Familie kam 1994 als Kontingentflüchtlinge nach Deutschland."),
+    "ethnic_language": ("Romanes", "Das Beratungsgespräch wurde auf Romanes geführt."),
+    "political_party": ("Grünen", "Er kandidierte bei der Kommunalwahl für die Grünen."),
+    "biometric": ("Fingerabdruck", "Die Freigabe erfolgt per Fingerabdruck des Kontoinhabers."),
+}
+
+# --- structured-cell traps ----------------------------------------------------
+# The shapes a real "database" workbook stores names in, where the column HEADER
+# gives detection nothing to work with. Each trap is a column; each column gets
+# its OWN disjoint set of surnames so a hit attributes unambiguously back to one
+# trap (a ScanResult groups by value, so shared names would blur the columns).
+_TRAP_COLUMNS: dict[str, tuple[str, str]] = {
+    # trap name -> (header text, cell template with {n} for the name)
+    "lying_header": ("Status", "{n}"),
+    "opaque_header": ("Feld_7", "{n}"),
+    "no_header": ("", "{n}"),
+    "multi_value_cell": ("Vermerk", "{n}; intern geprüft"),
+    "id_shaped_cell": ("Referenz", "K-{n}-2024"),
+    "initials_cell": ("Kürzel", "B. {n}"),
+}
+
+
+def _trap_partition() -> dict[str, list[str]]:
+    """Deal every planted surname out across the traps, round-robin over the
+    strata so no trap is accidentally easier than another (all-foreign would
+    flatter, all-common-noun would damn). Deterministic -- the harness must
+    produce the same workbook on every run for its numbers to be comparable."""
+    interleaved: list[str] = []
+    pools = [list(v) for v in SURNAME_STRATA.values()]
+    for i in range(max(len(p) for p in pools)):
+        for pool in pools:
+            if i < len(pool):
+                interleaved.append(pool[i])
+    traps = list(_TRAP_COLUMNS)
+    out: dict[str, list[str]] = {t: [] for t in traps}
+    for i, name in enumerate(interleaved):
+        out[traps[i % len(traps)]].append(name)
+    return out
+
+
 @dataclass
 class StratumResult:
     stratum: str
@@ -167,16 +308,20 @@ def _whole_token(needle: str, haystack: str) -> bool:
     must not count as found just because it is a substring of an unrelated finding
     ("Bergstraße", a "…berg" ORG) -- that over-reports recall for exactly the
     stratum this harness exists to measure honestly."""
-    import re
-
     return re.search(rf"(?<!\w){re.escape(needle)}(?!\w)", haystack) is not None
 
 
 def _found(findings, needle: str) -> bool:
-    """A plant counts as found if ANY finding covers it (as a whole token). The
-    entity TYPE is deliberately not checked: for redaction, catching "Bauer" as
-    NER_MISC rather than PERSON still removes it -- the leak is what matters."""
-    return any(_whole_token(needle, f.value) for f in findings)
+    """A plant counts as found only when EVERY identifying token is covered by
+    the union of the findings. The entity TYPE is deliberately not checked: for
+    redaction, catching "Bauer" as NER_MISC rather than PERSON still removes it
+    -- the leak is what matters.
+
+    The union (rather than "some single finding contains the whole string") is
+    what makes multi-token plants scoreable at all: a hyphenated name legitimately
+    arrives as two adjacent spans, and that is a full catch, not a miss."""
+    tokens = _identifying_tokens(needle)
+    return all(any(_whole_token(tok, f.value) for f in findings) for tok in tokens)
 
 
 def measure_isolated(analyzer, config: dict) -> list[StratumResult]:
@@ -224,6 +369,71 @@ def measure_structured(analyzer, config: dict) -> list[StratumResult]:
     return results
 
 
+def measure_art9_oblique(analyzer, config: dict) -> list[StratumResult]:
+    """Art. 9 facts stated in plain sentences, with no label and no list word.
+    Scored on the one token that has to disappear for the fact to stay private."""
+    cfg = {**config, "languages": ["de"]}
+    results: list[StratumResult] = []
+    for label, (needle, text) in ART9_OBLIQUE_PROBES.items():
+        r = StratumResult(stratum="art9_oblique", context=label, total=1)
+        findings = detect_unit(analyzer, TextUnit("u1", f"{FILLER} {text}"), cfg)
+        if _found(findings, needle):
+            r.found = 1
+        else:
+            r.missed.append(needle)
+        results.append(r)
+    return results
+
+
+def measure_workbook_traps(analyzer, config: dict, workdir: Path) -> list[StratumResult]:
+    """Names in spreadsheet cells whose column header offers no help at all.
+
+    This is the shape the user's real files are full of and the one the
+    letter-shaped measurements above cannot see: there is no salutation to anchor
+    on, no surrounding sentence for a WikiNER-trained model to lean on, and no
+    people-word in the header for the whole-cell override to fire on. Scored per
+    planted cell."""
+    import openpyxl
+
+    from .pipeline import scan_document
+
+    partition = _trap_partition()
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.title = "Vorgaenge"
+    traps = list(_TRAP_COLUMNS)
+    for col, trap in enumerate(traps, start=1):
+        header, template = _TRAP_COLUMNS[trap]
+        if header:
+            ws.cell(row=1, column=col, value=header)
+        for row, name in enumerate(partition[trap], start=2):
+            ws.cell(row=row, column=col, value=template.format(n=name))
+    # A neutral first column so the sheet reads as a real table rather than a
+    # column of bare names -- the latter is an easier problem than reality.
+    ws.insert_cols(1)
+    ws.cell(row=1, column=1, value="Vorgang_ID")
+    for row in range(2, ws.max_row + 1):
+        ws.cell(row=row, column=1, value=f"VG-{1000 + row}")
+    path = workdir / "trap_workbook.xlsx"
+    wb.save(path)
+    wb.close()
+
+    result = scan_document(path, analyzer, config)
+    claimed = [g.value for g in result.all_actionable()]
+    results: list[StratumResult] = []
+    for trap in traps:
+        r = StratumResult(stratum="structured_trap", context=trap)
+        for name in partition[trap]:
+            r.total += 1
+            tokens = _identifying_tokens(name)
+            if all(any(_whole_token(tok, v) for v in claimed) for tok in tokens):
+                r.found += 1
+            else:
+                r.missed.append(name)
+        results.append(r)
+    return results
+
+
 def measure_documents(analyzer, config: dict, workdir: Path) -> list[StratumResult]:
     """A realistic letter: the name recurs across salutation, prose, a labelled
     field and a bare cell. Every occurrence must be caught -- this is where the
@@ -251,9 +461,60 @@ def measure_documents(analyzer, config: dict, workdir: Path) -> list[StratumResu
 
             planted = 5  # salutation, oblique, labelled, bare cell, signature
             result = scan_document(path, analyzer, config)
-            caught = sum(
-                g.count for g in result.all_actionable() if _whole_token(surname, g.value)
-            )
+            caught = _occurrences_caught(result, surname)
+            r.total += planted
+            r.found += min(caught, planted)
+            if caught < planted:
+                r.missed.append(f"{surname}({caught}/{planted})")
+        results.append(r)
+    return results
+
+
+def _occurrences_caught(result, surname: str) -> int:
+    """How many occurrences of a plant were claimed, scored per identifying token.
+
+    The count is the MINIMUM across the tokens, not the sum: for "Schmidt-Rottluff"
+    a run that claimed every "Schmidt" and no "Rottluff" has redacted nothing
+    safely, so it scores 0 rather than half. Summing would let a systematic
+    half-catch report as partial success."""
+    tokens = _identifying_tokens(surname)
+    groups = list(result.all_actionable())
+    per_token = [
+        sum(g.count for g in groups if _whole_token(tok, g.value)) for tok in tokens
+    ]
+    return min(per_token) if per_token else 0
+
+
+def measure_unanchored_documents(analyzer, config: dict, workdir: Path) -> list[StratumResult]:
+    """The hardest realistic document: an internal memo that names a person
+    several times and NEVER once with an honorific or a "Kunde:" label.
+
+    Why this is the measurement that matters most: the anchored patterns are what
+    seed document-wide propagation, so the flattering 98% in the section above is
+    really "one salutation rescued every other occurrence". Remove the salutation
+    -- as any internal note, meeting minute or ticket comment does -- and
+    propagation has nothing to spread. This section is the tool's true floor."""
+    from docx import Document
+
+    from .pipeline import scan_document
+
+    contexts = ["after_preposition", "role_reference", "initials", "distribution_list", "bare_cell"]
+    results: list[StratumResult] = []
+    for stratum, surnames in SURNAME_STRATA.items():
+        r = StratumResult(stratum=stratum, context="unanchored_occurrences")
+        for i, surname in enumerate(surnames):
+            given = GIVEN_NAMES[i % len(GIVEN_NAMES)]
+            doc = Document()
+            doc.add_paragraph(FILLER)
+            for ctx in contexts[:-1]:
+                doc.add_paragraph(CONTEXTS[ctx](given, surname))
+            table = doc.add_table(rows=1, cols=1)
+            table.rows[0].cells[0].text = _bare(given, surname)
+            path = workdir / f"memo_{stratum}_{i}.docx"
+            doc.save(path)
+
+            planted = len(contexts)
+            caught = _occurrences_caught(scan_document(path, analyzer, config), surname)
             r.total += planted
             r.found += min(caught, planted)
             if caught < planted:

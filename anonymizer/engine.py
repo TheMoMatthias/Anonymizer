@@ -71,7 +71,22 @@ _CASE_SENSITIVE_FLAGS = regex.MULTILINE | regex.DOTALL
 # fails on the international names a German bank actually holds -- measured, it
 # missed "Yılmaz" (Turkish dotless ı). \p{Lu}\p{L}+ covers Turkish, Polish,
 # Romanian, Vietnamese and ALL-CAPS forms. (The `regex` module supports \p{}.)
-_NAME = r"\p{Lu}\p{L}+(?:[-\s]\p{Lu}\p{L}+){0,2}"
+#
+# Nobiliary/patronymic PARTICLES are lowercase, and requiring every token to
+# start with \p{Lu} meant a particle name matched NOTHING here -- not even
+# partially. Measured on the hardened recall harness: "Sehr geehrter Herr von
+# Bergen," scored 38% for the particle stratum where every other stratum scored
+# 100%, and "zu Guttenberg" was missed in EVERY context (0/5 even in a full
+# letter). The particle has to be allowed both at the start of the name and
+# BETWEEN its tokens, because German stacks them ("von der Leyen", "van den
+# Broek", "de la Cruz").
+_NAME_PARTICLE = (
+    r"(?:von|van|de|der|den|del|della|di|da|dos|du|zu|zur|zum|la|le|el|al|bin|ibn|ter|ten|of)"
+)
+_NAME = (
+    rf"(?:{_NAME_PARTICLE}\s+)*\p{{Lu}}\p{{L}}+"
+    rf"(?:[-\s](?:{_NAME_PARTICLE}\s+)*\p{{Lu}}\p{{L}}+){{0,2}}"
+)
 # `Herrn?` also matches the dative "Herrn" that opens a German postal address
 # block ("Herrn\n<Name>\n<Straße>") -- the single most common place a customer name
 # appears in a bank letter, and exactly the sparse-context spot spaCy misses.
@@ -101,9 +116,54 @@ _NAME_LABELS = (
     # English labels for a mixed-language document:
     r"Customer|Client|Contact|Beneficiary|Applicant|Representative|Attn)"
 )
+# ROLE NOUNS that introduce a person directly, with no colon and no honorific
+# ("Der Einreicher Winkler aus Frankfurt bestätigte den Sachverhalt"). This is
+# the single worst-measured shape in the whole harness: before these patterns
+# existed, `role_reference` scored 0% for German common-noun surnames, 12% for
+# rare German ones and 12-50% for foreign ones -- i.e. naming somebody by their
+# ROLE rather than their title defeated detection almost completely, across
+# every stratum, in text that is otherwise perfectly ordinary German.
+#
+# Deliberately scored into the REVIEW tier rather than auto-accept: "der Berater
+# Deutsche Bank" is a construction this will claim. Per the tool's posture a
+# reviewed over-flag costs minutes and a miss is a disclosure.
+_ROLE_NOUNS = (
+    r"(?:Einreicher|Antragsteller|Kontoinhaber|Mandant|Bearbeiter|Sachbearbeiter|"
+    r"Berater|Beraterin|Mitarbeiter|Mitarbeiterin|Kollege|Kollegin|Bürge|Erbe|Erblasser|"
+    r"Vollmachtnehmer|Bevollmächtigte[rn]?|Geschäftsführer|Prokurist|Gesellschafter|"
+    r"Treuhänder|Begünstigte[rn]?|Versicherungsnehmer|Vertragspartner|Zeuge|Gutachter|"
+    r"Notar|Rechtsanwalt|Anwalt|Steuerberater|Prüfer|Revisor|Teilnehmer|Absender|"
+    r"Zeichnungsberechtigte[rn]?|Verfasser|Unterzeichner|Auftraggeber|Zahlungsempfänger|"
+    # English equivalents, registered for every scan language like the labels above.
+    r"Applicant|Signatory|Trustee|Guarantor|Witness|Auditor|Attorney|Sender)"
+)
+# Markers that introduce a BIRTH/former name. German records state a maiden name
+# with a bare abbreviation and no other cue ("Die Kundin, geb. Winkler, ...");
+# measured at 20% for the common-noun stratum without this.
+_BIRTH_NAME_MARKERS = r"(?:geb\.|geborene[rn]?|verw\.|verwitwete[rn]?|verh\.|verheiratete[rn]?|née|nee)"
+
 _ANCHORED_NAME_PATTERNS = [
     Pattern(name="honorific_name", regex=rf"(?<=\b{_HONORIFICS}\s+){_NAME}", score=0.75),
     Pattern(name="labelled_name", regex=rf"(?<=\b{_NAME_LABELS}\s*:\s*){_NAME}", score=0.70),
+    # The honorific is excluded so "Der Antragsteller Herr Müller" yields "Müller"
+    # and not "Herr Müller" -- a title inside the value keys the pseudonym on the
+    # title, which splits one person across two placeholders.
+    Pattern(
+        name="role_noun_name",
+        regex=rf"(?<=\b{_ROLE_NOUNS}\s+)(?!{_HONORIFICS}\b){_NAME}",
+        score=0.60,
+    ),
+    Pattern(name="birth_name", regex=rf"(?<=\b{_BIRTH_NAME_MARKERS}\s+){_NAME}", score=0.65),
+    # An initial before a surname ("B. Winkler", "M. Schmidt-Rottluff"). A single
+    # capital letter with a period, immediately before a capitalized word, is an
+    # initial in almost all correspondence; the residual risk ("Abschnitt B.
+    # Vertragsdaten") is why this sits at the BOTTOM of the review tier.
+    #
+    # 0.6, not lower: PERSON carries a 0.6 confidence_threshold, and detect_unit
+    # drops anything below it silently. At 0.55 this pattern matched, produced a
+    # raw 0.55 PERSON result, and was then discarded before it became a finding
+    # -- so it looked implemented while contributing exactly nothing.
+    Pattern(name="initial_name", regex=rf"(?<=\b\p{{Lu}}\.\s{{0,2}}){_NAME}", score=0.60),
 ]
 
 # Links, SCHEME- or www-anchored. This replaces Presidio's own UrlRecognizer,

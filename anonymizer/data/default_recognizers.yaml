@@ -18,7 +18,7 @@
 # v11: German Art. 9 bare-value word lists gained the terms measure_recall.py
 # measured as leaking in the BARE form -- `neuapostolisch` (religion) and
 # `bandscheibenvorfall` / `migräne` (health) -- plus their unambiguous siblings.
-config_schema_version: 11
+config_schema_version: 12
 
 languages:
   - de
@@ -374,6 +374,23 @@ deny_list: []
 # cell. Built-in stems already cover Name/Kunde/Sachbearbeiter/Ansprechpartner/
 # Projektleiter/Betreuer/Verantwortlich/... ; add your workbook's own here.
 name_column_headers: []
+
+# Infer that a column holds PEOPLE from its CONTENT when its header does not say
+# so -- the header lies ("Status"), is opaque ("Feld_7"), or is missing.
+#
+# How it decides (all must hold, on the first 500 data rows of the column):
+#   * at least 4 values, and more than half of them DISTINCT -- a controlled
+#     vocabulary repeats itself, a roster of people does not;
+#   * at least 80% of the distinct values are name-SHAPED;
+#   * at least 2 values, and at least 20% of them, are independently confirmed as
+#     people (the curated given-name list, or the model typing them PERSON).
+# The confirmed minority is then treated as evidence about the whole column, so
+# the everyday-word German surnames the model reliably misses in a bare cell get
+# claimed too. Measured on the recall harness: a column of bare surnames under a
+# misleading header went from 10% to the figure recorded in the run-file.
+#
+# Set false to require an explicit header match before any column is read as people.
+infer_name_columns: true
 
 # Small curated set of German bank-specific recognizers Presidio doesn't ship.
 # context words boost score when found near a match (Presidio's built-in context logic).

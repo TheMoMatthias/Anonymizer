@@ -16,6 +16,7 @@ from ..core import (
     _NER_ENTITIES,
     _resolve_overlaps,
     detect_unit,
+    is_given_name,
     neutralize_structural_noise,
     precompute_nlp_artifacts,
 )
@@ -227,7 +228,21 @@ def topical_gazetteer(path: Path, config: dict) -> list[tuple[str, str]]:
 
 # German name particles that don't themselves need to be capitalized ("Klaus
 # von Bergen", "Anna de Wit").
-_NAME_PARTICLES = {"von", "van", "de", "der", "zu", "zur", "zum"}
+# Kept aligned with engine._NAME_PARTICLE, which the anchored patterns use: a
+# particle this gate rejects but the anchors accept produces a cell the tool
+# detects in prose and refuses to claim in a column ("van den Broek", "de la Cruz").
+_NAME_PARTICLES = {
+    "von", "van", "de", "der", "den", "del", "della", "di", "da", "dos", "du",
+    "zu", "zur", "zum", "la", "le", "el", "al", "bin", "ibn", "ter", "ten",
+}
+# A leading INITIAL ("B. Winkler", "M. Schmidt-Rottluff"). Stripped before the
+# sentence-punctuation test for the same reason an honorific's period is: it is
+# an abbreviation mark, not a sentence boundary. Measured: without this, every
+# initial+surname cell failed the shape gate outright, so the `Kürzel` column of
+# a real workbook was invisible to the whole-cell override.
+# Only the PERIOD is stripped here; the capitalization check below still runs on
+# the original value, so a lowercase "b. winkler" is still rejected as a name.
+_INITIAL_PREFIX = re.compile(r"^(?:[^\W\d_]\.[\s-]*)+")
 # Stripped before the sentence-punctuation check only (kept in the value
 # itself for the word/capitalization check below) -- an honorific's own
 # period ("Dr. Klaus Müller") is not a sentence boundary. Kept in sync with
@@ -256,7 +271,8 @@ def _looks_like_name(value: str, analyzer=None, lang: str | None = None) -> bool
     claimed as a person. A cell must be SHAPED like a name -- short, 1-4
     capitalized words, no sentence-ending punctuation -- AND (when an
     analyzer is available) contain no determiner/verb/conjunction/etc."""
-    if len(value) >= _MAX_NAME_CELL_LEN or _SENTENCE_PUNCT.search(_HONORIFIC_PREFIX.sub("", value)):
+    stripped = _INITIAL_PREFIX.sub("", _HONORIFIC_PREFIX.sub("", value))
+    if len(value) >= _MAX_NAME_CELL_LEN or _SENTENCE_PUNCT.search(stripped):
         return False
     if "_" in value:
         return False  # snake_case field/status identifier ("Aktueller_Status"), not a name
@@ -280,6 +296,139 @@ def _looks_like_name(value: str, analyzer=None, lang: str | None = None) -> bool
                 if tok.pos_ in _NON_NAME_POS:
                     return False
     return True
+
+
+# --- column-level name inference ---------------------------------------------
+# The fourth corroboration source. The whole-cell override above needs the HEADER
+# to say "people"; this one works out that a column holds people from its
+# CONTENT, which is the only thing available when the header lies ("Status"),
+# says nothing ("Feld_7"), or is missing entirely.
+#
+# Why it is worth the pass: measured on the hardened harness, a column of bare
+# surnames under a misleading header scored 10%. NER catches the foreign and rare
+# names in such a column (they score ~100% bare) and misses the everyday-word
+# German ones (~25%) -- so the caught minority is evidence about the column, and
+# that evidence rescues the missed majority. One column-level decision beats
+# twenty independent cell-level coin flips.
+#
+# Why it is safe to treat as CORROBORATION rather than a bare guess: the trigger
+# is an aggregate of several independent hits plus three shape gates, not one
+# model opinion. The guards, each closing a measured failure mode:
+_INFER_MIN_VALUES = 4          # fewer rows than this is not a distribution
+_INFER_MIN_SHAPE_RATIO = 0.8   # the column must be name-SHAPED nearly throughout
+_INFER_MIN_DISTINCT_RATIO = 0.5  # people columns list people; an ENUM repeats itself
+_INFER_MIN_HITS = 2            # one stray PERSON hit is not a pattern
+_INFER_MIN_HIT_RATIO = 0.2     # ...and it must be a real share of the column
+_INFER_ROW_LIMIT = 500         # fixed cap, so the decision is identical every run
+
+
+_VALIDATION_RANGE = re.compile(
+    r"(?:'(?P<q>[^']+)'|(?P<b>[A-Za-z0-9_]+))?!?\$?(?P<c1>[A-Z]{1,3})\$?\d+(?::\$?(?P<c2>[A-Z]{1,3})\$?\d+)?"
+)
+
+
+def _validation_source_columns(wb) -> set[tuple[str, str]]:
+    """{(sheet, column letter)} for columns that are the SOURCE LIST of a
+    dropdown somewhere in the workbook.
+
+    Such a column is a controlled vocabulary by the author's own declaration --
+    "Idee / Validierung / Konzeption / Rollout" -- and never a roster of people,
+    however name-shaped and however distinct its entries look. Measured: without
+    this the inference below read the fixture's `DB_Setup` sheet (which exists
+    only to back three real data validations) as four columns of people.
+
+    Deliberately gates ONLY the inference, never the header override: a dropdown
+    of EMPLOYEE names under a "Bearbeiter" header is a perfectly normal shape,
+    and suppressing an explicitly declared people-column would be a leak."""
+    out: set[tuple[str, str]] = set()
+    for ws in wb.worksheets:
+        try:
+            validations = list(ws.data_validations.dataValidation)
+        except Exception:  # noqa: BLE001 -- absent/oddly-shaped validations are not an error
+            continue
+        for dv in validations:
+            formula = getattr(dv, "formula1", None)
+            if not isinstance(formula, str) or not formula.strip():
+                continue
+            m = _VALIDATION_RANGE.search(formula.lstrip("="))
+            if not m:
+                continue
+            sheet = m.group("q") or m.group("b") or ws.title
+            cols = [c for c in (m.group("c1"), m.group("c2")) if c]
+            if not cols:
+                continue
+            first, last = cols[0], cols[-1]
+            for idx in range(column_index_from_string(first), column_index_from_string(last) + 1):
+                out.add((sheet, get_column_letter(idx)))
+    return out
+
+
+def _inferred_name_columns(wb, analyzer, config, sheet_langs: dict[str, str]) -> set[tuple[str, str]]:
+    """{(sheet title, column letter)} for columns whose CONTENT says they hold
+    people, regardless of what their header says.
+
+    Pure function of the workbook + config, so scan() and apply() derive the
+    identical set and scan/apply parity holds by construction -- the same
+    property `topical_gazetteer` and `_sheet_languages` rely on."""
+    if not config.get("infer_name_columns", True):
+        return set()
+    doc_lang = (config.get("languages") or list(DEFAULT_LANGUAGES))[0]
+    header_re = _name_header_re(tuple(config.get("name_column_headers", ())))
+    vocabulary_cols = _validation_source_columns(wb)
+    # A sheet that backs ANY dropdown is a lookup/setup sheet, and its OTHER
+    # columns are vocabulary too. This is not over-reach, it is the shape such a
+    # sheet has: measured on the fixture, only `DB_Setup!A` and `!B` are
+    # reachable as declared sources (openpyxl drops the x14 extension that
+    # carries the rest), yet `!C` -- "Idee / Validierung / Konzeption / Rollout"
+    # -- is just as certainly a vocabulary and was inferred as a people column.
+    # Restricted to the inference for the same reason as above: an explicit
+    # people-header on such a sheet is still honoured.
+    vocabulary_sheets = {sheet for sheet, _col in vocabulary_cols}
+    out: set[tuple[str, str]] = set()
+    for ws in wb.worksheets:
+        lang = sheet_langs.get(ws.title, doc_lang)
+        headers = _column_headers(ws)
+        by_col: dict[int, list[str]] = {}
+        for row in ws.iter_rows(min_row=2, max_row=1 + _INFER_ROW_LIMIT):
+            for cell in row:
+                if cell.value in (None, ""):
+                    continue
+                v = str(cell.value).strip()
+                if v:
+                    by_col.setdefault(cell.column, []).append(v)
+        for col, values in by_col.items():
+            header = headers.get(col, "")
+            # A header that already says "people" is handled by the whole-cell
+            # override; a header that declares a topical CATEGORY (Team, Abteilung)
+            # is that category's column and must not be re-read as people.
+            if header_re.search(header) or _category_for_header(header, config):
+                continue
+            if (ws.title, get_column_letter(col)) in vocabulary_cols or ws.title in vocabulary_sheets:
+                continue  # the author declared this a dropdown vocabulary
+            if len(values) < _INFER_MIN_VALUES:
+                continue
+            distinct = sorted(set(values))
+            if len(distinct) / len(values) < _INFER_MIN_DISTINCT_RATIO:
+                continue  # a controlled vocabulary, not a roster of people
+            shaped = [v for v in distinct if _looks_like_name(v, analyzer, lang)]
+            if len(shaped) / len(distinct) < _INFER_MIN_SHAPE_RATIO:
+                continue
+            hits = sum(1 for v in shaped if _is_person_value(v, analyzer, lang))
+            if hits >= _INFER_MIN_HITS and hits / len(shaped) >= _INFER_MIN_HIT_RATIO:
+                out.add((ws.title, get_column_letter(col)))
+    return out
+
+
+def _is_person_value(value: str, analyzer, lang: str) -> bool:
+    """Independent evidence that ONE cell value names a person: the curated
+    given-name gazetteer, or the model typing it PERSON on its own. Only used to
+    count evidence ACROSS a column -- never on its own to claim a single cell."""
+    if is_given_name(value):
+        return True
+    try:
+        return any(r.entity_type == "PERSON" for r in analyzer.analyze(text=value, language=lang))
+    except Exception:  # noqa: BLE001 -- inference is best-effort; a failure just means no vote
+        return False
 
 
 def _column_headers(ws) -> dict[int, str]:
@@ -587,7 +736,15 @@ def _precompute_cell_artifacts(wb, analyzer, config) -> dict[tuple[str | None, s
     return {key: artifacts_by_clean.get(neutralize_structural_noise(combined)) for key, combined in combined_by_key.items()}
 
 
-def _analyze_cell_text(text: str, header: str | None, analyzer, config, unit_id: str = "tmp", nlp_artifacts=None) -> list:
+def _analyze_cell_text(
+    text: str,
+    header: str | None,
+    analyzer,
+    config,
+    unit_id: str = "tmp",
+    nlp_artifacts=None,
+    people_column: bool = False,
+) -> list:
     combined = _combined_cell_text(text, header)
     unit = TextUnit(id=unit_id, text=combined)
     findings = detect_unit(analyzer, unit, config, nlp_artifacts=nlp_artifacts)
@@ -619,8 +776,15 @@ def _analyze_cell_text(text: str, header: str | None, analyzer, config, unit_id:
     header_re = _name_header_re(tuple(config.get("name_column_headers", ())))
     languages = config.get("languages") or list(DEFAULT_LANGUAGES)
     lang = languages[0] if len(languages) == 1 else None
+    # Either the header declares people, or the COLUMN'S CONTENT does
+    # (_inferred_name_columns). Both are column-level evidence and both are
+    # stronger than a per-cell model guess, so they share the same downstream
+    # handling; only the source tag differs, so an audit can tell which fired.
+    header_declares = bool(header_re.search(header or ""))
+    column_says_people = header_declares or people_column
+    override_source = "whole_cell_override" if header_declares else "inferred_name_column"
     header_says_people = bool(
-        header_re.search(header or "")
+        column_says_people
         and probe
         and not _NOT_A_NAME.match(probe)
         and _looks_like_name(value, analyzer, lang)
@@ -642,7 +806,7 @@ def _analyze_cell_text(text: str, header: str | None, analyzer, config, unit_id:
         for f in whole_cell:
             if f.entity_type in _CORROBORATION_ONLY_ENTITIES and f.source in _GATED_NER_SOURCES:
                 f.entity_type = "PERSON"
-                f.source = "whole_cell_override"
+                f.source = override_source
                 f.score = max(f.score, _NAME_COLUMN_SCORE)
                 f.context = f"{header}: {value}"
         if not whole_cell:
@@ -656,7 +820,7 @@ def _analyze_cell_text(text: str, header: str | None, analyzer, config, unit_id:
                     unit_id=unit_id,
                     start=start,
                     end=start + len(value),
-                    source="whole_cell_override",
+                    source=override_source,
                 )
             )
 
@@ -804,14 +968,19 @@ def scan(path: Path, analyzer, config) -> list:
     # Keyed by LANGUAGE too: the same string on a German and an English sheet is
     # two different detection problems, and sharing one cache entry between them
     # would silently give whichever sheet ran second the other one's answer.
-    cache: dict[tuple[str, str | None, str], list] = {}
+    # Keyed by the people-column flag as well: the same (header, text) pair can
+    # legitimately appear in an inferred people column on one sheet and an
+    # ordinary column on another, and sharing one cache entry would give
+    # whichever ran second the other one's answer.
+    cache: dict[tuple[str, str | None, str, bool], list] = {}
     artifacts_by_key = _precompute_cell_artifacts(wb, analyzer, config)
     # Batch the ML pass over the same text set BOTH passes derive (see _ml_scan_texts).
     prime_gliner(analyzer, _ml_scan_texts(wb))
+    people_cols = _inferred_name_columns(wb, analyzer, config, sheet_langs)
 
-    def detect(text, header, key, sheet=None):
+    def detect(text, header, key, sheet=None, people_column=False):
         lang = _text_language(text, sheet_langs.get(sheet or "", doc_lang), supported)
-        base = cache.get((lang, header, text))
+        base = cache.get((lang, header, text, people_column))
         if base is None:
             # Precomputed artifacts are tied to the DOCUMENT language, so they are
             # only reusable where that is the language actually being used;
@@ -819,13 +988,23 @@ def scan(path: Path, analyzer, config) -> list:
             # rather than reuse a mismatched tokenization.
             arts = artifacts_by_key.get((header, text)) if lang == doc_lang else None
             base = _analyze_cell_text(
-                text, header, analyzer, _cfg_for_lang(config, lang), nlp_artifacts=arts
+                text,
+                header,
+                analyzer,
+                _cfg_for_lang(config, lang),
+                nlp_artifacts=arts,
+                people_column=people_column,
             )
-            cache[(lang, header, text)] = base
+            cache[(lang, header, text, people_column)] = base
         return [replace(f, unit_id=key) for f in base]
 
     for key, text, header in _iter_cell_units(wb):
-        findings.extend(detect(text, header, key, key.split("|", 2)[1]))
+        parts = key.split("|")
+        sheet = parts[1]
+        col = _coord_column(parts[2]) if len(parts) > 2 else None
+        findings.extend(
+            detect(text, header, key, sheet, people_column=(sheet, col) in people_cols)
+        )
     for key, text in _iter_defined_name_units(wb):
         findings.extend(detect(text, None, key))
     for key, text in _iter_sheet_name_units(wb):
@@ -841,9 +1020,12 @@ def scan(path: Path, analyzer, config) -> list:
 
 
 def _apply_findings_to_text(
-    text: str, header: str | None, analyzer, config, decisions: dict, mapping_store, nlp_artifacts=None
+    text: str, header: str | None, analyzer, config, decisions: dict, mapping_store,
+    nlp_artifacts=None, people_column: bool = False,
 ) -> str:
-    findings = _analyze_cell_text(text, header, analyzer, config, nlp_artifacts=nlp_artifacts)
+    findings = _analyze_cell_text(
+        text, header, analyzer, config, nlp_artifacts=nlp_artifacts, people_column=people_column
+    )
     if not findings:
         return text
     result = text
@@ -1031,34 +1213,44 @@ def apply(path: Path, out_path: Path, decisions: dict, analyzer, config, mapping
     # (the first call creates the mapping entry; the rest reuse the string).
     # Keyed by LANGUAGE too, for the same reason scan()'s cache is: the identical
     # string on a German and an English sheet is two different problems.
-    redact_cache: dict[tuple[str, str | None, str], str] = {}
+    redact_cache: dict[tuple[str, str | None, str, bool], str] = {}
     artifacts_by_key = _precompute_cell_artifacts(wb, analyzer, config)
     # Batch the ML pass over the same text set BOTH passes derive (see _ml_scan_texts).
     prime_gliner(analyzer, _ml_scan_texts(wb))
     sheet_langs = _sheet_languages(wb, config)
     doc_lang = (config.get("languages") or list(DEFAULT_LANGUAGES))[0]
     supported = tuple(sorted(set(config.get("languages") or ()) | set(DEFAULT_LANGUAGES)))
+    # Derived here, BEFORE the sheet renames below, so the keys are the original
+    # titles -- exactly what scan() saw. Deriving it after would key the set to
+    # redacted titles and quietly disagree with scan on every renamed sheet,
+    # which is a scan/apply parity break: findings the reviewer approved would
+    # not be reproduced at apply and the fail-loud residual check would fire.
+    people_cols = _inferred_name_columns(wb, analyzer, config, sheet_langs)
 
-    def redact(text: str, header: str | None, sheet: str | None = None) -> str:
+    def redact(
+        text: str, header: str | None, sheet: str | None = None, people_column: bool = False
+    ) -> str:
         lang = _text_language(text, sheet_langs.get(sheet or "", doc_lang), supported)
-        out = redact_cache.get((lang, header, text))
+        out = redact_cache.get((lang, header, text, people_column))
         if out is None:
             arts = artifacts_by_key.get((header, text)) if lang == doc_lang else None
             out = _apply_findings_to_text(
                 text, header, analyzer, _cfg_for_lang(config, lang),
-                decisions, mapping_store, nlp_artifacts=arts,
+                decisions, mapping_store, nlp_artifacts=arts, people_column=people_column,
             )
-            redact_cache[(lang, header, text)] = out
+            redact_cache[(lang, header, text, people_column)] = out
         return out
 
-    def redact_formula(formula: str, header: str | None, sheet: str | None = None) -> str:
+    def redact_formula(
+        formula: str, header: str | None, sheet: str | None = None, people_column: bool = False
+    ) -> str:
         """Redacts only the quoted string literals, right-to-left so earlier
         offsets stay valid -- the expression around them is left byte-identical."""
         result = formula
         for start, end, literal in reversed(_formula_literals(formula)):
             if not literal.strip():
                 continue
-            new_literal = redact(literal, header, sheet)
+            new_literal = redact(literal, header, sheet, people_column)
             if new_literal != literal:
                 result = result[:start] + new_literal + result[end:]
         return result
@@ -1118,20 +1310,21 @@ def apply(path: Path, out_path: Path, decisions: dict, analyzer, config, mapping
                 # Row 1 is the schema label, never scanned as its own data unit
                 # (see _iter_cell_units) -- excluded here too so apply() redacts
                 # exactly what scan() surfaced, never more (scan/apply parity).
+                is_people_col = (sheet_key, col_letter) in people_cols
                 text = _cell_scan_text(cell) if cell.row != 1 else None
                 if text is not None:
-                    new_value = redact(text, header, sheet_key)
+                    new_value = redact(text, header, sheet_key, is_people_col)
                     if new_value != text:
                         # A redacted numeric cell must become a string cell so
                         # the token ("[KONTO_1]") can be stored at all.
                         cell.value = new_value
                 formula = _cell_formula(cell)
                 if formula is not None:
-                    new_formula = redact_formula(formula, header, sheet_key)
+                    new_formula = redact_formula(formula, header, sheet_key, is_people_col)
                     if new_formula != formula:
                         cell.value = new_formula
                 if cell.comment is not None and cell.comment.text.strip():
-                    new_text = redact(cell.comment.text, header, sheet_key)
+                    new_text = redact(cell.comment.text, header, sheet_key, is_people_col)
                     if new_text != cell.comment.text:
                         cell.comment.text = new_text
     for name, defn in wb.defined_names.items():

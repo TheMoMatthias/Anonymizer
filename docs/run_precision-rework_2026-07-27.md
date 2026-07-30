@@ -6,8 +6,94 @@ reconciliation). Supersedes the precision posture set in
 
 ## ⇢ WHAT IS LEFT (single source of truth — read this first)
 
-State as of 2026-07-27, suite **515 passed**, everything below verified by measurement
+State as of 2026-07-30, suite **530 passed**, everything below verified by measurement
 rather than assertion. Phases 1 and 2 are DONE; 2.5 (ML speed) is DONE.
+
+### 2026-07-30 — the recall harness was made much harder, and it found a lot
+
+User steer that governs every trade below: **"we should never miss something and rather
+review"** — a miss is a disclosure, an over-flag is review time. Precision work is still
+wanted, but it never wins a tie against recall.
+
+`anonymizer/evaluation.py` gained four axes it never measured. This matters more than any
+single fix: **the old harness was scoring 86% on a set of contexts that excluded every
+shape the tool was actually bad at.** The four axes:
+
+1. **Adversarial name shapes** — new strata `particle` (von/van/de/zu, incl. stacked
+   "von der Leyen"), `hyphenated`, `transliterated` (Nguyễn, Đorđević, Þórsdóttir).
+2. **Oblique contexts** — `role_reference`, `after_preposition`, `distribution_list`,
+   `maiden_name`, `initials`: a person named with NO honorific and NO label.
+3. **Structured traps** (`measure_workbook_traps`) — a real xlsx whose column headers
+   lie ("Status"), say nothing ("Feld_7"), are missing, or wrap the name in an id.
+4. **Art. 9 stated obliquely** (`measure_art9_oblique`) — the fact in a plain sentence
+   with no list word and no label ("dauerhaft auf den Rollstuhl angewiesen").
+
+Plus two scoring rules that stop the report flattering itself: a **hyphenated name needs
+BOTH halves** (leaving "Rottluff" is a disclosure, not a half-success), and a **particle
+is not scored** (leaving a bare "von" discloses nobody). And a new
+`measure_unanchored_documents` section — a memo that never uses an honorific, so
+propagation has no seed. That is the tool's true floor and nothing measured it before.
+
+| section | old harness | hardened, BEFORE fixes | hardened, AFTER fixes |
+|---|---|---|---|
+| structured identifiers | 100% | 100% | **100%** |
+| Art. 9 oblique | *not measured* | 50% | **50%** |
+| names isolated | 86% | 74% | **88%** |
+| spreadsheet cells | *not measured* | 48% | **77%** |
+| full letter | 98% | 92% | **97%** |
+| unanchored memo | *not measured* | 59% | **90%** |
+
+Precision held exactly: **27/84 decoys, unchanged**, audit workbook **293/293**, apply +
+fail-loud verify pass. So this was recall bought for free, not traded.
+
+**What was fixed (each was a real defect, found only because the harness got harder):**
+
+- **`engine._NAME` could not match a particle name at all.** It required every token to
+  start `\p{Lu}`, so `"Sehr geehrter Herr von Bergen,"` — the most common line in a German
+  bank letter — anchored NOTHING. `zu Guttenberg` was 0/5 in every context including a
+  full letter. Particle stratum: salutation 38% → 100%, full letter 65% → 100%.
+- **Naming somebody by ROLE defeated detection almost completely.** `role_reference`
+  scored 0% for German common-noun surnames, 12% for rare German, 12–50% foreign. New
+  `role_noun_name` anchor (Einreicher/Antragsteller/Zeuge/Bürge/… + English). Now 100%
+  across every stratum.
+- **Birth names** (`geb. Winkler`) — 20% → 100% via `birth_name`.
+- **Initials** (`B. Winkler`) — new `initial_name` anchor. NOTE the trap here: it was
+  first written at score 0.55, PERSON's `confidence_threshold` is **0.6**, and
+  `detect_unit` drops below-threshold results silently — so the pattern matched, produced
+  a raw result, and contributed exactly nothing while looking implemented. Caught by a
+  unit test, not by the harness.
+- **Column-level name inference** — the grill's fourth corroboration source, now BUILT
+  (`xlsx_handler._inferred_name_columns`). A column is read as people from its CONTENT
+  when the header will not say: ≥4 values, >50% distinct, ≥80% name-shaped, and ≥2 (and
+  ≥20%) independently confirmed by the given-name gazetteer or the model. The confirmed
+  minority is evidence about the column, which rescues the everyday-word German surnames
+  the model reliably misses in a bare cell. `lying_header` 10% → 100%, `opaque_header`
+  90% → 100%, `no_header` 80% → 100%, `initials_cell` 50% → 100%.
+- **The enum/controlled-vocabulary guard** (grill item 3) landed with it, because it had
+  to: the inference read the fixture's `DB_Setup` — a sheet that exists only to back
+  dropdowns — as a column of people, for +2 false positives. Now any column that is a
+  declared validation SOURCE, and any sheet holding one, is excluded from inference.
+  Deliberately NOT applied to the header override: a dropdown of employee names under a
+  "Bearbeiter" header is normal, and suppressing it would be a leak.
+
+**Parity note:** `_inferred_name_columns` is derived in BOTH `scan()` and `apply()`, and
+in apply it is computed BEFORE the sheet renames so its keys are the original titles.
+Deriving it after would silently disagree with scan on every renamed sheet — a parity
+break the fail-loud verify would catch, but only after the fact.
+
+### Measured gaps that remain (honest, ranked)
+
+1. **Art. 9 stated obliquely — 50%, 6 of 12 leaking**: `Rollstuhl`, `Moschee`,
+   `Betriebsrat`, `Ehefrau`, `Kontingentflüchtlinge`, `Romanes`. The word-list approach
+   does not generalize and this quantifies by how much. Highest-consequence gap in the
+   tool. This is the strongest remaining argument for the ML pass (item 6).
+2. **`id_shaped_cell` — 0%**: a name wrapped in an identifier (`K-Winkler-2024`). Nothing
+   currently looks inside a delimited token for a known name.
+3. **`german_common_noun` isolated, 20–25%** on `bare_cell`, `prose_oblique`,
+   `distribution_list`, `after_preposition`. Largely mitigated in real documents
+   (unanchored memo for this stratum is 96%) but not in isolation.
+4. **`multi_value_cell` — 60%**: `"Winkler; intern geprüft"` fails the name-shape gate,
+   so neither the header override nor the inference can claim it.
 
 ### ⛔ BLOCKER — the PERSON flip trades a big precision win for a real recall loss
 
@@ -57,14 +143,17 @@ not yet started. In dependency order:
    note under WHAT THE AUDIT ACTUALLY FOUND first: on the reported export EVERY real
    person had `is_ner_guess=True`, so this MUST land together with item 2 or it drops
    every name.
-2. **The four corroboration sources** (grill decision 5): repaired name-column headers
-   (DONE in Phase 1 — 83 people recovered), a curated given-name gazetteer (DONE, 909e408),
-   GLiNER hits (already count, core.py:810), and column-level name inference (NOT built).
-3. **The enum / controlled-vocabulary signal** (grill decisions 3/10): read Excel's
-   declared data validations AND value repetition, as a content-keyed set precomputed
-   once per workbook, passed via config. The fixture already declares 3 real validation
-   lists pointing at `DB_Setup`, verified to survive the save/load round trip, so this
-   is measurable the day it is written.
+2. ~~**The four corroboration sources**~~ (grill decision 5) — **ALL FOUR NOW BUILT**:
+   repaired name-column headers (Phase 1, 83 people recovered), a curated given-name
+   gazetteer (909e408), GLiNER hits (core.py:810), and **column-level name inference
+   (2026-07-30, see above)**. This is what unblocks item 1 — re-measure the PERSON flip
+   now that a bare surname in a column can be corroborated without the model.
+3. **The enum / controlled-vocabulary signal** (grill decisions 3/10) — **PARTLY DONE**:
+   declared data validations are read (`_validation_source_columns`) and value repetition
+   gates the inference (`_INFER_MIN_DISTINCT_RATIO`). Both currently gate the INFERENCE
+   only. Still open: using the same signal to demote enum values claimed by other paths —
+   which is where most of the surviving 27 false positives live (status labels and German
+   compound nouns under an `Ownership…` header).
 4. **The ML veto as a DEMOTION** (grill decisions 14/15): model ran on a text and saw
    no person ⇒ demote the bare spaCy PERSON hit. Evidence it will work: GLiNER scores
    all three decoy classes BELOW the 0.3 threshold (`Die Effizienz der

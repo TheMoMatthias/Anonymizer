@@ -894,3 +894,147 @@ def test_a_german_genitive_inherits_its_base_name_corroboration():
     vals = {g.value for g in result.all_actionable()}
     assert vals == {"Koch", "Kochs", "Prozess"}, vals  # PERSON not gated yet; the rule is still pinned
     assert not result.demoted
+
+
+# --- 2026-07-30: the hardened recall harness and what it exposed --------------
+# Each test below pins a leak the harness measured once the easy contexts stopped
+# being the only ones tested. See docs/run_precision-rework_2026-07-27.md.
+
+
+def test_harness_drops_particles_but_requires_both_halves_of_a_hyphenated_name():
+    """The two asymmetric scoring rules the hard strata depend on. Getting either
+    backwards makes the whole report lie: dropping a hyphen half would credit a
+    genuine leak ("Rottluff" left standing), and requiring the particle would
+    punish correct behaviour (a bare "von" discloses nobody)."""
+    from anonymizer.evaluation import _identifying_tokens
+
+    assert _identifying_tokens("von der Leyen") == ["Leyen"]
+    assert _identifying_tokens("de la Cruz") == ["Cruz"]
+    assert _identifying_tokens("Schmidt-Rottluff") == ["Schmidt", "Rottluff"]
+    assert _identifying_tokens("Koch") == ["Koch"]
+
+
+def test_harness_refuses_to_credit_a_half_caught_hyphenated_name():
+    """A run that redacted every "Schmidt" and no "Rottluff" has protected nobody."""
+    from anonymizer.evaluation import _found
+    from anonymizer.models import Finding as F
+
+    half = [F("PERSON", "Schmidt", 0.9, "c", "u1", 0, 7)]
+    both = half + [F("PERSON", "Rottluff", 0.9, "c", "u2", 0, 8)]
+    assert not _found(half, "Schmidt-Rottluff")
+    assert _found(both, "Schmidt-Rottluff")
+
+
+@pytest.mark.parametrize(
+    "text,expected",
+    [
+        # The particle name was the single worst anchor failure: _NAME required
+        # every token to start uppercase, so the most common line in a German
+        # bank letter matched NOTHING for a customer with a nobiliary particle.
+        ("Sehr geehrter Herr von Bergen,", "von Bergen"),
+        ("Sehr geehrte Frau van den Broek,", "van den Broek"),
+        ("Kunde: de la Cruz", "de la Cruz"),
+        # Naming somebody by ROLE rather than title scored 0% for German
+        # common-noun surnames before these anchors existed.
+        ("Der Einreicher Winkler aus Frankfurt bestätigte den Sachverhalt.", "Winkler"),
+        ("Der Zeuge Bauer wurde am Montag angehört.", "Bauer"),
+        # German records state a maiden name with a bare abbreviation.
+        ("Die Kundin, geb. Weber, führt das Konto seit 2011.", "Weber"),
+        # An initial before a surname.
+        ("B. Winkler hat den Vorgang gezeichnet.", "Winkler"),
+    ],
+)
+def test_anchored_name_patterns_cover_the_shapes_the_hard_strata_exposed(
+    analyzer, base_config, text, expected
+):
+    values = {f.value for f in _findings(analyzer, base_config, text)}
+    assert expected in values, f"{expected!r} not caught in {text!r}: {values}"
+
+
+def test_a_role_noun_anchor_never_swallows_the_honorific(analyzer, base_config):
+    """"Der Antragsteller Herr Müller" must yield "Müller". A title inside the
+    value keys the pseudonym on the title, so one person becomes two placeholders
+    -- the same defect the English-honorific fix closed."""
+    values = {f.value for f in _findings(analyzer, base_config, "Der Antragsteller Herr Müller hat gezeichnet.")}
+    assert "Müller" in values, values
+    assert "Herr Müller" not in values
+
+
+def test_an_initial_before_a_surname_is_name_shaped():
+    """A "Kürzel"/initials column failed the whole-cell shape gate outright,
+    because the initial's period read as sentence punctuation."""
+    from anonymizer.formats.xlsx_handler import _looks_like_name
+
+    assert _looks_like_name("B. Winkler")
+    assert _looks_like_name("M. Schmidt-Rottluff")
+    assert not _looks_like_name("b. winkler")  # lowercase is not a name
+    assert not _looks_like_name("Das ist ein ganzer Satz.")
+
+
+def _infer_cols(tmp_path, analyzer, base_config, columns, validations=()):
+    """Builds a one-sheet workbook from {header: [values]} and returns the set of
+    column letters the CONTENT-based inference claims as people columns."""
+    import openpyxl
+    from openpyxl.utils import get_column_letter
+    from openpyxl.worksheet.datavalidation import DataValidation
+
+    from anonymizer.formats.xlsx_handler import _inferred_name_columns, _sheet_languages
+
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.title = "Daten"
+    for c, (header, values) in enumerate(columns.items(), start=1):
+        ws.cell(row=1, column=c, value=header)
+        for r, v in enumerate(values, start=2):
+            ws.cell(row=r, column=c, value=v)
+    for formula, applies in validations:
+        dv = DataValidation(type="list", formula1=formula)
+        ws.add_data_validation(dv)
+        dv.add(applies)
+    path = tmp_path / "infer.xlsx"
+    wb.save(path)
+    wb2 = openpyxl.load_workbook(path)
+    cfg = {**base_config, "languages": ["de"]}
+    found = _inferred_name_columns(wb2, analyzer, cfg, _sheet_languages(wb2, cfg))
+    return {col for sheet, col in found if sheet == "Daten"}, get_column_letter
+
+
+def test_a_column_of_bare_surnames_is_inferred_from_its_content(tmp_path, analyzer, base_config):
+    """The fourth corroboration source. Under a header that says nothing, NER
+    catches the foreign and rare surnames and misses the everyday-word German
+    ones; the caught minority is evidence about the COLUMN, which rescues the
+    rest. Measured on the harness this took the shape from 10% to 100%."""
+    cols, _ = _infer_cols(
+        tmp_path, analyzer, base_config,
+        {"Status": ["Öztürk", "Habermehl", "Müller", "Kowalczyk", "Bauer", "Osterkamp", "Koch"]},
+    )
+    assert "A" in cols, f"a column of surnames was not inferred: {cols}"
+
+
+def test_a_controlled_vocabulary_column_is_not_inferred_as_people(tmp_path, analyzer, base_config):
+    """Status/phase values are capitalized, name-shaped and (in a lookup sheet)
+    all distinct. The REPETITION guard is what separates them from a roster."""
+    cols, _ = _infer_cols(
+        tmp_path, analyzer, base_config,
+        {"Phase": ["Offen", "Offen", "Geklaert", "Abgeschlossen", "Offen", "Geklaert", "Offen"]},
+    )
+    assert "A" not in cols, f"an enum column was read as people: {cols}"
+
+
+def test_a_dropdown_source_column_is_never_inferred_as_people(tmp_path, analyzer, base_config):
+    """A validation SOURCE list is vocabulary by the author's own declaration,
+    however name-shaped and however distinct. Measured: without this the fixture's
+    `DB_Setup` sheet was read as a column of people and cost 2 false positives."""
+    cols, _ = _infer_cols(
+        tmp_path, analyzer, base_config,
+        {"Vokabular": ["Idee", "Validierung", "Konzeption", "Rollout", "Pilotierung"]},
+        validations=[("$A$2:$A$6", "C2:C200")],
+    )
+    assert "A" not in cols, f"a dropdown source list was read as people: {cols}"
+
+
+def test_a_short_column_is_not_enough_to_infer_anything(tmp_path, analyzer, base_config):
+    """Three values are not a distribution -- inferring from them would make the
+    whole-column claim as fragile as the per-cell guess it replaces."""
+    cols, _ = _infer_cols(tmp_path, analyzer, base_config, {"Feld_7": ["Öztürk", "Müller"]})
+    assert "A" not in cols, f"inferred from too few values: {cols}"
