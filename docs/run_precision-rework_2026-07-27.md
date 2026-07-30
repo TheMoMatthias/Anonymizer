@@ -6,8 +6,113 @@ reconciliation). Supersedes the precision posture set in
 
 ## ⇢ WHAT IS LEFT (single source of truth — read this first)
 
-State as of 2026-07-30, suite **530 passed**, everything below verified by measurement
+State as of 2026-07-30, suite **597 passed**, everything below verified by measurement
 rather than assertion. Phases 1 and 2 are DONE; 2.5 (ML speed) is DONE.
+
+### 2026-07-30 (latest) — OCR damage, proprietary names, and a POS gate that was reading noise
+
+Four items landed after the PERSON flip. Current measured state:
+
+| section | n | recall |
+|---|---|---|
+| structured identifiers | — | 100% |
+| Art. 9 oblique / held-out / bare cells | 12 / 8 / 16 | **100% / 100% / 100%** |
+| names isolated (cold read) | 952 | 82% |
+| **names inside identifiers / paths** | 60 | **100%** (was 73%) |
+| spreadsheet cells | 68 | 96% |
+| full letter | 340 | 97% |
+| scanned letter, mixed OCR damage | 24 | 96% |
+| unanchored memo | 340 | 97% |
+| decoy false positives | 84 | 4/84 |
+| audit workbook · apply + verify · fixture leaks | — | 293/293 · passes · 1 |
+
+**1. OCR-damaged names — `ocr_mixed` 75% → 96%.** The realistic scan is not a wholly
+mangled document; it is one where the salutation survives cleanly and the body says
+`Mul1er`. `core.ocr_skeleton()` folds only what a scanner actually does (i/l/1, O/0,
+rn→m, `ii` for an umlaut) and is compared **only against names the document already
+established** — that restriction is the entire safety argument, since the path can never
+invent an entity, only recognise a second spelling of somebody already being redacted.
+`b`/`h` is deliberately NOT folded: it would merge `Bauer` and `Hauer`, both real
+surnames. Ambiguous skeletons (two different propagated values folding together) are
+dropped outright.
+
+Two wrong turns worth keeping:
+* Tagging the match `source="propagation"` **rescued nothing** — propagation is
+  deliberately not corroboration, so the damaged group was still demoted. It had to be
+  skeleton **inheritance** in the demote loop, alongside the genitive rule.
+* `_rejected_by_precision` discarded exactly the two corruptions containing **digits**
+  (`Mul1er`, `0sterkamp`, 0/3) as number-like. It is a shape filter written for clean
+  text; running it on deliberately damaged text rejects the evidence the path exists to
+  use. Call removed with the justification recorded at the call site.
+
+`Mul1er` and `0sterkamp` remain 0/5 — a hard floor, not a bug: both are digit-bearing
+and the fold is deliberately conservative.
+
+**2. `Alteryx` / `OpenClaw` diagnosed — a structural limit, not a defect.** They are the
+only two tool names in the fixture that never appear in a declaring column
+(`Eingesetztes Tool`). Every other tool has a whole-cell occurrence the topical gazetteer
+learns and propagates. Three mechanisms shipped, because none covers the space alone:
+* `data/product_names.txt` — ~120 curated commercial tools/vendors, loaded via
+  `_product_names()`/`is_known_product()`, corroborating across all NER types.
+  **This alone fixed `Alteryx`: fixture leaks 2 → 1.**
+* `data/project_names.txt` — ships **empty** by design, with the reasoning in the file.
+  `Nordstern`, `Seidenpfad`, `Habicht`, `Delphin`, `Marschall` are all in the fixture and
+  all ordinary German nouns. Nothing separates "Projekt Delphin" from a sentence about
+  dolphins, so only the declaring column or this file can find them.
+* `looks_like_proprietary_name()` — capitalisation carries **zero** signal in German
+  (every noun is capitalised), so the signal is vocabulary: a capitalised token that is
+  neither German vocabulary nor a German compound (3-part `_decomposes_into_vocabulary`).
+  Measured on the decoys: **0/12 compounds, 0/6 ordinary words, 7/11 proprietary names.**
+
+Confining candidates to the demoted band cost 3 false positives across two attempts
+before it held: an empty `source` did not mark them as guesses (`is_guess` tested only
+`SpacyRecognizer`/`propagation`, so they read as **corroborated**), and then the
+exact-value inheritance rule promoted them anyway. Fixed with
+`PROPRIETARY_CANDIDATE_SOURCE`, `GroupedFinding.is_oov_candidate`, and an
+**unconditional** guard in the demote loop.
+
+**3. ⇢ The embedded-identifier strata were 50–92% because the POS gate was reading
+noise, and the 92% was as unprincipled as the 50%.** This is the item most worth
+remembering.
+
+`_is_pos_implausible` called `char_span(..., alignment_mode="expand")`. When the name sits
+inside a glued identifier token, `expand` widens the span from `Müller` to the **entire**
+`AKTE_Müller_2024` and then asks spaCy's tagger for a verdict on a string it never saw in
+training. Measured, one name per template:
+
+| token | tag |
+|---|---|
+| `K-Braun-2024` | **CCONJ** (a conjunction) |
+| `AKTE_Müller_2024` | **ADV** |
+| `Vertrag_Fischer_final_v2.pdf` | **VERB** |
+| `Vertrag_Bergmann-Pohl_final_v2.pdf` | **NUM** |
+| `K-Müller-2024` | PROPN → kept |
+| `AKTE_Koch_2024` | NOUN → kept |
+
+Same person, opposite verdict decided by the surrounding boilerplate. So `ticket_ref` and
+`unc_path` were never structurally easier than `id_hyphen` — their glued tokens simply
+drew a name-like tag more often. **Any reading of those four numbers as a difficulty
+ranking was wrong.** Note this survived the underscore-boundary fix in `7b1fcad`: that
+made propagation *reach* into the identifier, and the gate then threw the match away
+again, which is why the strata did not move.
+
+Fix: `alignment_mode="contract"` in both `_is_pos_implausible` and
+`_is_german_nominalization` — keep only tokens lying wholly within the value, which is
+what both docstrings always claimed to test, and **abstain** when that is empty, because
+a check that only ever REJECTS must not act on a verdict about a different string. Entity
+spans on the direct NER path already align to token boundaries, so this is a no-op there;
+it changes only the regex-offset caller (propagation), which is exactly where the
+misalignment arises. `embedded` 73% → **100%** on all five contexts, every other stratum
+unchanged, decoys 4/84 unchanged.
+
+**Generalisable lesson:** `alignment_mode="expand"` turns "no evidence" into "confident
+wrong evidence" whenever an offset comes from a regex rather than from spaCy's own
+tokenizer. Any future filter reading POS at regex offsets needs `contract` + abstain.
+
+**4. Still open here:** `OpenClaw` leaks by design (belongs in the user's
+`project_names.txt`); `ocr_noise` sits at 75% (`Mul1er`, `0sterkamp`); `bare_lower`
+across strata is the weakest remaining context; the surname lexicon behind a flag is
+still unbuilt ("measure it first, then decide").
 
 ### 2026-07-30 — the recall harness was made much harder, and it found a lot
 

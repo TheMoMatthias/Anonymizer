@@ -382,10 +382,32 @@ def _is_pos_implausible(entity_type: str, start: int, end: int, nlp_artifacts) -
     be a name/org/place at all (a verb, determiner, conjunction, ...). This
     does NOT catch a determiner+noun phrase like "Alle Zielwerte" (it DOES
     contain a noun token) -- that is a different failure mode, handled by
-    xlsx_handler's whole-cell-override name-shape gate, not here."""
+    xlsx_handler's whole-cell-override name-shape gate, not here.
+
+    ABSTAINS when the value sits INSIDE a single token rather than spanning
+    whole ones ("Mueller" within "AKTE_Mueller_2024"). This used to align with
+    mode="expand", which widened the span to the entire glued token and then
+    asked the tagger for a verdict on a string it has never seen. The answers
+    are not weak evidence, they are noise -- measured on one name per template:
+
+        K-Braun-2024                        CCONJ   (a conjunction)
+        AKTE_Mueller_2024                   ADV
+        Vertrag_Fischer_final_v2.pdf        VERB
+        Vertrag_Bergmann-Pohl_final_v2.pdf  NUM
+        K-Mueller-2024                      PROPN   (kept)
+        AKTE_Koch_2024                      NOUN    (kept)
+
+    Same person, opposite verdict decided by the surrounding boilerplate, so the
+    embedded-identifier strata scored 50-92% at random rather than by ability.
+    "contract" keeps only tokens lying wholly within the value, which is what the
+    docstring above always claimed to test; an empty result means the tagger has
+    no opinion about THIS value and the gate must not invent one. Entity spans on
+    the direct NER path already align to token boundaries, so this is a no-op
+    there -- it changes only the regex-offset callers (propagation), which is
+    exactly where the misalignment arises."""
     if entity_type not in _NER_ENTITIES or nlp_artifacts is None or nlp_artifacts.tokens is None:
         return False
-    span = nlp_artifacts.tokens.char_span(start, end, alignment_mode="expand")
+    span = nlp_artifacts.tokens.char_span(start, end, alignment_mode="contract")
     if span is None or len(span) == 0:
         return False
     return not any(tok.pos_ in _NAME_LIKE_POS for tok in span)
@@ -409,7 +431,11 @@ def _is_german_nominalization(entity_type: str, value: str, start: int, end: int
     requires ALL of (1) a nominalizer suffix, (2) length >= 8 (spares short
     surnames like "Jung"/"Lang"), (3) spaCy POS NOUN with NO proper-noun token
     (spares a rarer -ung surname the tagger reads as PROPN in context). Ordinary
-    surnames (Müller/Weber/Bauer/Metzler) have no such suffix and are untouched."""
+    surnames (Müller/Weber/Bauer/Metzler) have no such suffix and are untouched.
+
+    Uses "contract" for the same reason _is_pos_implausible does: if the value is
+    embedded in a larger token the tagger's verdict describes that token, not this
+    value, and a check that only ever REJECTS must abstain rather than act on it."""
     if entity_type not in _NER_ENTITIES:
         return False
     v = value.strip()
@@ -417,7 +443,7 @@ def _is_german_nominalization(entity_type: str, value: str, start: int, end: int
         return False
     if nlp_artifacts is None or nlp_artifacts.tokens is None:
         return False
-    span = nlp_artifacts.tokens.char_span(start, end, alignment_mode="expand")
+    span = nlp_artifacts.tokens.char_span(start, end, alignment_mode="contract")
     if span is None or len(span) == 0:
         return False
     return (not any(t.pos_ == "PROPN" for t in span)) and any(t.pos_ == "NOUN" for t in span)

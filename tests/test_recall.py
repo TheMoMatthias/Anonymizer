@@ -1187,7 +1187,7 @@ def test_a_shouted_label_still_anchors_the_name(analyzer, base_config, text):
 
 
 def test_a_known_name_is_found_inside_an_underscore_identifier():
-    """An underscore is a word character, so the `\w` boundary propagation used could
+    r"""An underscore is a word character, so the `\w` boundary propagation used could
     never see a name inside the identifiers a bank's systems generate. Measured: the
     hyphen and UNC-path forms already propagated (those separators are non-word) while
     "AKTE_Winkler_2024" and "Vertrag_Winkler_final_v2.pdf" silently did not."""
@@ -1207,6 +1207,51 @@ def test_a_known_name_is_found_inside_an_underscore_identifier():
     for haystack in ["Bergstraße", "Winklerhof"]:
         (_et2, _v2, rx2), = _compiled_propagate_patterns((("PERSON", "Berg" if "Berg" in haystack else "Winkler"),))
         assert not rx2.search(haystack), f"over-matched inside {haystack!r}"
+
+
+# The boundary fix above let propagation REACH into an identifier; the precision
+# gate then threw the match away again, which is why the embedded strata stayed at
+# 50-92% after it landed.
+
+
+@pytest.mark.parametrize("text,name", [
+    # Every one of these was REJECTED before the fix, by a part-of-speech tag
+    # spaCy assigned to the whole glued token: CCONJ for "K-Braun-2024", ADV for
+    # "AKTE_Mueller_2024", VERB for "Vertrag_Fischer_final_v2.pdf". None of those
+    # tags describes the name; they describe a string the tagger never saw in
+    # training. Same person, verdict decided by the surrounding boilerplate.
+    ("Referenz: K-Braun-2024", "Braun"),
+    ("Referenz: K-Sommer-2024", "Sommer"),
+    ("Ablage: AKTE_Müller_2024", "Müller"),
+    ("Ablage: AKTE_Richter_2024", "Richter"),
+    ("Datei: Vertrag_Fischer_final_v2.pdf", "Fischer"),
+    ("Vorgang TICKET-4711-Fischer ist offen.", "Fischer"),
+    (r"Pfad: \\fileserver\Kunden\Đorđević\2024\Vertrag.pdf", "Đorđević"),
+])
+def test_a_known_name_survives_the_precision_gate_inside_an_identifier(
+    analyzer, base_config, text, name
+):
+    cfg = {**base_config, "languages": ["de"], "propagate": [("PERSON", name)]}
+    values = {f.value for f in detect_unit(analyzer, TextUnit("u1", text), cfg)}
+    assert name in values, f"known name dropped by the precision gate in {text!r}: {values}"
+
+
+def test_the_pos_gate_abstains_on_a_value_inside_a_larger_token(analyzer):
+    """The gate exists to catch spaCy's tagger DISAGREEING with its own NER about a
+    token it actually tagged. When the value sits inside a bigger token there is no
+    such verdict to read, so the gate must abstain rather than judge the token that
+    merely contains it -- otherwise the surrounding boilerplate decides."""
+    from anonymizer.core import _is_pos_implausible
+
+    art = analyzer.nlp_engine.process_text("Ablage: AKTE_Müller_2024", "de")
+    start = "Ablage: AKTE_".index("AKTE_") + len("AKTE_")
+    assert not _is_pos_implausible("PERSON", start, start + len("Müller"), art)
+
+    # Still rejects what it was built for: a standalone token the tagger reads as a
+    # verb, where the span DOES align and the disagreement is real evidence.
+    art2 = analyzer.nlp_engine.process_text("Der Antrag wurde abgelehnt.", "de")
+    s2 = len("Der Antrag wurde ")
+    assert _is_pos_implausible("PERSON", s2, s2 + len("abgelehnt"), art2)
 
 
 # --- 2026-07-30: Art. 9 disclosure FRAMES ------------------------------------
