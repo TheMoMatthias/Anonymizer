@@ -300,9 +300,12 @@ def test_corroboration_only_demotes_bare_org_loc_misc_guesses():
     leaves the reviewer's list but stays visible in its own band rather than being
     discarded.
 
-    PERSON is deliberately still NOT in _CORROBORATION_ONLY_ENTITIES -- adding it cuts
-    false positives 28/84 -> 4/84 but drops per-occurrence recall on realistic letters
-    from 98% to 80%. See the note on that constant."""
+    REWRITTEN AGAIN 2026-07-30: PERSON is now IN _CORROBORATION_ONLY_ENTITIES. The
+    recall cost that blocked it (98% -> 80% on realistic letters) was not inherent -- it
+    was two defects: the anchored patterns were being deleted inside Presidio's
+    remove_duplicates() by spaCy's higher flat score, and corroboration did not cross a
+    (type, value) group boundary. With both fixed the flip cuts false positives 27/84 ->
+    4/84 while every recall stratum holds equal or better."""
     from anonymizer import core
     from anonymizer.models import Finding as F
 
@@ -324,10 +327,12 @@ def test_corroboration_only_demotes_bare_org_loc_misc_guesses():
     vals = {g.value for g in result.all_actionable()}
     demoted = {g.value for g in result.demoted}
 
-    # PERSON is not gated yet, so both PERSON values stay actionable.
-    assert vals == {"Signavio", "Klaus Mueller", "Abgeschlossen"}, vals
+    # Only the CORROBORATED values stay actionable -- "Abgeschlossen" is a bare spaCy
+    # PERSON guess on a status label, which is the whole class of false positive the
+    # flip exists to remove.
+    assert vals == {"Signavio", "Klaus Mueller"}, vals
     # Nothing is discarded: everything gated is accounted for in the demoted band.
-    assert demoted == {"OpenClaw", "Bearbeitung"}, demoted
+    assert demoted == {"OpenClaw", "Bearbeitung", "Abgeschlossen"}, demoted
 
 
 def test_corroboration_only_off_keeps_everything():

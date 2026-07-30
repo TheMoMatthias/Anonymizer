@@ -119,6 +119,44 @@ _NAME_COLUMN_SCORE = 0.8
 _SNAKE_TOKEN = re.compile(r"^\w*_\w[\w-]*$")
 
 
+# Separators a single spreadsheet cell uses to hold SEVERAL values. `_x001E_` is
+# Excel's own escape for the ASCII record separator, which is how a multi-select
+# dropdown stores its picks; the rest are what humans type.
+_MULTI_VALUE_SEPARATOR = re.compile(r"(?:[;|]|\r?\n|\x1e|_x001E_)+")
+
+
+def _value_segments(value: str) -> list[tuple[int, int, str]]:
+    """(start, end, text) for each separator-delimited segment of a cell value,
+    offsets relative to `value` and already whitespace-trimmed.
+
+    Why this exists: the whole-cell override asks whether the ENTIRE cell is
+    name-shaped, so a cell holding a name next to anything else was invisible to
+    it -- measured, `"von Bergen; intern geprüft"` scored 0% under
+    corroboration-only because the only thing claiming it was a dirty partial NER
+    span. Splitting also fixes a quieter bug: `"Winkler; Habermehl"` passed the
+    shape check as ONE name, so two people shared a single pseudonym.
+
+    Returns a single whole-value segment when there is no separator, so the
+    single-value path stays byte-identical."""
+    spans: list[tuple[int, int]] = []
+    pos = 0
+    for m in _MULTI_VALUE_SEPARATOR.finditer(value):
+        if m.start() > pos:
+            spans.append((pos, m.start()))
+        pos = m.end()
+    if pos < len(value):
+        spans.append((pos, len(value)))
+    out: list[tuple[int, int, str]] = []
+    for start, end in spans or [(0, len(value))]:
+        seg = value[start:end]
+        lead = len(seg) - len(seg.lstrip())
+        trail = len(seg) - len(seg.rstrip())
+        s, e = start + lead, end - trail
+        if e > s:
+            out.append((s, e, value[s:e]))
+    return out
+
+
 def _is_placeholder_token(value: str) -> bool:
     v = value.strip()
     return " " not in v and bool(_SNAKE_TOKEN.match(v))
@@ -410,10 +448,23 @@ def _inferred_name_columns(wb, analyzer, config, sheet_langs: dict[str, str]) ->
             distinct = sorted(set(values))
             if len(distinct) / len(values) < _INFER_MIN_DISTINCT_RATIO:
                 continue  # a controlled vocabulary, not a roster of people
-            shaped = [v for v in distinct if _looks_like_name(v, analyzer, lang)]
+            # Judged per SEGMENT, not per whole value: a multi-value cell
+            # ("von Bergen; intern geprüft") is never name-shaped as a whole, so a
+            # column of them failed the shape gate outright and the splitter in
+            # _analyze_cell_text -- which only runs on a people column -- never got
+            # the chance to claim the name. Measured: multi_value_cell stuck at 60%
+            # with the splitter built but unreachable.
+            shaped = [
+                seg
+                for v in distinct
+                for _s, _e, seg in _value_segments(v)
+                if _looks_like_name(seg, analyzer, lang)
+            ]
+            # Ratio still measured against the VALUE count, so a column where only a
+            # minority of cells contain any name at all is still rejected.
             if len(shaped) / len(distinct) < _INFER_MIN_SHAPE_RATIO:
                 continue
-            hits = sum(1 for v in shaped if _is_person_value(v, analyzer, lang))
+            hits = sum(1 for v in set(shaped) if _is_person_value(v, analyzer, lang))
             if hits >= _INFER_MIN_HITS and hits / len(shaped) >= _INFER_MIN_HIT_RATIO:
                 out.add((ws.title, get_column_letter(col)))
     return out
@@ -789,6 +840,48 @@ def _analyze_cell_text(
         and not _NOT_A_NAME.match(probe)
         and _looks_like_name(value, analyzer, lang)
     )
+    # A cell holding SEVERAL values is handled segment-by-segment, because the
+    # whole-cell question ("is this entire cell a name?") answers "no" for
+    # "von Bergen; intern geprüft" and the name then goes unclaimed.
+    segments = _value_segments(value) if value else []
+    if column_says_people and len(segments) > 1:
+        value_start = text.index(value)
+        for seg_start, seg_end, seg in segments:
+            seg_probe = neutralize_structural_noise(seg).strip()
+            if not seg_probe or _NOT_A_NAME.match(seg_probe):
+                continue
+            if not _looks_like_name(seg, analyzer, lang):
+                continue
+            abs_start, abs_end = value_start + seg_start, value_start + seg_end
+            # Any finding OVERLAPPING the segment, not just one covering the whole
+            # cell: spaCy's span on such a cell is typically partial and dirty
+            # (measured: NER_MISC "Winkler |", the pipe included).
+            overlapping = [f for f in result if f.start < abs_end and f.end > abs_start]
+            retyped = False
+            for f in overlapping:
+                if f.entity_type in _CORROBORATION_ONLY_ENTITIES and f.source in _GATED_NER_SOURCES:
+                    f.entity_type = "PERSON"
+                    f.source = override_source
+                    f.score = max(f.score, _NAME_COLUMN_SCORE)
+                    f.start, f.end = abs_start, abs_end
+                    f.value = seg
+                    f.context = f"{header}: {value}"
+                    retyped = True
+            if not retyped and not overlapping:
+                result.append(
+                    Finding(
+                        entity_type="PERSON",
+                        value=seg,
+                        score=_NAME_COLUMN_SCORE,
+                        context=f"{header}: {value}",
+                        unit_id=unit_id,
+                        start=abs_start,
+                        end=abs_end,
+                        source=override_source,
+                    )
+                )
+        return _resolve_overlaps(result, text)
+
     whole_cell = [f for f in result if f.start == 0 and f.end >= len(value)]
     if header_says_people:
         # A WEAKER guess must not silently veto the header. spaCy types some real

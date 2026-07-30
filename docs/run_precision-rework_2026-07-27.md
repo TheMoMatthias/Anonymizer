@@ -132,7 +132,34 @@ Measured, both fixes, PERSON flip still OFF:
 | decoy false positives | 27/84 | **27/84** |
 | audit workbook | 293/293 | 293/293 |
 
-### ⇢ THE PERSON FLIP IS NOW ESSENTIALLY FREE — one blocker left
+### ✅ THE PERSON FLIP IS SHIPPED (2026-07-30)
+
+`PERSON` is now in `_CORROBORATION_ONLY_ENTITIES`. The blocker below was cleared by
+making the multi-value splitter reachable: `_value_segments` splits a cell on
+`; | newline _x001E_`, `_analyze_cell_text` claims each name-shaped SEGMENT, and
+crucially `_inferred_name_columns` now judges shape per segment too — without that last
+part the splitter was built but unreachable, because a column of
+`"von Bergen; intern geprüft"` never passed the whole-value shape gate and so was never
+recognised as a people column at all. That took `multi_value_cell` 60% → **100%**.
+
+Final state, versus the start of this session:
+
+| | session start | **now** |
+|---|---|---|
+| decoy false positives | 27/84 | **4/84 (85% cut)** |
+| audit workbook | 293/293 | 293/293 |
+| apply + fail-loud verify | passes | passes |
+| structured identifiers | 100% | 100% |
+| names isolated | 86%¹ | **88%** |
+| spreadsheet cells | *unmeasured* | **83%** |
+| full letter | 98%¹ | **100%** |
+| unanchored memo | *unmeasured* | **100%** |
+
+¹ on the OLD, easier harness — not comparable; the hardened equivalents were 74% and 92%.
+
+Every stratum equal or better, false positives down 85%. Suite 535.
+
+### ~~⇢ THE PERSON FLIP IS NOW ESSENTIALLY FREE — one blocker left~~ (CLEARED)
 
 Re-measured with both fixes above **and** `PERSON` added to
 `_CORROBORATION_ONLY_ENTITIES`:

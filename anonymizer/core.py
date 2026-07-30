@@ -102,23 +102,30 @@ _PRECISION_GATED_ENTITIES = frozenset({"NER_MISC", "ORGANIZATION", "LOCATION"})
 #     left the surname legible while "Koch" was redacted everywhere else. Fixed by
 #     genitive inheritance below.
 #
-# STILL NOT SHIPPED, and the reason is now a measured number rather than a mystery.
-# Adding "PERSON" here gives false positives 28/84 -> 4/84 (86% cut) with the apply round
-# trip clean -- but per-OCCURRENCE recall on realistic letters falls from 98% to 80%,
-# with several surnames missed ENTIRELY (Winkler, Habermehl, Osterkamp, Oeztuerk,
-# Kowalczyk, Demir all 0/5). An 18-point drop on the most realistic stratum is a leak
-# increase, and for this tool a miss is a disclosure while an over-flag is review time.
+# PERSON IS NOW IN THIS SET (2026-07-30), and the history of why it took so long is the
+# useful part. It was blocked for days by an apparently inherent trade: adding it cut
+# false positives 28/84 -> 4/84 but dropped per-occurrence recall on realistic letters
+# from 98% to 80%, with six surnames missed ENTIRELY (Winkler, Habermehl, Osterkamp,
+# Oeztuerk, Kowalczyk, Demir all 0/5). It was not inherent. It was two defects:
 #
-# The audit workbook cannot see this -- its recall matching is value-keyed and lenient,
-# so it reads 293/293 either way. Only scripts/measure_recall.py, scored per occurrence,
-# exposes it. Run BOTH before touching this line.
+#   * Presidio's EntityRecognizer.remove_duplicates() runs INSIDE analyze() and drops a
+#     result contained in a higher-scored result of the SAME entity type. spaCy reports
+#     PERSON at a flat 0.85, so every anchored pattern below that score was deleted
+#     before this module saw it -- taking its corroborating source with it. The anchors
+#     only ever worked where spaCy did not also fire. Fixed by engine._ANCHOR_SCORE=0.86.
+#   * corroboration did not cross a (type, value) group boundary, so the same name typed
+#     PERSON here and ORGANIZATION there formed two groups and the second was demoted
+#     while the identical characters were redacted elsewhere. Fixed by
+#     corroborated_any_type + the reverse token direction, below.
 #
-# What is still missing is corroboration for a BARE SURNAME. Three sources were added
-# chasing it (English honorific stripping, genitive inheritance, surname-part
-# inheritance) and each helped -- 57% -> 80% -- but an anchored salutation still is not
-# reaching the bare-surname group for those six names, which is the thing to diagnose
-# next. See the run-file.
-_CORROBORATION_ONLY_ENTITIES = frozenset({"NER_MISC", "ORGANIZATION", "LOCATION"})
+# With both fixed: false positives 27/84 -> 4/84 AND every recall stratum equal or
+# better (full letter and unanchored memo both 100%, spreadsheet cells 77% -> 83%).
+#
+# Note the instrument trap, still true: the audit workbook reads 293/293 whether PERSON
+# is gated or not, because its recall matching is value-keyed and lenient. Only
+# scripts/measure_recall.py, scored per OCCURRENCE, can see a regression here. Run BOTH
+# before touching this line.
+_CORROBORATION_ONLY_ENTITIES = frozenset({"NER_MISC", "ORGANIZATION", "LOCATION", "PERSON"})
 
 # The sources whose _NER_ENTITIES hits are BARE guesses and must therefore clear
 # the precision gate: spaCy's model itself, the document-wide propagation of one,

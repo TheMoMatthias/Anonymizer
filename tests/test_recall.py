@@ -892,8 +892,12 @@ def test_a_german_genitive_inherits_its_base_name_corroboration():
         [TextUnit("u", "x")], cfg,
     )
     vals = {g.value for g in result.all_actionable()}
-    assert vals == {"Koch", "Kochs", "Prozess"}, vals  # PERSON not gated yet; the rule is still pinned
-    assert not result.demoted
+    # With PERSON now corroboration-only (2026-07-30) this test finally exercises the
+    # rule it was written for: "Koch" is corroborated by the column override, "Kochs"
+    # INHERITS that corroboration as its genitive, and "Prozess" -- a word that merely
+    # ends in s, with no corroborated stem -- is correctly demoted.
+    assert vals == {"Koch", "Kochs"}, vals
+    assert {g.value for g in result.demoted} == {"Prozess"}, [g.value for g in result.demoted]
 
 
 # --- 2026-07-30: the hardened recall harness and what it exposed --------------
@@ -1120,3 +1124,52 @@ def test_a_full_name_inherits_from_its_corroborated_surname(monkeypatch):
     kept = {g.value for g in result.all_actionable()}
     assert {"Winkler", "Ayse Winkler"} <= kept, kept
     assert {g.value for g in result.demoted} == {"Portfoliobeitrag"}, [g.value for g in result.demoted]
+
+
+def test_a_cell_holding_several_values_is_split_before_the_name_check():
+    """The whole-cell override asks whether the ENTIRE cell is a name, so a cell holding
+    a name next to anything else was invisible to it -- measured, "von Bergen; intern
+    geprueft" scored 0% under corroboration-only. Splitting also fixes a quieter bug:
+    "Winkler; Habermehl" passed the shape check as ONE name, so two people shared a
+    single pseudonym."""
+    from anonymizer.formats.xlsx_handler import _value_segments
+
+    assert [s for _a, _b, s in _value_segments("von Bergen; intern geprueft")] == [
+        "von Bergen", "intern geprueft",
+    ]
+    assert [s for _a, _b, s in _value_segments("Winkler; Habermehl")] == ["Winkler", "Habermehl"]
+    assert [s for _a, _b, s in _value_segments("Winkler | intern")] == ["Winkler", "intern"]
+    assert [s for _a, _b, s in _value_segments("A_x001E_B")] == ["A", "B"]
+    # No separator -> ONE whole-value segment, so the single-value path is unchanged.
+    assert _value_segments("Ayse Winkler") == [(0, 12, "Ayse Winkler")]
+    # Offsets must index back into the original value, or applying a finding corrupts
+    # the cell.
+    v = "von Bergen; intern geprueft"
+    for start, end, seg in _value_segments(v):
+        assert v[start:end] == seg
+
+
+def test_a_multi_value_people_cell_claims_only_its_name_segment(tmp_path, analyzer, base_config):
+    """End-to-end through the real pipeline: the name is claimed, the commentary next to
+    it is not, and the span is clean (no trailing separator)."""
+    import openpyxl
+
+    from anonymizer.pipeline import scan_document
+
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.title = "Daten"
+    ws.cell(row=1, column=1, value="Vermerk")
+    for r, v in enumerate(
+        ["Öztürk; intern geprüft", "Habermehl; intern geprüft", "Müller; intern geprüft",
+         "Kowalczyk; intern geprüft", "Bauer; intern geprüft", "Osterkamp; intern geprüft"],
+        start=2,
+    ):
+        ws.cell(row=r, column=1, value=v)
+    path = tmp_path / "multi.xlsx"
+    wb.save(path)
+
+    values = {g.value for g in scan_document(path, analyzer, base_config).all_actionable()}
+    assert "Müller" in values, f"the everyday-word surname leaked: {values}"
+    assert not any("geprüft" in v for v in values), f"commentary claimed as a name: {values}"
+    assert not any(v.endswith(";") or v.endswith("|") for v in values), f"dirty span: {values}"
