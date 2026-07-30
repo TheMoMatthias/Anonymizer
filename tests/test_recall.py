@@ -1038,3 +1038,85 @@ def test_a_short_column_is_not_enough_to_infer_anything(tmp_path, analyzer, base
     whole-column claim as fragile as the per-cell guess it replaces."""
     cols, _ = _infer_cols(tmp_path, analyzer, base_config, {"Feld_7": ["Öztürk", "Müller"]})
     assert "A" not in cols, f"inferred from too few values: {cols}"
+
+
+def test_an_anchor_wins_the_span_against_spacys_flat_confidence(analyzer, base_config):
+    """The corroboration model rests entirely on the anchored patterns, and they were
+    INVISIBLE wherever spaCy also fired.
+
+    Presidio's EntityRecognizer.remove_duplicates() runs inside analyze(): it drops a
+    result contained in a higher-scored result of the same entity type. spaCy reports
+    PERSON at a flat 0.85, so an anchor scored below that on the identical span was
+    deleted before this codebase ever saw it -- and the group then read as an
+    uncorroborated bare guess. Measured consequence: an ANCHORED letter scored 0/5
+    under corroboration-only while an unanchored memo scored 4/5, because the memo's
+    anchors were uncontested."""
+    from anonymizer.core import _GATED_NER_SOURCES
+
+    cfg = {**base_config, "languages": ["de"]}
+    for text, value in [
+        ("Sehr geehrter Herr Winkler,", "Winkler"),
+        ("Kunde: Winkler", "Winkler"),
+        ("Der Einreicher Winkler hat gezeichnet.", "Winkler"),
+    ]:
+        found = {f.value: f.source for f in _findings(analyzer, cfg, text)}
+        assert value in found, f"{value!r} not found in {text!r}: {found}"
+        assert found[value] not in _GATED_NER_SOURCES, (
+            f"anchor lost the span to a bare NER guess in {text!r}: {found}"
+        )
+
+
+def test_the_same_value_inherits_corroboration_across_entity_types():
+    """Groups are keyed by (type, value), so one name typed PERSON in one sentence and
+    ORGANIZATION in another becomes two groups -- and the second was demoted while the
+    identical characters were redacted elsewhere. Measured: "Verteiler: Rechtsabteilung,
+    Winkler, Innenrevision" types Winkler ORGANIZATION, costing exactly one occurrence
+    on nearly every name in the harness (the uniform "4/5")."""
+    from anonymizer import core
+    from anonymizer.models import Finding as F
+
+    cfg = {"entities": {}, "tiers": {"high": 0.9, "medium": 0.5}, "corroboration_only": True}
+    result = core.build_scan_result(
+        [
+            F("PERSON", "Winkler", 0.86, "c", "u1", 0, 7, source="PatternRecognizer"),
+            F("ORGANIZATION", "Winkler", 0.85, "c", "u2", 0, 7, source="SpacyRecognizer"),
+            # An unrelated ORGANIZATION with no corroborated twin still demotes.
+            F("ORGANIZATION", "Datenfeeds", 0.85, "c", "u3", 0, 10, source="SpacyRecognizer"),
+        ],
+        [TextUnit("u", "x")], cfg,
+    )
+    kept = {(g.entity_type, g.value) for g in result.all_actionable()}
+    assert ("ORGANIZATION", "Winkler") in kept, kept
+    assert {g.value for g in result.demoted} == {"Datenfeeds"}, [g.value for g in result.demoted]
+
+
+def test_a_full_name_inherits_from_its_corroborated_surname(monkeypatch):
+    """Both directions are needed. A bare "Winkler" inheriting from "Ayse Winkler" was
+    handled; the signature line "Mit freundlichen Gruessen Ayse Winkler" forms its OWN
+    group and has to inherit from the corroborated bare "Winkler" -- the other way
+    round. That single occurrence was the difference between 4/5 and 5/5 on nearly
+    every name in the full-letter stratum.
+
+    PERSON is not corroboration-only in the shipped config, so the rule this pins is
+    only reachable with the flip on -- which is exactly the state it has to be correct
+    in before that flip can ship. Patched in rather than waiting for it."""
+    from anonymizer import core
+    from anonymizer.models import Finding as F
+
+    monkeypatch.setattr(
+        core, "_CORROBORATION_ONLY_ENTITIES",
+        frozenset(core._CORROBORATION_ONLY_ENTITIES | {"PERSON"}),
+    )
+    cfg = {"entities": {}, "tiers": {"high": 0.9, "medium": 0.5}, "corroboration_only": True}
+    result = core.build_scan_result(
+        [
+            F("PERSON", "Winkler", 0.86, "c", "u1", 0, 7, source="PatternRecognizer"),
+            F("PERSON", "Ayse Winkler", 0.85, "c", "u2", 0, 12, source="SpacyRecognizer"),
+            # An unrelated bare guess with no corroborated relative still demotes.
+            F("PERSON", "Portfoliobeitrag", 0.85, "c", "u3", 0, 16, source="SpacyRecognizer"),
+        ],
+        [TextUnit("u", "x")], cfg,
+    )
+    kept = {g.value for g in result.all_actionable()}
+    assert {"Winkler", "Ayse Winkler"} <= kept, kept
+    assert {g.value for g in result.demoted} == {"Portfoliobeitrag"}, [g.value for g in result.demoted]

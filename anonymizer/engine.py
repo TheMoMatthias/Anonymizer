@@ -142,28 +142,48 @@ _ROLE_NOUNS = (
 # measured at 20% for the common-noun stratum without this.
 _BIRTH_NAME_MARKERS = r"(?:geb\.|geborene[rn]?|verw\.|verwitwete[rn]?|verh\.|verheiratete[rn]?|née|nee)"
 
+# EVERY anchored pattern scores 0.86, and the exact value is load-bearing.
+#
+# Presidio's EntityRecognizer.remove_duplicates() runs INSIDE analyze(): it sorts
+# results by descending score and drops any result contained in a higher-scored
+# result OF THE SAME ENTITY TYPE. spaCy reports PERSON at a FLAT 0.85, so an
+# anchor scored below that on the identical span was deleted before any of this
+# codebase saw it -- taking its source (and therefore its corroboration) with it.
+#
+# Measured consequence, 2026-07-30: in "Sehr geehrter Herr Winkler," the
+# honorific anchor never reached build_scan_result; the group arrived as pure
+# SpacyRecognizer and read as an uncorroborated guess. The anchors only ever
+# contributed on spans where spaCy did NOT also fire, which is why an ANCHORED
+# letter scored WORSE (0/5) than an unanchored memo (4/5) under corroboration-only
+# -- the memo's role/initial anchors were uncontested and survived.
+#
+# 0.86 is the same sandwich DE_ADDRESS already uses: above spaCy's flat 0.85 so
+# the anchor wins the dedup, below the 0.9 auto-accept bar so the tier is
+# unchanged (0.60 and 0.86 are both "review"). This is a corroboration fix, not
+# a confidence claim.
+_ANCHOR_SCORE = 0.86
+
 _ANCHORED_NAME_PATTERNS = [
-    Pattern(name="honorific_name", regex=rf"(?<=\b{_HONORIFICS}\s+){_NAME}", score=0.75),
-    Pattern(name="labelled_name", regex=rf"(?<=\b{_NAME_LABELS}\s*:\s*){_NAME}", score=0.70),
+    Pattern(name="honorific_name", regex=rf"(?<=\b{_HONORIFICS}\s+){_NAME}", score=_ANCHOR_SCORE),
+    Pattern(name="labelled_name", regex=rf"(?<=\b{_NAME_LABELS}\s*:\s*){_NAME}", score=_ANCHOR_SCORE),
     # The honorific is excluded so "Der Antragsteller Herr Müller" yields "Müller"
     # and not "Herr Müller" -- a title inside the value keys the pseudonym on the
     # title, which splits one person across two placeholders.
     Pattern(
         name="role_noun_name",
         regex=rf"(?<=\b{_ROLE_NOUNS}\s+)(?!{_HONORIFICS}\b){_NAME}",
-        score=0.60,
+        score=_ANCHOR_SCORE,
     ),
-    Pattern(name="birth_name", regex=rf"(?<=\b{_BIRTH_NAME_MARKERS}\s+){_NAME}", score=0.65),
+    Pattern(name="birth_name", regex=rf"(?<=\b{_BIRTH_NAME_MARKERS}\s+){_NAME}", score=_ANCHOR_SCORE),
     # An initial before a surname ("B. Winkler", "M. Schmidt-Rottluff"). A single
     # capital letter with a period, immediately before a capitalized word, is an
     # initial in almost all correspondence; the residual risk ("Abschnitt B.
     # Vertragsdaten") is why this sits at the BOTTOM of the review tier.
     #
-    # 0.6, not lower: PERSON carries a 0.6 confidence_threshold, and detect_unit
-    # drops anything below it silently. At 0.55 this pattern matched, produced a
-    # raw 0.55 PERSON result, and was then discarded before it became a finding
-    # -- so it looked implemented while contributing exactly nothing.
-    Pattern(name="initial_name", regex=rf"(?<=\b\p{{Lu}}\.\s{{0,2}}){_NAME}", score=0.60),
+    # Once carried a lower score of its own, which was doubly wrong: PERSON has a
+    # 0.6 confidence_threshold and detect_unit drops below it SILENTLY, so at 0.55
+    # this pattern matched and then vanished, implemented in appearance only.
+    Pattern(name="initial_name", regex=rf"(?<=\b\p{{Lu}}\.\s{{0,2}}){_NAME}", score=_ANCHOR_SCORE),
 ]
 
 # Links, SCHEME- or www-anchored. This replaces Presidio's own UrlRecognizer,

@@ -535,11 +535,28 @@ def test_a_given_name_corroborates_a_person_finding(analyzer, base_config):
     that an existing PERSON candidate has evidence behind it. Re-sourcing is how this
     codebase expresses that (cf. _absorb_corroborating_source), and it is what lets
     PERSON become corroboration-only without discarding real names."""
-    from anonymizer.core import GIVEN_NAME_SOURCE
+    from anonymizer.core import _GATED_NER_SOURCES, GIVEN_NAME_SOURCE
 
     cfg = {**base_config, "languages": ["de"]}
-    found = {f.value: f.source for f in detect_unit(analyzer, TextUnit("u1", "Sehr geehrter Herr Klaus Mueller,"), cfg)}
+    # UNANCHORED, so the gazetteer is the only thing that CAN corroborate. This
+    # sentence used to be a salutation, which made the assertion accidentally
+    # test the anchor instead: once the anchored patterns were scored above
+    # spaCy's flat 0.85 (so they stop being deleted by Presidio's dedup), the
+    # honorific legitimately won the span and the source read PatternRecognizer.
+    found = {
+        f.value: f.source
+        for f in detect_unit(analyzer, TextUnit("u1", "Klaus Mueller hat den Vertrag unterzeichnet."), cfg)
+    }
     assert found.get("Klaus Mueller") == GIVEN_NAME_SOURCE, found
+
+    # In a salutation the requirement is only that SOMETHING corroborates it --
+    # which source wins the span is an implementation detail, and pinning it made
+    # this test fail on a change that strictly improved corroboration.
+    anchored = {
+        f.value: f.source
+        for f in detect_unit(analyzer, TextUnit("u3", "Sehr geehrter Herr Klaus Mueller,"), cfg)
+    }
+    assert anchored.get("Klaus Mueller") not in _GATED_NER_SOURCES, anchored
 
     # A bare surname stays a bare guess -- no given name, no corroboration.
     bare = {f.value: f.source for f in detect_unit(analyzer, TextUnit("u2", "Die Abstimmung mit Mueller erfolgte."), cfg)}

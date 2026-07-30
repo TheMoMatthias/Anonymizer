@@ -1059,6 +1059,21 @@ def build_scan_result(findings: list[Finding], units: list[TextUnit], config: di
             if g.entity_type in _CORROBORATION_ONLY_ENTITIES and not _is_uncorroborated(g)
         }
 
+        # The SAME value, corroborated under ANY entity type. Groups are keyed by
+        # (type, value), so one name detected as PERSON in one sentence and as
+        # ORGANIZATION in another becomes two groups -- and the second one is
+        # demoted even though the identical characters are being redacted
+        # elsewhere in the document. Measured: "Verteiler: Rechtsabteilung,
+        # Winkler, Innenrevision" types Winkler ORGANIZATION, which cost exactly
+        # one occurrence on nearly every name in the harness (the uniform "4/5").
+        #
+        # Matched on the EXACT string, deliberately: identical characters are
+        # unarguably the same disclosure, whereas token-overlap across types would
+        # let an unrelated "Berg Consulting GmbH" ride in on a person named Berg.
+        corroborated_any_type = {
+            g.value.strip().lower() for g in grouped.values() if not _is_uncorroborated(g)
+        }
+
         # A SURNAME inherits from a corroborated FULL NAME containing it. This is the
         # fourth corroboration source, and without it the flip is unshippable: measured,
         # per-OCCURRENCE recall on realistic letters fell from 98% to 57% (foreign names
@@ -1073,7 +1088,11 @@ def build_scan_result(findings: list[Finding], units: list[TextUnit], config: di
             part
             for g in grouped.values()
             if g.entity_type == "PERSON" and not _is_uncorroborated(g)
-            for part in g.value.strip().lower().split()
+            # Split on HYPHENS as well as spaces: a double-barrelled name is one
+            # group whose halves also appear alone, and the harness scores a
+            # half-caught "Schmidt-Rottluff" as a full miss because leaving
+            # "Rottluff" legible discloses the person.
+            for part in re.split(r"[\s\-]+", g.value.strip().lower())
             if len(part) >= 3
         }
 
@@ -1084,13 +1103,20 @@ def build_scan_result(findings: list[Finding], units: list[TextUnit], config: di
                 v[:-1] in corroborated_values or v.rstrip("s").rstrip("'") in corroborated_values
             ):
                 return True
-            # A single token that is part of a corroborated PERSON name.
-            return (
-                g.entity_type == "PERSON"
-                and " " not in v
-                and len(v) >= 3
-                and v in corroborated_name_parts
-            )
+            # The identical value, corroborated under some other entity type.
+            if v in corroborated_any_type:
+                return True
+            # A PERSON name sharing a token with a corroborated PERSON name. BOTH
+            # directions are needed and only one used to be: a bare "Winkler"
+            # inheriting from "Ayşe Winkler" was handled, but the signature line
+            # "Mit freundlichen Grüßen Ayşe Winkler" forms its own group and had to
+            # inherit from the corroborated bare "Winkler" -- the other way round.
+            # Restricted to PERSON, since a shared token across TYPES is the
+            # over-reach the exact-value rule above deliberately avoids.
+            if g.entity_type != "PERSON":
+                return False
+            tokens = [t for t in re.split(r"[\s\-]+", v) if len(t) >= 3]
+            return bool(tokens) and any(t in corroborated_name_parts for t in tokens)
 
         for key, g in grouped.items():
             uncorroborated = _is_uncorroborated(g) and not _inherits_from_base_name(g)

@@ -81,6 +81,117 @@ in apply it is computed BEFORE the sheet renames so its keys are the original ti
 Deriving it after would silently disagree with scan on every renamed sheet — a parity
 break the fail-loud verify would catch, but only after the fact.
 
+### 2026-07-30 (later) — the anchors were invisible whenever spaCy agreed
+
+Two defects found while researching the remaining gaps. Both are architectural, both
+were silently degrading the corroboration model, and fixing them is a pure win.
+
+**1. Presidio deleted every anchor that spaCy also claimed.**
+`EntityRecognizer.remove_duplicates()` runs INSIDE `analyze()`: it sorts by descending
+score and drops any result contained in a higher-scored result of the SAME entity type.
+spaCy reports PERSON at a **flat 0.85**, so `honorific_name` (0.75), `labelled_name`
+(0.70), `role_noun_name`/`initial_name` (0.60) and `birth_name` (0.65) were destroyed
+before `_absorb_corroborating_source` — or anything else in this codebase — could see
+them. **The anchors only ever contributed on spans where spaCy did not fire.**
+
+The smoking gun: under corroboration-only an ANCHORED letter scored **0/5** while an
+unanchored memo scored **4/5** for the same name. The memo's role/initial anchors were
+uncontested and survived; the letter's honorific anchor lost to spaCy and the group
+arrived as pure `SpacyRecognizer`. Raw dump for "Winkler":
+letter `source='SpacyRecognizer'` on every unit, memo `source='PatternRecognizer'` on two.
+
+Fix: one constant, `engine._ANCHOR_SCORE = 0.86` for all five anchors — the same
+sandwich `DE_ADDRESS` already documents (above spaCy's flat 0.85, below the 0.9
+auto-accept bar, so the review TIER is unchanged). This is a corroboration fix, not a
+confidence claim.
+
+**2. Corroboration did not cross a group boundary.**
+Groups are keyed by `(entity_type, value)`. Two consequences, both measured as the
+uniform "4/5" across nearly every name in the harness:
+* the same name typed PERSON in one sentence and ORGANIZATION in another (measured:
+  `"Verteiler: Rechtsabteilung, Winkler, Innenrevision"` types Winkler ORGANIZATION)
+  formed a second group that was demoted while the identical characters were being
+  redacted elsewhere;
+* `_inherits_from_base_name` handled a bare surname inheriting from a corroborated FULL
+  name, but not the reverse — and the signature line "Mit freundlichen Grüßen Ayşe
+  Winkler" forms its own group that must inherit from the corroborated bare "Winkler".
+
+Fix: `corroborated_any_type` (exact string, any entity type — identical characters are
+unarguably the same disclosure) plus the reverse token direction for PERSON only.
+`corroborated_name_parts` now also splits on hyphens, so a double-barrelled name
+contributes both halves.
+
+Measured, both fixes, PERSON flip still OFF:
+
+| | before | after |
+|---|---|---|
+| full letter | 97% | **100%** |
+| unanchored memo | 90% | **100%** |
+| names isolated | 88% | 88% |
+| spreadsheet cells | 77% | 77% |
+| decoy false positives | 27/84 | **27/84** |
+| audit workbook | 293/293 | 293/293 |
+
+### ⇢ THE PERSON FLIP IS NOW ESSENTIALLY FREE — one blocker left
+
+Re-measured with both fixes above **and** `PERSON` added to
+`_CORROBORATION_ONLY_ENTITIES`:
+
+| | shipped (flip off) | flip ON + both fixes |
+|---|---|---|
+| decoy false positives | 27/84 | **4/84 (85% cut)** |
+| audit workbook | 293/293 | 293/293 |
+| apply + fail-loud verify | passes | **passes** |
+| names isolated | 88% | 88% |
+| full letter | 100% | **100%** |
+| unanchored memo | 100% | **100%** |
+| **spreadsheet cells** | **77%** | **67%** ← the only regression |
+
+The entire remaining cost is **one trap**: `multi_value_cell` 60% → 0%
+(`"von Bergen; intern geprüft"` — spaCy claims a dirty NER_MISC span over part of the
+cell, which the flip then demotes). `id_shaped_cell` is 0% either way.
+
+**So: fix multi-value cell splitting and the flip becomes strictly better than shipped
+on every single axis.** That is the highest-value work item in this file.
+
+### Art. 9: the 50% was never what it looked like
+
+Probed each of the 12 oblique probes, ML off vs ML on (`vendor/gliner-model`, offline):
+
+* **Only 3 of 12 are caught by an actual Art. 9 recognizer** (`Chemotherapie`,
+  `Burnout`, `Fingerabdruck` — all word-list hits). The rest of the "successes" are
+  spaCy mistyping a capitalized German noun: `Ramadan` → PERSON, `Streikgeld` → PERSON,
+  `Grünen` → ORGANIZATION. They are redacted by accident.
+* **This means improving PERSON precision REMOVES Art. 9 catches.** The two goals are
+  directly coupled, and the coupling is invisible in the aggregate number.
+* **ML on takes it 6/12 → 9/12**, fixing `Moschee` (correctly, → DE_RELIGION 0.774),
+  `Betriebsrat` (→ ORGANIZATION 0.685, mistyped) and `Ehefrau` (→ PERSON 0.786,
+  mistyped). Mistyped still redacts, but an Art. 9 type is one-way `anonymize` while
+  ORGANIZATION/PERSON are reversible `pseudonymize` — so the CLASSIFICATION matters.
+* ML also adds noise: `Sie` → PERSON 0.902, `Der Kunde` → PERSON 0.899, `Mitglied`,
+  `Kontoinhabers`, `Die Familie`. Pronouns and role nouns as people.
+* Still leaking with ML on: `Rollstuhl`, `Kontingentflüchtlinge`, `Romanes`.
+
+**spaCy word-vector similarity is DEAD — do not try it.** Measured cosine to category
+prototypes: the DECOYS score higher than the targets. `Bearbeitungszeit`→health 0.488
+and `Abrechnung`→union 0.537 both beat `Rollstuhl`→health 0.277 and `Moschee`→union
+0.234; `Portfoliobeitrag` and `Datenfeeds` have no vector at all (German compounds).
+Any threshold catching the true positives flags more false ones.
+
+What is left for Art. 9, in order of expected value: **disclosure FRAMES** ("leidet an
+X", "ist auf den X angewiesen", "Mitglied im X", "wurde in den X gewählt") which
+generalize past any word list; a much larger compound-aware Art. 9 lexicon; and ML
+restricted to prose units with its hits RETYPED to the right Art. 9 category.
+
+### Newly discovered gaps (from the structural probe, not yet in the harness)
+
+* **ALL-CAPS names are invisible**: `"WINKLER"` alone in a cell → nothing at all.
+  Common in forms and legacy exports. Not currently a harness stratum.
+* **`"Winkler | intern geprüft"` produces a DIRTY span**: `NER_MISC 'Winkler |'`,
+  including the pipe.
+* `"K-Winkler-2024"` and `"AKTE_Winkler_2024"` → nothing (already known, now confirmed
+  for the underscore form too).
+
 ### Measured gaps that remain (honest, ranked)
 
 1. **Art. 9 stated obliquely — 50%, 6 of 12 leaking**: `Rollstuhl`, `Moschee`,
