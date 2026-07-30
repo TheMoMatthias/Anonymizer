@@ -24,6 +24,7 @@ from anonymizer.evaluation import (
     measure_documents,
     measure_embedded_identifiers,
     measure_isolated,
+    measure_mixed_ocr_documents,
     measure_structured,
     measure_unanchored_documents,
     measure_workbook_traps,
@@ -65,6 +66,9 @@ def main() -> None:
         )
         sections["NAMES, FULL LETTER (anchors + propagation -- what really happens)"] = measure_documents(
             analyzer, config, work
+        )
+        sections["SCANNED LETTER, MIXED OCR DAMAGE (clean + mangled in one doc)"] = (
+            measure_mixed_ocr_documents(analyzer, config, work)
         )
         sections["NAMES, UNANCHORED MEMO (no honorific anywhere -- the true floor)"] = (
             measure_unanchored_documents(analyzer, config, work)

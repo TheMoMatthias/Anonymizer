@@ -418,6 +418,99 @@ def neutralize_structural_noise(text: str) -> str:
     return _XML_CHAR_ESCAPE.sub(lambda m: " " * len(m.group()), cleaned)
 
 
+# --- OCR skeletons ------------------------------------------------------------
+# Scanned correspondence, faxes and legacy exports do not contain clean text, and
+# a name the OCR mangled is a name the tool redacts nowhere -- "Sehr geehrter Herr
+# Mul1er," and "Müller" are different strings to every mechanism here.
+#
+# The skeleton folds only the substitutions OCR ACTUALLY MAKES, and it is used
+# ONLY to match against names the document has already established. That
+# restriction is what makes an aggressive fold safe: collapsing i/l/1 would be
+# reckless as a detector (it merges unrelated words) and is harmless as a
+# comparison against a known name, because the worst case is recognising a second
+# spelling of somebody the tool is already redacting.
+#
+# Deliberately NOT folded: b/h. It would make "Bauer" and "Hauer" the same
+# skeleton, and both are real German surnames -- the one collision in this table
+# that could redact the wrong person's name.
+_OCR_DIGRAPHS = (
+    ("ii", "u"),    # the classic OCR umlaut: Miiller -> Müller
+    ("rn", "m"),    # Kretschrnar -> Kretschmar
+    ("vv", "w"),
+    ("cl", "d"),
+    ("ss", "s"),    # folds ß, which is expanded first
+)
+_OCR_CHARS = str.maketrans({
+    "0": "o", "1": "l", "3": "e", "4": "a", "5": "s", "6": "g", "7": "t", "8": "b", "9": "g",
+    "|": "l", "!": "l", "i": "l",  # i/l/1/|/! are one class in most scans
+    "ä": "a", "ö": "o", "ü": "u", "à": "a", "á": "a", "â": "a", "é": "e", "è": "e",
+    "ç": "c", "ñ": "n", "ı": "i", "ş": "s", "ğ": "g", "å": "a", "ø": "o",
+})
+
+
+def ocr_skeleton(value: str) -> str:
+    """A spelling-insensitive key for OCR-damaged text. Equal skeletons mean the
+    two strings are plausibly the same word as read by a scanner."""
+    s = value.lower().replace("ß", "ss")
+    for a, b in (("ae", "a"), ("oe", "o"), ("ue", "u")):
+        s = s.replace(a, b)
+    for a, b in _OCR_DIGRAPHS:
+        s = s.replace(a, b)
+    s = s.translate(_OCR_CHARS)
+    # Re-apply the digraph folds: a translation can CREATE one ("Mul1er" -> "muller").
+    for a, b in _OCR_DIGRAPHS:
+        s = s.replace(a, b)
+    return "".join(ch for ch in s if ch.isalnum())
+
+
+# Below this length a skeleton match is not evidence -- "Berg"/"Berq"/"8erg" fold
+# together, but so do too many unrelated short tokens for the match to mean
+# anything on its own.
+_OCR_MIN_LEN = 5
+
+
+_OCR_TOKEN = re.compile(r"[^\W_]{%d,}" % _OCR_MIN_LEN)
+
+
+@functools.lru_cache(maxsize=8)
+def _ocr_skeleton_index(propagate: tuple[tuple[str, str], ...]) -> dict[str, tuple[str, str]]:
+    """{skeleton: (entity_type, canonical value)} for every propagated value long
+    enough for a skeleton match to mean something.
+
+    A skeleton shared by two DIFFERENT propagated values is dropped outright: if
+    the document itself contains two names that fold together, the fold cannot
+    tell which one a damaged token was, and guessing would redact somebody under
+    the wrong pseudonym."""
+    index: dict[str, tuple[str, str]] = {}
+    ambiguous: set[str] = set()
+    for entity_type, value in propagate:
+        token = value.strip()
+        if len(token) < _OCR_MIN_LEN or " " in token:
+            continue
+        key = ocr_skeleton(token)
+        if len(key) < _OCR_MIN_LEN:
+            continue
+        if key in index and index[key][1].lower() != token.lower():
+            ambiguous.add(key)
+        index.setdefault(key, (entity_type, token))
+    for key in ambiguous:
+        index.pop(key, None)
+    return index
+
+
+def _ocr_variant_matches(text: str, propagate: tuple[tuple[str, str], ...]):
+    """(start, end, entity_type, matched_text) for tokens that are an OCR-damaged
+    spelling of a propagated value but are NOT the value itself."""
+    index = _ocr_skeleton_index(propagate)
+    if not index:
+        return
+    for m in _OCR_TOKEN.finditer(text):
+        token = m.group()
+        hit = index.get(ocr_skeleton(token))
+        if hit and token.lower() != hit[1].lower():
+            yield m.start(), m.end(), hit[0], token
+
+
 @functools.lru_cache(maxsize=8)
 def _compiled_propagate_patterns(propagate: tuple[tuple[str, str], ...]):
     """Compiles every propagated value's match pattern ONCE per distinct
@@ -856,6 +949,42 @@ def detect_unit(analyzer, unit: TextUnit, config: dict, nlp_artifacts=None) -> l
                 )
             )
 
+    # OCR-DAMAGED occurrences of a name the document already established. Scanned
+    # correspondence corrupts SOME occurrences, not all -- the salutation reads
+    # cleanly and the body says "Mul1er" -- and to every mechanism above those are
+    # unrelated strings, so the corrupted ones are redacted nowhere.
+    #
+    # Matched on the OCR skeleton, and ONLY against values already propagating.
+    # That is the whole safety argument: this can never invent an entity, it can
+    # only recognise a second spelling of somebody the tool is already redacting.
+    # Findings are tagged "propagation" like their clean twins, so they inherit the
+    # same corroboration treatment rather than smuggling in a new trusted source.
+    for start, end, entity_type, matched in _ocr_variant_matches(
+        unit.text, tuple(config.get("propagate", ()))
+    ):
+        # _rejected_by_precision is deliberately NOT applied here. It is a shape
+        # filter written for clean text, and running it on deliberately damaged
+        # text rejects exactly the evidence this path exists to use: measured, the
+        # two damaged spellings that contain DIGITS ("Mul1er", "0sterkamp") were
+        # thrown out as number-like and scored 0/3, while every digit-free
+        # corruption passed. The identity question the filter would answer has
+        # already been answered more strongly -- an exact skeleton match against a
+        # name this document established, with ambiguous skeletons dropped.
+        if any(f.start < end and f.end > start for f in candidates):
+            continue  # already claimed by a literal match or by NER
+        candidates.append(
+            Finding(
+                entity_type=entity_type,
+                value=matched,
+                score=_PROPAGATED_SCORE,
+                context=_snippet(unit.text, start, end),
+                unit_id=unit.id,
+                start=start,
+                end=end,
+                source="propagation",
+            )
+        )
+
     # Deny-list terms are explicit user intent -> score 1.0 so they win any span
     # contest during overlap resolution.
     for start, end, entity_type in _deny_list_findings(unit.text, deny_list):
@@ -1094,6 +1223,28 @@ def build_scan_result(findings: list[Finding], units: list[TextUnit], config: di
             g.value.strip().lower() for g in grouped.values() if not _is_uncorroborated(g)
         }
 
+        # OCR skeletons of the corroborated values. A scanner mangles SOME
+        # occurrences of a name and not others, so "Mul1er" forms its own group
+        # next to a corroborated "Müller" and is demoted -- leaving the surname
+        # legible in exactly the documents where it was hardest to read. Same
+        # argument as the genitive rule above: it is the same person, so it
+        # inherits.
+        #
+        # An ambiguous skeleton is dropped rather than guessed: if two DIFFERENT
+        # corroborated values fold together, nothing here can tell which one a
+        # damaged token was.
+        corroborated_skeletons: dict[str, str] = {}
+        for g in grouped.values():
+            v = g.value.strip()
+            if _is_uncorroborated(g) or " " in v or len(v) < _OCR_MIN_LEN:
+                continue
+            key = ocr_skeleton(v)
+            if len(key) >= _OCR_MIN_LEN:
+                if corroborated_skeletons.get(key, v.lower()) != v.lower():
+                    corroborated_skeletons[key] = ""  # ambiguous -> never inherit
+                else:
+                    corroborated_skeletons.setdefault(key, v.lower())
+
         # A SURNAME inherits from a corroborated FULL NAME containing it. This is the
         # fourth corroboration source, and without it the flip is unshippable: measured,
         # per-OCCURRENCE recall on realistic letters fell from 98% to 57% (foreign names
@@ -1126,6 +1277,11 @@ def build_scan_result(findings: list[Finding], units: list[TextUnit], config: di
             # The identical value, corroborated under some other entity type.
             if v in corroborated_any_type:
                 return True
+            # An OCR-damaged spelling of a corroborated name.
+            if " " not in v and len(v) >= _OCR_MIN_LEN:
+                canonical = corroborated_skeletons.get(ocr_skeleton(v))
+                if canonical and canonical != v:
+                    return True
             # A PERSON name sharing a token with a corroborated PERSON name. BOTH
             # directions are needed and only one used to be: a bare "Winkler"
             # inheriting from "Ayşe Winkler" was handled, but the signature line

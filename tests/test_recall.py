@@ -1288,3 +1288,83 @@ def test_a_party_is_detected_mid_sentence_with_a_lowercase_article(analyzer, bas
     political_party measured 0%."""
     found = {f.value for f in _art9(analyzer, base_config, "Er kandidierte bei der Kommunalwahl fuer die Gruenen.")}
     assert any("rünen" in v or "ruenen" in v for v in found), f"party affiliation leaked: {found}"
+
+
+# --- 2026-07-30: OCR-damaged names -------------------------------------------
+
+
+@pytest.mark.parametrize("damaged,clean", [
+    ("Wlnkler", "Winkler"),        # i -> l
+    ("Mul1er", "Müller"),          # umlaut dropped, l -> 1
+    ("Miiller", "Müller"),         # the classic OCR umlaut
+    ("0sterkamp", "Osterkamp"),    # O -> 0
+    ("Kretschrnar", "Kretschmar"), # m -> rn
+    ("Mueller", "Müller"),         # transliterated umlaut
+])
+def test_an_ocr_skeleton_folds_the_damage_a_scanner_actually_does(damaged, clean):
+    from anonymizer.core import ocr_skeleton
+
+    assert ocr_skeleton(damaged) == ocr_skeleton(clean), (
+        f"{damaged!r} and {clean!r} fold differently: "
+        f"{ocr_skeleton(damaged)!r} vs {ocr_skeleton(clean)!r}"
+    )
+
+
+@pytest.mark.parametrize("a,b", [
+    # b/h is deliberately NOT folded: it would make these the same skeleton and
+    # both are real German surnames -- the one collision in the table that could
+    # redact the wrong person's name.
+    ("Bauer", "Hauer"),
+    ("Koch", "Kock"),
+    ("Berg", "Burg"),
+    ("Fischer", "Fisher"),
+])
+def test_the_ocr_skeleton_does_not_collide_real_surnames(a, b):
+    from anonymizer.core import ocr_skeleton
+
+    assert ocr_skeleton(a) != ocr_skeleton(b), f"{a!r} and {b!r} collided on {ocr_skeleton(a)!r}"
+
+
+def test_an_ocr_damaged_name_inherits_its_clean_twins_corroboration():
+    """A scanner mangles SOME occurrences and not others, so "Mul1er" forms its own
+    group beside a corroborated "Mueller" and was demoted -- leaving the surname
+    legible in exactly the documents where it was hardest to read.
+
+    Note this is INHERITANCE, not a new source: tagging the OCR match "propagation"
+    (the first attempt) rescued nothing, because propagation is deliberately not
+    corroboration -- so the damaged group was still demoted."""
+    from anonymizer import core
+    from anonymizer.models import Finding as F
+
+    cfg = {"entities": {}, "tiers": {"high": 0.9, "medium": 0.5}, "corroboration_only": True}
+    result = core.build_scan_result(
+        [
+            F("PERSON", "Mueller", 0.86, "c", "u1", 0, 7, source="PatternRecognizer"),
+            F("NER_MISC", "Mul1er", 0.85, "c", "u2", 0, 6, source="SpacyRecognizer"),
+            # An unrelated damaged-looking token with no corroborated twin still demotes.
+            F("NER_MISC", "Datenfeeds", 0.85, "c", "u3", 0, 10, source="SpacyRecognizer"),
+        ],
+        [TextUnit("u", "x")], cfg,
+    )
+    kept = {g.value for g in result.all_actionable()}
+    assert "Mul1er" in kept, f"the OCR-damaged spelling leaked: {kept}"
+    assert {g.value for g in result.demoted} == {"Datenfeeds"}, [g.value for g in result.demoted]
+
+
+def test_an_ambiguous_ocr_skeleton_is_never_inherited():
+    """If two DIFFERENT corroborated names fold to the same skeleton, nothing can
+    tell which one a damaged token was -- so it must not be guessed. Redacting a
+    person under another person's pseudonym is worse than surfacing for review."""
+    from anonymizer import core
+    from anonymizer.models import Finding as F
+
+    cfg = {"entities": {}, "tiers": {"high": 0.9, "medium": 0.5}, "corroboration_only": True}
+    result = core.build_scan_result(
+        [
+            F("PERSON", "Muller", 0.86, "c", "u1", 0, 6, source="PatternRecognizer"),
+            F("PERSON", "Müller", 0.86, "c", "u2", 0, 6, source="PatternRecognizer"),
+            F("NER_MISC", "Mul1er", 0.85, "c", "u3", 0, 6, source="SpacyRecognizer"),
+        ],
+        [TextUnit("u", "x")], cfg,
+    )
+    assert "Mul1er" in {g.value for g in result.demoted}, [g.value for g in result.demoted]

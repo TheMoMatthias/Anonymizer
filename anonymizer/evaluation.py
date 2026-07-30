@@ -684,6 +684,57 @@ def _occurrences_caught(result, surname: str) -> int:
     return min(per_token) if per_token else 0
 
 
+# How a scanner actually damages a name: some occurrences survive, some do not.
+# Keys are the CLEAN surname, values the damaged spelling planted alongside it.
+OCR_DAMAGE_PAIRS: list[tuple[str, str]] = [
+    ("Winkler", "Wlnkler"),
+    ("Müller", "Mul1er"),
+    ("Müller", "Miiller"),
+    ("Osterkamp", "0sterkamp"),
+    ("Kretschmar", "Kretschrnar"),
+    ("Nagelschmidt", "Nagelschmldt"),
+    ("Habermehl", "Habermebl"),
+    ("Schwanitz", "Sclnvanitz"),
+]
+
+
+def measure_mixed_ocr_documents(analyzer, config: dict, workdir: Path) -> list[StratumResult]:
+    """A scanned letter where the name survives cleanly in some places and is
+    mangled in others.
+
+    This is the realistic shape, and it is the one that is actually fixable: the
+    fully-damaged stratum above has no clean spelling anywhere to recognise the
+    damaged one from, so it measures a hard floor. Here the salutation reads
+    correctly, the body does not, and the question is whether the tool connects
+    them. Scored on the DAMAGED occurrences only -- the clean ones were never in
+    doubt."""
+    from docx import Document
+
+    from .pipeline import scan_document
+
+    results: list[StratumResult] = []
+    r = StratumResult(stratum="ocr_mixed", context="damaged_occurrences")
+    for i, (clean, damaged) in enumerate(OCR_DAMAGE_PAIRS):
+        doc = Document()
+        doc.add_paragraph(_salutation("", clean))          # survived the scan
+        doc.add_paragraph(FILLER)
+        doc.add_paragraph(_prose_oblique("", damaged))     # mangled
+        doc.add_paragraph(_labelled_field("", damaged))    # mangled
+        table = doc.add_table(rows=1, cols=1)
+        table.rows[0].cells[0].text = damaged              # mangled
+        path = workdir / f"scan_{i}.docx"
+        doc.save(path)
+
+        planted = 3
+        caught = _occurrences_caught(scan_document(path, analyzer, config), damaged)
+        r.total += planted
+        r.found += min(caught, planted)
+        if caught < planted:
+            r.missed.append(f"{damaged}<-{clean}({caught}/{planted})")
+    results.append(r)
+    return results
+
+
 def measure_unanchored_documents(analyzer, config: dict, workdir: Path) -> list[StratumResult]:
     """The hardest realistic document: an internal memo that names a person
     several times and NEVER once with an honorific or a "Kunde:" label.
