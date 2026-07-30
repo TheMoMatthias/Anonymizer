@@ -1368,3 +1368,123 @@ def test_an_ambiguous_ocr_skeleton_is_never_inherited():
         [TextUnit("u", "x")], cfg,
     )
     assert "Mul1er" in {g.value for g in result.demoted}, [g.value for g in result.demoted]
+
+
+# --- 2026-07-30: proprietary product / project names --------------------------
+
+
+def test_a_listed_product_name_corroborates_whatever_the_model_guessed(analyzer, base_config):
+    """Measured on the audit fixture: every tool name that appeared once in a column
+    headed "Eingesetztes Tool" was learned from the document's own structure and then
+    found everywhere. The only two that LEAKED (Alteryx, OpenClaw) were the two that
+    appear ONLY in prose, with no declaring column to learn them from -- and the model
+    typed both LOCATION, a bare guess that corroboration-only demotes.
+
+    Note this is corroboration across ALL the NER types, not one: the model has no idea
+    what kind of thing a proprietary name is and guessed LOCATION here, ORGANIZATION and
+    MISC for other tools in the same file.
+
+    CORROBORATION, NOT DETECTION -- and the distinction is load-bearing here. The
+    gazetteer never creates a finding, so in a short sentence where the model produces
+    no candidate at all there is nothing for it to confirm; what it fixes is the case
+    where a candidate EXISTS but reads as a bare guess.
+    """
+    from anonymizer.core import _GATED_NER_SOURCES, PRODUCT_NAME_SOURCE, is_known_product
+    from anonymizer.models import Finding as F
+
+    assert is_known_product("Alteryx")
+    assert is_known_product("alteryx"), "matching must be case-insensitive"
+    assert is_known_product("Kondor+"), "punctuation in a product name must survive"
+    assert not is_known_product("Portfoliobeitrag")
+    # The source it re-stamps must actually count as corroboration.
+    assert PRODUCT_NAME_SOURCE not in _GATED_NER_SOURCES
+
+    # A LOCATION guess on a listed product survives corroboration-only; an
+    # unlisted one is still demoted.
+    from anonymizer import core
+
+    cfg = {"entities": {}, "tiers": {"high": 0.9, "medium": 0.5}, "corroboration_only": True}
+    result = core.build_scan_result(
+        [
+            F("LOCATION", "Alteryx", 0.85, "c", "u1", 0, 7, source=PRODUCT_NAME_SOURCE),
+            F("LOCATION", "Datenfeeds", 0.85, "c", "u2", 0, 10, source="SpacyRecognizer"),
+        ],
+        [TextUnit("u", "x")], cfg,
+    )
+    assert "Alteryx" in {g.value for g in result.all_actionable()}
+    assert {g.value for g in result.demoted} == {"Datenfeeds"}
+
+
+def test_the_project_list_is_what_catches_an_internal_codename(monkeypatch):
+    """Codenames are chosen to be unremarkable, so they are ordinary German words --
+    "Nordstern", "Seidenpfad", "Habicht", "Delphin" are all in the audit fixture and all
+    normal nouns. No shipped list and no heuristic can find those; project_names.txt is
+    the mechanism, which is why it ships empty rather than absent."""
+    from anonymizer import core
+
+    # The shipped list cannot contain an internal codename, by construction.
+    assert not core.is_known_product("OpenClaw")
+
+    # Adding it to the user's own list is what finds it.
+    monkeypatch.setattr(core, "_product_names", lambda: frozenset({"openclaw", "nordstern"}))
+    assert core.is_known_product("OpenClaw")
+    assert core.is_known_product("nordstern")
+
+
+def test_a_missing_product_list_degrades_instead_of_failing(monkeypatch, tmp_path):
+    """Same contract as the given-name list: a detection INPUT that can hard-fail a scan
+    by being absent would be a worse bug than the recall it buys."""
+    from anonymizer import core
+
+    core._product_names.cache_clear()
+    monkeypatch.setattr(core, "_PRODUCT_NAMES_PATHS", (tmp_path / "nope.txt",))
+    try:
+        assert core._product_names() == frozenset()
+        assert not core.is_known_product("Alteryx")
+    finally:
+        core._product_names.cache_clear()  # the real list must be reloaded for other tests
+
+
+@pytest.mark.parametrize("word,expected", [
+    # Proprietary: neither German vocabulary nor a German compound.
+    ("Alteryx", True), ("Signavio", True), ("Camunda", True), ("Collibra", True),
+    # German COMPOUNDS are absent from any word list while being entirely ordinary.
+    # Three-part splitting is what gets Marktdatengrundlage right.
+    ("Portfoliobeitrag", False), ("Marktdatengrundlage", False), ("Bearbeitungszeit", False),
+    ("Hauptzielgruppe", False), ("Projektlaufzeit", False),
+    # Nominalizer suffixes are German morphology however absent from a vector table.
+    ("Derivatefreiheit", False), ("Effizienz", False), ("Reaktionszeiten", False),
+    # ALL-CAPS is an acronym or field code, not a product-name shape.
+    ("CAPEX", False), ("OPEX", False),
+    # ASCII-transliterated umlauts are ordinary German business text.
+    ("Geschaeftsbedingungen", False),
+])
+def test_proprietary_name_heuristic_separates_products_from_german_compounds(
+    analyzer, word, expected
+):
+    from anonymizer.core import looks_like_proprietary_name
+
+    vocab = analyzer.nlp_engine.nlp["de"].vocab
+    known = lambda w: vocab[w].has_vector  # noqa: E731
+    assert looks_like_proprietary_name(word, known) is expected, word
+
+
+def test_a_proprietary_candidate_stays_in_the_demoted_band():
+    """The weakest signal the tool produces, so it must never reach the list the tool
+    acts on. Measured without the guard: the exact-value inheritance rule promoted these
+    and they cost 3 decoy false positives."""
+    from anonymizer import core
+    from anonymizer.models import Finding as F
+
+    cfg = {"entities": {}, "tiers": {"high": 0.9, "medium": 0.5}, "corroboration_only": True}
+    result = core.build_scan_result(
+        [
+            # The same value corroborated elsewhere would normally promote the group.
+            F("PERSON", "Zephyrix", 0.86, "c", "u1", 0, 8, source="PatternRecognizer"),
+            F("NER_MISC", "Zephyrix", 0.85, "c", "u2", 0, 8,
+              source=core.PROPRIETARY_CANDIDATE_SOURCE),
+        ],
+        [TextUnit("u", "x")], cfg,
+    )
+    assert "Zephyrix" in {g.value for g in result.demoted}, [g.value for g in result.demoted]
+    assert all(g.entity_type != "NER_MISC" for g in result.all_actionable())

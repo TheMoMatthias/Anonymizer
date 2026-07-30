@@ -1,0 +1,137 @@
+# Commercial software, platforms and vendors a German bank plausibly runs.
+#
+# WHY THIS FILE EXISTS. A proprietary product name has no internal signal. In
+# German it cannot even be told apart by capitalisation, because German
+# capitalises EVERY noun -- "Die Anbindung an Alteryx" offers the detector no way
+# to see that one of those two nouns is a product and the other is ordinary
+# vocabulary. Measured on the audit fixture: every tool name that appeared once in
+# a column headed "Eingesetztes Tool" was learned from the document's own
+# structure and then found everywhere, including prose; the only two that leaked
+# (Alteryx, OpenClaw) were the two that appear ONLY in prose, with no declaring
+# column to learn them from. This file is what covers that case.
+#
+# HOW IT IS USED. Corroboration, not detection: an entry here never creates a
+# finding on its own, it re-sources an existing candidate so it stops counting as
+# a bare model guess. That is the same mechanism as given_names.txt.
+#
+# ADD YOUR OWN. Internal project codenames belong in project_names.txt, not here.
+# No shipped list can guess them, and they are frequently ordinary German words
+# chosen precisely because they are unremarkable ("Nordstern", "Seidenpfad",
+# "Habicht") -- which is why no heuristic can find them either.
+#
+# One entry per line, case-insensitive, blank lines and #-comments ignored.
+
+# --- core banking / capital markets -----------------------------------------
+Murex
+Kondor+
+Calypso
+Finastra
+Avaloq
+Temenos
+Finacle
+OpenLink
+Endur
+Summit
+Adaptiv
+SimCorp Dimension
+Charles River
+Aladdin
+Bloomberg Terminal
+Refinitiv Eikon
+MarketMap
+FactSet
+Moody's Analytics
+RiskMetrics
+
+# --- regulatory / reporting --------------------------------------------------
+Abacus360
+BAIS
+AxiomSL
+Vermeg
+Regnology
+OneSumX
+Fernbach
+Actico
+SmartStream
+
+# --- payments / cards ---------------------------------------------------------
+SWIFT Alliance
+TARGET2
+SEPAmail
+PPI TRAVIC
+Bottomline
+ACI Worldwide
+
+# --- data / analytics / integration -------------------------------------------
+Alteryx
+Collibra
+Informatica
+Talend
+Denodo
+Snowflake
+Databricks
+Palantir Foundry
+Qlik Sense
+QlikView
+MicroStrategy
+Looker
+Tableau
+Power BI
+SAS Viya
+Dataiku
+Matillion
+Fivetran
+dbt Cloud
+
+# --- process / workflow / BPM --------------------------------------------------
+Signavio
+Camunda
+Appian
+Pega
+Bizagi
+Nintex
+UiPath
+Blue Prism
+Automation Anywhere
+Celonis
+
+# --- ERP / CRM / HR -------------------------------------------------------------
+SAP S/4HANA
+SAP HANA
+Salesforce
+Workday
+SuccessFactors
+Dynamics 365
+ServiceNow
+Personio
+DATEV
+
+# --- collaboration / dev ---------------------------------------------------------
+Confluence
+Jira
+Bitbucket
+GitLab
+GitHub Enterprise
+Azure DevOps
+Artifactory
+SonarQube
+Splunk
+Dynatrace
+Grafana
+PagerDuty
+
+# --- document / archive / ECM ------------------------------------------------------
+d.velop
+DocuWare
+OpenText
+Alfresco
+SER Doxis
+ELO ECM
+Adobe Sign
+DocuSign
+
+# --- language / OCR ------------------------------------------------------------------
+DeepL Pro
+ABBYY FineReader
+Kofax
+Tesseract

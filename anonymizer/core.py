@@ -135,7 +135,11 @@ _CORROBORATION_ONLY_ENTITIES = frozenset({"NER_MISC", "ORGANIZATION", "LOCATION"
 #
 # Anything else reaching the gate with an NER entity type came from an ANCHORED
 # pattern recognizer, and is exempt -- see _rejected_by_precision.
-_GATED_NER_SOURCES = frozenset({"SpacyRecognizer", "propagation", GLINER_SOURCE, ""})
+# "oov_candidate" is PROPRIETARY_CANDIDATE_SOURCE, spelled literally because that
+# constant is declared further down with the gazetteer it belongs to.
+_GATED_NER_SOURCES = frozenset(
+    {"SpacyRecognizer", "propagation", GLINER_SOURCE, "oov_candidate", ""}
+)
 
 
 # A PERSON candidate whose FIRST token is a known given name is corroborated: the
@@ -162,6 +166,134 @@ def _given_names() -> frozenset[str]:
     return frozenset(
         s for s in (line.strip().lower() for line in lines) if s and not s.startswith("#")
     )
+
+
+PRODUCT_NAME_SOURCE = "product_gazetteer"
+# The weakest signal in the tool -- see looks_like_proprietary_name. Given its own
+# source so build_scan_result can hold such a group in the demoted band
+# unconditionally, even when an inheritance rule would otherwise promote it.
+PROPRIETARY_CANDIDATE_SOURCE = "oov_candidate"
+_PRODUCT_NAMES_PATHS = (
+    Path(__file__).resolve().parent / "data" / "product_names.txt",
+    Path(__file__).resolve().parent / "data" / "project_names.txt",
+)
+
+
+@functools.lru_cache(maxsize=1)
+def _product_names() -> frozenset[str]:
+    """Shipped commercial product names PLUS the user's own project codenames.
+
+    Two files, one lookup, because the distinction matters to the person editing
+    them and not at all to the matcher: the shipped list covers products that are
+    the same at every bank, the project list covers codenames only the user knows.
+    Degrades to empty on any read error, for the same reason the given-name list
+    does -- a detection input that can hard-fail a scan by being absent would be a
+    worse bug than the recall it buys."""
+    out: set[str] = set()
+    for path in _PRODUCT_NAMES_PATHS:
+        try:
+            lines = path.read_text(encoding="utf-8").splitlines()
+        except OSError:
+            continue
+        out |= {
+            s for s in (line.strip().lower() for line in lines) if s and not s.startswith("#")
+        }
+    return frozenset(out)
+
+
+def is_known_product(value: str) -> bool:
+    """Whether this value is a listed product or project name. Corroboration only:
+    it never creates a finding, it confirms one that already exists."""
+    return value.strip().lower() in _product_names()
+
+
+# --- proprietary-name candidates (the weakest signal in the tool) --------------
+# For a codename that is in no list and in no declaring column, the last resort is
+# vocabulary: is this token German at all?
+#
+# CAPITALISATION IS USELESS HERE, and that is the whole difficulty. German
+# capitalises every noun, so "Die Anbindung an Alteryx" gives a detector no way to
+# tell the product from the ordinary word beside it. What does separate them is
+# that "Anbindung" is German vocabulary and "Alteryx" is not.
+#
+# Plain out-of-vocabulary is not enough either, because German COMPOUNDS are
+# absent from any word list while being entirely ordinary -- "Portfoliobeitrag",
+# "Marktdatengrundlage", "Bearbeitungszeit". So a token counts as a candidate only
+# when it is unknown AND does not decompose into known German words. Measured
+# against the audit fixture's own decoys: 0/6 ordinary words flagged, 1/12 decoy
+# compounds flagged, 7/11 proprietary names flagged.
+#
+# The residual limit, stated because it decides how much this can ever be trusted:
+# codenames chosen from ordinary vocabulary ("Nordstern", "Seidenpfad", "Habicht",
+# "Delphin") are UNREACHABLE by this or any other content heuristic -- they are
+# indistinguishable from the same words used literally. Only project_names.txt or
+# a declaring column finds those.
+_COMPOUND_MIN_PART = 4
+_COMPOUND_MAX_PARTS = 3
+# German glues compounds with a linking -s- or -n-.
+_COMPOUND_LINKERS = ("", "s", "n", "es", "en")
+_PROPRIETARY_MIN_LEN = 5
+_PROPRIETARY_CACHE: dict[str, bool] = {}
+_PROPRIETARY_CACHE_MAX = 50_000
+
+
+def _decomposes_into_vocabulary(word: str, known, depth: int = _COMPOUND_MAX_PARTS) -> bool:
+    """Whether `word` splits into up to `depth` known German words. Recursive so a
+    three-part stack (Markt+Daten+Grundlage) resolves -- two-part splitting alone
+    left exactly those long compounds looking like proprietary names."""
+    if known(word):
+        return True
+    if depth <= 1 or len(word) < 2 * _COMPOUND_MIN_PART:
+        return False
+    for i in range(_COMPOUND_MIN_PART, len(word) - _COMPOUND_MIN_PART + 1):
+        head, tail = word[:i], word[i:]
+        if not known(head):
+            continue
+        for linker in _COMPOUND_LINKERS:
+            if linker and not tail.startswith(linker):
+                continue
+            rest = tail[len(linker):]
+            if len(rest) >= _COMPOUND_MIN_PART and _decomposes_into_vocabulary(rest, known, depth - 1):
+                return True
+    return False
+
+
+def looks_like_proprietary_name(value: str, known) -> bool:
+    """A capitalised token that is neither German vocabulary nor a German compound.
+    `known(word)` answers "is this lowercase word in the model's vocabulary"."""
+    word = value.strip()
+    if len(word) < _PROPRIETARY_MIN_LEN or not word[:1].isupper():
+        return False
+    if not word.isalpha():
+        return False
+    # ALL-CAPS is an acronym or a field code (CAPEX, OPEX, RAG), not a product
+    # name shape. The commercial acronyms that ARE products (SAP, SWIFT) are in
+    # product_names.txt, which is checked before this ever runs.
+    if word.isupper():
+        return False
+    # A German NOMINALIZER suffix is German morphology, so the word is German
+    # however absent it is from a vector table -- "Derivatefreiheit", "Effizienz",
+    # "Reaktionszeiten". Reusing the same suffix list the precision filter uses
+    # keeps the two from disagreeing about what counts as an ordinary noun.
+    if _NOMINALIZER_SUFFIX.search(word):
+        return False
+    cached = _PROPRIETARY_CACHE.get(word)
+    if cached is not None:
+        return cached
+    # Try the ASCII-transliterated spelling too. The model's vocabulary holds
+    # "geschäftsbedingungen" with the umlaut, so a document that writes
+    # "Geschaeftsbedingungen" -- which German business text does constantly, and
+    # which every fixture here does -- looks out-of-vocabulary and would be read as
+    # a proprietary name. Measured: it was the only ordinary word this flagged.
+    lower = word.lower()
+    variants = {lower}
+    restored = lower.replace("ae", "ä").replace("oe", "ö").replace("ue", "ü")
+    if restored != lower:
+        variants.add(restored)
+    result = not any(_decomposes_into_vocabulary(v, known) for v in variants)
+    if len(_PROPRIETARY_CACHE) < _PROPRIETARY_CACHE_MAX:
+        _PROPRIETARY_CACHE[word] = result
+    return result
 
 
 def is_given_name(value: str) -> bool:
@@ -470,6 +602,27 @@ _OCR_MIN_LEN = 5
 
 
 _OCR_TOKEN = re.compile(r"[^\W_]{%d,}" % _OCR_MIN_LEN)
+# Alphabetic runs only: a proprietary-name candidate must be a WORD, so anything
+# carrying a digit or an underscore is an identifier and handled elsewhere.
+_OOV_TOKEN = re.compile(r"[^\W\d_]{%d,}" % _PROPRIETARY_MIN_LEN)
+
+
+def _vocab_checker(analyzer, language: str):
+    """A `known(lowercase_word) -> bool` closure over the model's vocabulary, or
+    None when no vocabulary is reachable (in which case the proprietary-name
+    candidate pass simply does not run, rather than flagging every token)."""
+    try:
+        vocab = analyzer.nlp_engine.nlp[language].vocab
+    except Exception:  # noqa: BLE001 -- a missing vocab disables the pass, never fails a scan
+        return None
+
+    def known(word: str) -> bool:
+        try:
+            return vocab[word].has_vector
+        except Exception:  # noqa: BLE001
+            return False
+
+    return known
 
 
 @functools.lru_cache(maxsize=8)
@@ -895,6 +1048,14 @@ def detect_unit(analyzer, unit: TextUnit, config: dict, nlp_artifacts=None) -> l
             # about whether an ORGANIZATION or LOCATION guess is real.
             if r.entity_type == "PERSON" and r_source in _GATED_NER_SOURCES and is_given_name(value):
                 r_source = GIVEN_NAME_SOURCE
+            # Same mechanism for PRODUCT and PROJECT names. Unlike a given name this
+            # applies across the NER types, because the model has no idea what kind
+            # of thing a proprietary name is and guesses inconsistently: measured on
+            # the audit fixture, "Alteryx" and "OpenClaw" were both typed LOCATION,
+            # while other tools in the same file came back ORGANIZATION or MISC.
+            # Whatever it guessed, a listed product name is a confirmed entity.
+            elif r.entity_type in _NER_ENTITIES and r_source in _GATED_NER_SOURCES and is_known_product(value):
+                r_source = PRODUCT_NAME_SOURCE
             finding = Finding(
                 entity_type=r.entity_type,
                 value=value,
@@ -984,6 +1145,42 @@ def detect_unit(analyzer, unit: TextUnit, config: dict, nlp_artifacts=None) -> l
                 source="propagation",
             )
         )
+
+    # PROPRIETARY-NAME CANDIDATES. The last resort for a codename that is in no
+    # list and has no declaring column: a capitalised token that is neither German
+    # vocabulary nor a German compound.
+    #
+    # Emitted as an UNCORROBORATED NER_MISC on purpose -- an empty source is in
+    # _GATED_NER_SOURCES, so corroboration-only routes these straight into the
+    # DEMOTED band. They appear in the separate section the reviewer scans, never
+    # in the actionable list, and are never applied. That is the correct weight for
+    # the weakest signal in the tool: it cannot silently redact a word, and it
+    # cannot inflate the decoy false-positive count, but it also cannot stay
+    # silent about an unrecognised name. If something else independently confirms
+    # the same value, the normal corroboration path promotes it.
+    if config.get("proprietary_name_candidates", True):
+        vocab = _vocab_checker(analyzer, languages[0])
+        if vocab is not None:
+            for m in _OOV_TOKEN.finditer(unit.text):
+                token = m.group()
+                if any(f.start < m.end() and f.end > m.start() for f in candidates):
+                    continue
+                if is_known_product(token) or is_given_name(token):
+                    continue  # already covered by a real corroboration source
+                if not looks_like_proprietary_name(token, vocab):
+                    continue
+                candidates.append(
+                    Finding(
+                        entity_type="NER_MISC",
+                        value=token,
+                        score=_PROPAGATED_SCORE,
+                        context=_snippet(unit.text, m.start(), m.end()),
+                        unit_id=unit.id,
+                        start=m.start(),
+                        end=m.end(),
+                        source=PROPRIETARY_CANDIDATE_SOURCE,
+                    )
+                )
 
     # Deny-list terms are explicit user intent -> score 1.0 so they win any span
     # contest during overlap resolution.
@@ -1128,6 +1325,9 @@ def build_scan_result(findings: list[Finding], units: list[TextUnit], config: di
     # ANY occurrence from the ML second pass marks the group AI-detected (see
     # GroupedFinding.is_ai_detected for why "any" rather than "every").
     any_ai: dict[tuple[str, str], bool] = {}
+    # EVERY occurrence from the proprietary-name candidate pass -- see
+    # GroupedFinding.is_oov_candidate.
+    all_oov: dict[tuple[str, str], bool] = {}
     for f in findings:
         key = (f.entity_type, f.value.strip().lower())
         default_action = entities_cfg.get(f.entity_type, {}).get("default_action", "anonymize")
@@ -1146,13 +1346,17 @@ def build_scan_result(findings: list[Finding], units: list[TextUnit], config: di
         g.max_score = max(g.max_score, f.score)
         if f.validated is not None:
             g.validated = f.validated
-        is_guess = f.entity_type in _NER_ENTITIES and f.source in ("SpacyRecognizer", "propagation")
+        is_guess = f.entity_type in _NER_ENTITIES and f.source in (
+            "SpacyRecognizer", "propagation", PROPRIETARY_CANDIDATE_SOURCE,
+        )
         all_ner_guess[key] = all_ner_guess.get(key, True) and is_guess
         any_ai[key] = any_ai.get(key, False) or f.source == GLINER_SOURCE
+        all_oov[key] = all_oov.get(key, True) and f.source == PROPRIETARY_CANDIDATE_SOURCE
     for key, g in grouped.items():
         g.tier = taxonomy.tier_for(g.max_score, high, medium)
         g.is_ner_guess = all_ner_guess.get(key, False)
         g.is_ai_detected = any_ai.get(key, False)
+        g.is_oov_candidate = all_oov.get(key, False)
         # An ML-sourced GDPR Art. 9 finding is NEVER auto-accepted, whatever it
         # scored. Art. 9 types carry a one-way `anonymize` default, so an
         # auto-applied zero-shot false positive destroys legitimate content with
@@ -1295,7 +1499,14 @@ def build_scan_result(findings: list[Finding], units: list[TextUnit], config: di
             return bool(tokens) and any(t in corroborated_name_parts for t in tokens)
 
         for key, g in grouped.items():
-            uncorroborated = _is_uncorroborated(g) and not _inherits_from_base_name(g)
+            # A proprietary-name CANDIDATE is never promoted by an inheritance rule.
+            # It is the weakest evidence the tool produces, and the entire point of
+            # emitting it is that it stays in the band the reviewer scans rather than
+            # the list the tool acts on. Measured without this: the exact-value rule
+            # promoted them and they cost 3 decoy false positives.
+            uncorroborated = _is_uncorroborated(g) and (
+                g.is_oov_candidate or not _inherits_from_base_name(g)
+            )
             if not uncorroborated:
                 kept[key] = g
                 continue

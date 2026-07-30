@@ -1,0 +1,27 @@
+# YOUR internal project and product codenames. Ships EMPTY on purpose.
+#
+# Nothing shipped with this tool could guess them, and no heuristic can find them
+# either. Measured, and worth understanding before you decide this file is
+# optional: codenames are usually chosen to be unremarkable, so they are ordinary
+# German words. "Nordstern", "Seidenpfad", "Habicht", "Delphin" and "Marschall"
+# are all in the audit fixture, and every one of them is a normal noun (north
+# star, silk path, hawk, dolphin, marshal). To a detector they are indistinguishable
+# from the same words used literally -- there is no spelling, shape, casing or
+# vocabulary signal separating "Projekt Delphin" from a sentence about dolphins.
+#
+# There are exactly two things that find such a name:
+#   1. the document declaring it -- a column headed "Projekt" or "Vorhaben", which
+#      the topical gazetteer already learns from automatically; and
+#   2. this file.
+# If your codenames only ever appear in prose (minutes, mails, comments), 1 cannot
+# help and this file is the only thing that will.
+#
+# Entries are CORROBORATION, not detection: listing a name here does not by itself
+# redact every occurrence of that word. It marks a candidate as confirmed so it is
+# no longer discarded as a bare model guess.
+#
+# One entry per line, case-insensitive, blank lines and #-comments ignored.
+# Example:
+#   Nordstern
+#   Seidenpfad
+#   Projekt Habicht

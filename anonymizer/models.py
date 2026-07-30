@@ -61,6 +61,13 @@ class GroupedFinding:
     # is the only reason a value is on screen for even one occurrence, the
     # reviewer should be told.
     is_ai_detected: bool = False
+    # True only if EVERY occurrence came from the proprietary-name candidate pass
+    # (a capitalised token that is neither German vocabulary nor a German
+    # compound). This is the WEAKEST signal the tool has, and it is a third state
+    # for the same reason is_ai_detected is: such a group must stay in the demoted
+    # review band even when an inheritance rule would otherwise promote it, and
+    # that decision cannot be expressed by is_ner_guess alone.
+    is_oov_candidate: bool = False
 
 
 @dataclass

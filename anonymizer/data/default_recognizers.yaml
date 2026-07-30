@@ -18,7 +18,7 @@
 # v11: German Art. 9 bare-value word lists gained the terms measure_recall.py
 # measured as leaking in the BARE form -- `neuapostolisch` (religion) and
 # `bandscheibenvorfall` / `migräne` (health) -- plus their unambiguous siblings.
-config_schema_version: 13
+config_schema_version: 14
 
 languages:
   - de
@@ -1052,3 +1052,16 @@ custom_recognizers:
     patterns:
       - regex: '(?<=\b(?:Nationality|Citizenship|Ethnicity|Ethnic\s+origin|Ethnic\s+group|Ethnic\s+background|Racial\s+origin|Race|National\s+origin|Country\s+of\s+birth|Place\s+of\s+birth)\s{0,3}[:=]\s{0,3})(?=[^\n;]*[\p{L}\d])(?!(?:none|nil|no|n\.?\s?a\.?|n\s*/\s*a|unknown|not\s+(?:stated|known|applicable|provided|recorded)|blank|empty)(?![\p{L}\d])[\s.,;]*$)[^\s\n;](?:(?:(?!\.(?:\s|$))[^\n;])*[^\s\n;.,])?'
         score: 0.86
+
+# Surface capitalised tokens that are neither German vocabulary nor a German
+# compound as PROPRIETARY-NAME CANDIDATES -- the last resort for an internal
+# codename that is in no list and has no declaring column.
+#
+# These land in the DEMOTED review band only. They never enter the actionable
+# list, are never applied, and cannot be promoted by any corroboration-inheritance
+# rule; they exist so the tool cannot stay silent about an unrecognised name.
+# Measured against the audit fixture's own decoys: 0/12 business-jargon compounds
+# and 0/6 ordinary words flagged, 7/11 proprietary names flagged.
+#
+# Set false to switch the pass off entirely.
+proprietary_name_candidates: true
