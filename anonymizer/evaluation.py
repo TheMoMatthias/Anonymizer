@@ -296,6 +296,25 @@ ART9_OBLIQUE_PROBES: dict[str, tuple[str, str]] = {
     "biometric": ("Fingerabdruck", "Die Freigabe erfolgt per Fingerabdruck des Kontoinhabers."),
 }
 
+# HELD-OUT Art. 9 probes: every value below is deliberately ABSENT from every
+# shipped word list, so it can only be caught by a disclosure FRAME. Kept as its
+# own stratum because it answers a different question from the probes above --
+# not "does coverage improve" but "does the mechanism GENERALIZE", which is the
+# only thing that distinguishes a real improvement from tuning the recognizer to
+# its own benchmark. If this stratum scores while the lists stay unchanged, the
+# frames are doing real work.
+ART9_HELDOUT_PROBES: dict[str, tuple[str, str]] = {
+    "frame_leidet_an": ("Sarkoidose", "Der Kunde leidet an einer chronischen Sarkoidose."),
+    "frame_erkrankt_an": ("Tuberkulose", "Die Mitarbeiterin ist im Mai an Tuberkulose erkrankt."),
+    "frame_angewiesen": ("Beatmungsgerät", "Sie ist nachts auf das Beatmungsgerät angewiesen."),
+    "frame_krank_wegen": ("Kniearthroskopie", "Er ist krankgeschrieben wegen einer Kniearthroskopie."),
+    "frame_konvertiert": ("Buddhismus", "Er konvertierte im Jahr 2018 zum Buddhismus."),
+    "frame_gewaehlt_in": ("Wirtschaftsausschuss", "Sie wurde in den Wirtschaftsausschuss gewählt."),
+    "frame_mitglied_im": ("Sprecherausschuss", "Er ist Mitglied im Sprecherausschuss der leitenden Angestellten."),
+    "frame_staemmig": ("kasachischstämmig", "Die Familie ist kasachischstämmig und seit 1998 hier."),
+}
+
+
 # --- structured-cell traps ----------------------------------------------------
 # The shapes a real "database" workbook stores names in, where the column HEADER
 # gives detection nothing to work with. Each trap is a column; each column gets
@@ -439,13 +458,11 @@ class _ValueFinding:
         self.value = value
 
 
-def measure_art9_oblique(analyzer, config: dict) -> list[StratumResult]:
-    """Art. 9 facts stated in plain sentences, with no label and no list word.
-    Scored on the one token that has to disappear for the fact to stay private."""
+def _measure_art9_probes(analyzer, config: dict, probes: dict, stratum: str) -> list[StratumResult]:
     cfg = {**config, "languages": ["de"]}
     results: list[StratumResult] = []
-    for label, (needle, text) in ART9_OBLIQUE_PROBES.items():
-        r = StratumResult(stratum="art9_oblique", context=label, total=1)
+    for label, (needle, text) in probes.items():
+        r = StratumResult(stratum=stratum, context=label, total=1)
         claimed = [_ValueFinding(v) for v in _actionable_values(analyzer, cfg, f"{FILLER} {text}")]
         if _found(claimed, needle):
             r.found = 1
@@ -453,6 +470,18 @@ def measure_art9_oblique(analyzer, config: dict) -> list[StratumResult]:
             r.missed.append(needle)
         results.append(r)
     return results
+
+
+def measure_art9_oblique(analyzer, config: dict) -> list[StratumResult]:
+    """Art. 9 facts stated in plain sentences, with no label and no list word.
+    Scored on the one token that has to disappear for the fact to stay private."""
+    return _measure_art9_probes(analyzer, config, ART9_OBLIQUE_PROBES, "art9_oblique")
+
+
+def measure_art9_heldout(analyzer, config: dict) -> list[StratumResult]:
+    """Art. 9 values that are in NO shipped word list, so only a frame can catch
+    them. This is the generalization check -- see ART9_HELDOUT_PROBES."""
+    return _measure_art9_probes(analyzer, config, ART9_HELDOUT_PROBES, "art9_heldout")
 
 
 # Art. 9 values as a spreadsheet stores them: a bare cell, under a header that

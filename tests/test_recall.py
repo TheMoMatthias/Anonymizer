@@ -1207,3 +1207,84 @@ def test_a_known_name_is_found_inside_an_underscore_identifier():
     for haystack in ["Bergstraße", "Winklerhof"]:
         (_et2, _v2, rx2), = _compiled_propagate_patterns((("PERSON", "Berg" if "Berg" in haystack else "Winkler"),))
         assert not rx2.search(haystack), f"over-matched inside {haystack!r}"
+
+
+# --- 2026-07-30: Art. 9 disclosure FRAMES ------------------------------------
+# The mechanism the word lists structurally cannot be. A frame keys on the
+# SENTENCE SHAPE, so it generalizes to conditions and bodies nobody listed.
+
+
+@pytest.mark.parametrize("text,needle", [
+    # HELD OUT of every shipped word list on purpose -- if these are caught, the
+    # frame generalizes rather than the list containing its own benchmark.
+    ("Der Kunde leidet an einer chronischen Sarkoidose.", "Sarkoidose"),
+    ("Die Mitarbeiterin ist im Mai an Tuberkulose erkrankt.", "Tuberkulose"),
+    ("Sie ist nachts auf das Beatmungsgeraet angewiesen.", "Beatmungsgeraet"),
+    ("Er ist krankgeschrieben wegen einer Kniearthroskopie.", "Kniearthroskopie"),
+    ("Er konvertierte im Jahr 2018 zum Buddhismus.", "Buddhismus"),
+    ("Sie wurde in den Wirtschaftsausschuss gewaehlt.", "Wirtschaftsausschuss"),
+])
+def test_an_art9_frame_catches_a_value_no_word_list_contains(analyzer, base_config, text, needle):
+    found = {f.value for f in _art9(analyzer, base_config, text)}
+    assert any(needle in v for v in found), f"{needle!r} leaked from {text!r}: {found}"
+
+
+@pytest.mark.parametrize("text,needle", [
+    # The half a frame CANNOT reach: "besucht die Moschee" and "besucht die
+    # Filiale" are the same shape, so only vocabulary separates them.
+    ("Er besucht jeden Freitag die Moschee in der Innenstadt.", "Moschee"),
+    ("Waehrend des Ramadan bittet sie um spaetere Termine.", "Ramadan"),
+    ("Er wurde in den Betriebsrat gewaehlt und ist freigestellt.", "Betriebsrat"),
+    ("Fuer die Ausfalltage wurde Streikgeld ausgezahlt.", "Streikgeld"),
+    ("Die Familie kam 1994 als Kontingentfluechtlinge nach Deutschland.", "Kontingentfl"),
+    ("Das Beratungsgespraech wurde auf Romanes gefuehrt.", "Romanes"),
+    ("Der Kunde ist dauerhaft auf den Rollstuhl angewiesen.", "Rollstuhl"),
+])
+def test_art9_vocabulary_covers_what_a_frame_cannot(analyzer, base_config, text, needle):
+    found = {f.value for f in _art9(analyzer, base_config, text)}
+    assert any(needle in v for v in found), f"{needle!r} leaked from {text!r}: {found}"
+
+
+@pytest.mark.parametrize("text", [
+    # Every "...gemeinde" term was tried in the religion list and REMOVED: they sit
+    # uninflected inside organisation names, which breaks the property that makes
+    # these lists safe to extend -- they match uninflected forms only, so \b fails
+    # on a trailing inflection and org names survive. This pins that they stay out.
+    "Neuapostolische Kirchengemeinde Frankfurt",
+    "Evangelische Freikirche Bonn e.V.",
+    "Katholische Pfarrgemeinde St. Martin",
+])
+def test_religion_vocabulary_still_leaves_organisation_names_intact(analyzer, base_config, text):
+    found = {f.value for f in _art9(analyzer, base_config, text)}
+    assert not found, f"an organisation name was claimed as Art. 9 data: {found}"
+
+
+def test_art9_frames_stay_in_the_review_tier(analyzer, base_config):
+    """These entity types carry a one-way `anonymize` action. A frame match is
+    strong evidence but not proof, and one-way destruction is unrecoverable -- so a
+    frame must never reach the auto-accept tier. The reviewer decides."""
+    findings = _art9(analyzer, base_config, "Der Kunde leidet an einer chronischen Sarkoidose.")
+    assert findings
+    assert all(f.score < base_config["tiers"]["high"] for f in findings), [
+        (f.value, f.score) for f in findings
+    ]
+
+
+def test_same_sex_partnership_is_detected_from_the_possessive_alone(analyzer, base_config):
+    """German marks it in the POSSESSIVE: "seine Ehefrau" is an ordinary man's wife,
+    "ihre Ehefrau" is a woman's wife. That pronoun is the entire Art. 9 signal, which
+    is exactly why a bare "Ehefrau" must never be listed -- it would flag every married
+    customer in the file and destroy the word one-way."""
+    found = {f.value for f in _art9(analyzer, base_config, "Sie lebt mit ihrer Ehefrau in Koeln.")}
+    assert any("Ehefrau" in v for v in found), f"same-sex partnership leaked: {found}"
+
+    ordinary = {f.value for f in _art9(analyzer, base_config, "Er hat das Konto mit seiner Ehefrau eroeffnet.")}
+    assert not any("Ehefrau" in v for v in ordinary), f"an ordinary marriage was claimed: {ordinary}"
+
+
+def test_a_party_is_detected_mid_sentence_with_a_lowercase_article(analyzer, base_config):
+    """A party is named mid-sentence far more often than at its start. With a
+    capital-only "Die Gruenen" the most ordinary phrasing there is went unmatched, and
+    political_party measured 0%."""
+    found = {f.value for f in _art9(analyzer, base_config, "Er kandidierte bei der Kommunalwahl fuer die Gruenen.")}
+    assert any("rünen" in v or "ruenen" in v for v in found), f"party affiliation leaked: {found}"

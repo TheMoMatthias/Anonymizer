@@ -18,6 +18,7 @@ from anonymizer.config import DEFAULT_CONFIG_PATH
 from anonymizer.engine import build_analyzer
 from anonymizer.evaluation import (
     format_report,
+    measure_art9_heldout,
     measure_art9_oblique,
     measure_art9_structured,
     measure_documents,
@@ -44,6 +45,9 @@ def main() -> None:
     sections = {
         "STRUCTURED IDENTIFIERS (checksummed/patterned -- expect ~100%)": measure_structured(analyzer, config),
         "ART. 9 STATED OBLIQUELY (no label, no list word -- the heaviest miss)": measure_art9_oblique(
+            analyzer, config
+        ),
+        "ART. 9 HELD OUT (in no word list -- can only be caught by a FRAME)": measure_art9_heldout(
             analyzer, config
         ),
         "NAMES, ISOLATED (one occurrence, cold read -- pessimistic)": measure_isolated(analyzer, config),

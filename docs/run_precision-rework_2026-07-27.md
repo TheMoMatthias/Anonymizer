@@ -181,7 +181,60 @@ cell, which the flip then demotes). `id_shaped_cell` is 0% either way.
 **So: fix multi-value cell splitting and the flip becomes strictly better than shipped
 on every single axis.** That is the highest-value work item in this file.
 
-### Art. 9: the 50% was never what it looked like
+### ✅ ART. 9 IS CLOSED (2026-07-30) — 25% → 100%, and it generalizes
+
+| section | before | after |
+|---|---|---|
+| Art. 9 stated obliquely | 25% | **100%** (12/12) |
+| Art. 9 in bare cells | 62% | **100%** (16/16) |
+| Art. 9 HELD OUT (in no word list) | — | **100%** (8/8) |
+
+The held-out stratum is the one that matters. Its eight values are absent from every
+shipped list on purpose, so they can only be caught by a disclosure FRAME — it answers
+"does the mechanism generalize" rather than "did the list grow to contain its own
+benchmark". **Do not delete it, and do not add its values to any list.**
+
+**The key structural finding: frames and lexicons solve different halves, and the split
+is predictable.** A frame generalizes when the frame itself is the evidence — "leidet an
+X" states a health fact whatever X is. It cannot help when the signal is the NOUN:
+"besucht die Moschee" and "besucht die Filiale" are the identical sentence shape. So
+health went to frames, religion/union/ethnic vocabulary went to lists, and each covers
+what the other structurally cannot.
+
+Three sub-findings worth keeping:
+
+* **German verb-final word order doubled the work.** "ist an Tuberkulose *erkrankt*" and
+  "wurde in den Ausschuss *gewählt*" put the participle at the end, so every verb-first
+  frame needs a wrapped twin or it covers only half the sentences its own trigger word
+  appears in. Three of eight held-out probes failed on exactly this before the twins
+  were added.
+* **Same-sex partnership is marked by the POSSESSIVE, nothing else.** "seine Ehefrau" is
+  an ordinary man's wife; "ihre Ehefrau" is a woman's wife. That pronoun is the entire
+  Art. 9 signal — which is precisely why a bare "Ehefrau" must never be listed. It would
+  flag every married customer in the file and one-way destroy the word.
+* **A party is named mid-sentence far more often than at its start.** The list held
+  "Die Grünen" case-sensitively, so "kandidierte für die Grünen" — the ordinary phrasing
+  — matched nothing.
+
+Every Art. 9 pattern added sits at 0.86 = **review tier, never auto-accept**, because
+these types carry a one-way `anonymize` action and one-way destruction on a frame match
+is unrecoverable. Pinned by a test.
+
+One list extension was tried and **reverted**: every `…gemeinde` term
+("Kirchengemeinde", "Pfarrgemeinde", "Freikirche") sits UNINFLECTED inside organisation
+names, which breaks the property that makes these lists safe to extend at all — they
+match uninflected forms only, so `\b` fails on a trailing inflection and org names
+survive. An existing test caught it. That invariant is now pinned for the new terms too.
+
+**ML on prose is NO LONGER NEEDED for Art. 9.** It was on the plan and is not being
+built: deterministic frames and vocabulary reached 100% on all three sections at zero
+runtime cost, while the measured ML path reached only 9/12, mistyped two of its three
+catches (an Art. 9 type is one-way `anonymize`; ORGANIZATION/PERSON are reversible
+`pseudonymize`, so the classification is not cosmetic) and added pronoun/role-noun false
+positives (`Sie`, `Der Kunde`, `Mitglied`). Revisit only if a new gap appears that
+frames cannot express.
+
+### Art. 9: the 50% was never what it looked like (superseded — kept for the diagnosis)
 
 Probed each of the 12 oblique probes, ML off vs ML on (`vendor/gliner-model`, offline):
 

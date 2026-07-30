@@ -18,7 +18,7 @@
 # v11: German Art. 9 bare-value word lists gained the terms measure_recall.py
 # measured as leaking in the BARE form -- `neuapostolisch` (religion) and
 # `bandscheibenvorfall` / `migräne` (health) -- plus their unambiguous siblings.
-config_schema_version: 12
+config_schema_version: 13
 
 languages:
   - de
@@ -719,6 +719,53 @@ custom_recognizers:
       # safe: an arbitrary following word would swallow ordinary prose.
       - regex: '(?<=\b(?:Grad der Behinderung|Behinderungsgrad|Pflegestufe|Pflegegrad|GdB)\s{1,3})\d{1,3}\b'
         score: 0.86
+  # DISCLOSURE FRAMES. The mechanism the word lists structurally cannot be:
+  # they generalize to conditions nobody thought to list, because the SENTENCE
+  # SHAPE carries the signal rather than the noun. "leidet an X" states a health
+  # fact whatever X is -- including a condition invented next year.
+  #
+  # Note carefully where this does and does not work, because it decides which
+  # tool to reach for per category: a frame generalizes when the frame itself is
+  # the evidence (health: "leidet an", "angewiesen auf"; religion: "konvertiert
+  # zu"). It does NOT generalize for "besucht die Moschee" -- there the category
+  # signal is the NOUN, and "besucht die Filiale" is the same shape with no Art. 9
+  # content at all. Those cases need vocabulary, and the lists below carry them.
+  #
+  # Scored 0.86 = review tier, never auto-accept: these types carry a one-way
+  # `anonymize` action, and one-way destruction on a frame match is unrecoverable.
+  # The reviewer decides; the tool only refuses to stay silent.
+  - name: DE_HEALTH_DATA
+    language: de
+    languages: [de]
+    umlaut_variants: true
+    patterns:
+      # "leidet an einer schweren Depression", "erkrankt an Tuberkulose",
+      # "in Behandlung wegen eines Bandscheibenvorfalls". An optional article and
+      # up to two adjectives are skipped so the NOUN is what gets claimed; the
+      # match stops at clause punctuation so it cannot swallow the sentence.
+      - regex: '(?<=\b(?:leidet|erkrankt|erkrankte|litt)\s+(?:an|unter)\s+(?:(?:der|dem|den|einer|einem|eines|seiner|seinem|ihrer|ihrem)\s+)?(?:\p{L}+(?:er|en|em|es|e)\s+){0,2})\p{Lu}\p{L}+(?:-\p{Lu}?\p{L}+)*'
+        score: 0.86
+      # "ist dauerhaft auf den Rollstuhl angewiesen" -- the frame WRAPS the value,
+      # so the noun is claimed by a lookbehind for the preposition and a lookahead
+      # for the participle. Measured: this exact shape leaked with every word list
+      # in place, because "Rollstuhl" is not a diagnosis and no list had it.
+      - regex: '(?<=\bauf\s+(?:den|die|das|einen|eine|ein)\s+)\p{Lu}\p{L}+(?=\s+angewiesen\b)'
+        score: 0.86
+      # VERB-FINAL word order. German routinely puts the participle at the END of
+      # the clause -- "ist im Mai an Tuberkulose erkrankt" -- so the verb-first
+      # frame above cannot see it. This is not an edge case, it is the ordinary
+      # perfect tense, and every frame here needs the wrapped twin or it covers
+      # only half the sentences its own trigger word appears in.
+      - regex: '(?<=\b(?:an|unter)\s+(?:(?:der|dem|einer|einem)\s+)?)\p{Lu}\p{L}+(?=\s+(?:erkrankt|erkrankte|leidet|litt)\b)'
+        score: 0.86
+      # "wegen der laufenden Chemotherapie", "krankgeschrieben wegen einer Grippe".
+      - regex: '(?<=\b(?:krankgeschrieben|arbeitsunfähig|behandelt|in\s+Behandlung)\s+wegen\s+(?:(?:der|des|einer|eines)\s+)?(?:\p{L}+(?:er|en|em|es|e)\s+){0,2})\p{Lu}\p{L}+(?:-\p{Lu}?\p{L}+)*'
+        score: 0.86
+      # Health AIDS and care facts. A person using one of these is health data even
+      # though none of them is a diagnosis, which is why the diagnosis lists miss
+      # them entirely.
+      - regex: '\b(?:rollstuhlfahrer|rollstuhlfahrerin|rollstuhl|gehhilfe|prothese|beinprothese|hörgerät|blindenhund|blindenstock|dialysepatient|dialysepatientin|pflegeheim|pflegedienst|palliativ|hospiz|betreutes wohnen|eingliederungshilfe|integrationsamt|schwerbehindertenvertretung)\b'
+        score: 0.86
   # CASE-SENSITIVE half. HIV/AIDS: a case-insensitive "aids" would flag the
   # ordinary English verb. The insurer ABBREVIATIONS: "TK"/"BKK"/"IKK" collide
   # with too much to match bare, but directly behind "Krankenkasse" they are
@@ -754,6 +801,33 @@ custom_recognizers:
       # the trailing inflection. That is what keeps "Evangelische Bank" intact.
       - regex: '\b(?:evangelisch-lutherisch|römisch-katholisch|(?:griechisch|russisch|serbisch|syrisch)-orthodox|konfessionslos|Kirchenaustritt|altkatholisch|freikirchlich|hinduistisch|buddhistisch|israelitisch|neuapostolisch|methodistisch|adventistisch|mennonitisch|anglikanisch|evangelisch|moslemisch|lutherisch|muslimisch|katholisch|reformiert|islamisch|alevitisch|baptistisch|jesidisch|jüdisch)\b'
         score: 0.86
+      # PLACES OF WORSHIP and OBSERVANCES. This is the half a frame cannot reach:
+      # "besucht jeden Freitag die Moschee" and "besucht jeden Freitag die Filiale"
+      # are the identical sentence shape, so only the noun distinguishes them.
+      # Naming which house of worship a person attends, or which fast they keep, is
+      # a statement about their religion as directly as the adjective is.
+      #
+      # Only nouns that name a PLACE OF WORSHIP. Every "...gemeinde" term was tried
+      # here and removed: "Kirchengemeinde", "Pfarrgemeinde" and "Freikirche" are
+      # institutional nouns that sit UNINFLECTED inside organisation names
+      # ("Neuapostolische Kirchengemeinde Frankfurt"), which breaks the property
+      # that makes these lists safe to extend at all -- they match uninflected
+      # forms only, so \b fails on a trailing inflection and org names survive.
+      # "Kirche" standing alone is absent for the same reason, plus its constant
+      # use in German civic prose ("die Kirche als Arbeitgeber").
+      - regex: '\b(?:moschee|synagoge|gebetshaus|gebetsraum|gemeindemitglied)\b'
+        score: 0.86
+      - regex: '\b(?:ramadan|jom\s+kippur|rosch\s+haschana|chanukka|zuckerfest|opferfest|aschura|pessach|sabbat|schabbat|fastenbrechen|wallfahrt|pilgerfahrt|hadsch|taufe|firmung|konfirmation|bar\s+mizwa|bat\s+mizwa|beschneidung|halal|koscher)\b'
+        score: 0.86
+      # Frames where the FRAME is the evidence: "konvertierte zum Islam",
+      # "praktizierender Muslim", "Angehoeriger der juedischen Gemeinde".
+      # Up to three tokens may sit between the verb and the preposition -- German
+      # puts the time adverbial there as a matter of course ("konvertierte im Jahr
+      # 2018 zum Buddhismus"), so an adjacency-only frame misses the normal phrasing.
+      - regex: '(?<=\b(?:konvertiert|konvertierte|übergetreten)\s+(?:[\p{L}\d.]+\s+){0,3}(?:zum|zur|zu)\s+(?:(?:der|dem|einer|einem)\s+)?)\p{Lu}\p{L}+'
+        score: 0.86
+      - regex: '\b(?:praktizierende[rn]?|gläubige[rn]?|streng\s+gläubige[rn]?)\s+\p{Lu}\p{L}+'
+        score: 0.86
       # Colon-free "Kirchensteuermerkmal ev". The value is restricted to the ELStAM
       # confession CODES, which is what makes a colon-free anchor safe here: an
       # arbitrary following word would claim "Religion spielt keine Rolle" -> "spielt".
@@ -777,6 +851,25 @@ custom_recognizers:
       # adjective is claimed.
       - regex: '(?<=\b(?:Herkunft|Abstammung|Muttersprache)\s{0,3}[:=]\s{0,3})\p{L}{3,25}sch(?:e[rnms]?)?\b'
         score: 0.86
+      # ETHNIC-GROUP and MIGRATION-STATUS vocabulary. Naming the group or the
+      # residence status IS the ethnic-origin disclosure, and none of it goes near
+      # the labelled patterns above. Measured leaks: "kam 1994 als
+      # Kontingentfluechtlinge nach Deutschland" and "wurde auf Romanes gefuehrt".
+      #
+      # Minority-language names are included because stating the language somebody
+      # was interviewed in states their origin just as plainly. "Deutsch" and the
+      # major world languages are excluded -- naming them says nothing about a
+      # German bank customer's ethnicity, and the exclusion is what keeps ordinary
+      # correspondence intact.
+      - regex: '\b(?:kontingentflüchtling|kontingentflüchtlinge|spätaussiedler|spätaussiedlerin|aussiedler|asylberechtigt|asylberechtigte[rn]?|asylbewerber|asylbewerberin|geduldet|duldung|subsidiär\s+schutzberechtigt|migrationshintergrund|volkszugehörigkeit)\b'
+        score: 0.86
+      - regex: '\b(?:sinti|roma|romanes|jesiden|jesidisch|aramäer|aramäisch|assyrer|assyrisch|kurde|kurdin|kurdisch|tamile|tamilisch|uigure|uigurisch|rohingya|amazigh|berberisch)\b'
+        score: 0.86
+      # "kurdischer Herkunft", "tuerkischstaemmig" -- the frame carries it.
+      - regex: '\b\p{L}{3,25}(?:stämmig|stämmige[rn]?)\b'
+        score: 0.86
+      - regex: '\b\p{L}{3,25}sch(?:e[rnms]?)?\s+(?:Herkunft|Abstammung|Wurzeln)\b'
+        score: 0.86
   # Sex life / sexual orientation -- likewise no detection at all before.
   - name: DE_SEX_LIFE
     language: de
@@ -784,6 +877,19 @@ custom_recognizers:
     umlaut_variants: true
     patterns:
       - regex: '\b(?:homosexuell|heterosexuell|transsexuell|intersexuell|bisexuell|lesbisch|schwul|geschlechtsangleichung|geschlechtsumwandlung|nichtbinär)\b'
+        score: 0.86
+      # SAME-SEX PARTNERSHIP, stated without any of the words above. German marks
+      # it in the POSSESSIVE: "seine Ehefrau" is an ordinary man's wife, "ihre
+      # Ehefrau" is a woman's wife. That one pronoun is the entire Art. 9 signal,
+      # which is exactly why a bare "Ehefrau"/"Ehemann" must NEVER be listed -- it
+      # would flag every married customer in the file and destroy the word one-way.
+      # Measured: "Sie lebt mit ihrer Ehefrau" leaked with every list in place.
+      - regex: '\b(?:ihre[rmn]?\s+(?:Ehefrau|Frau|Partnerin|Lebensgefährtin)|seine[rmn]?\s+(?:Ehemann|Mann|Partner|Lebensgefährte))\b'
+        score: 0.86
+      # "eingetragene Lebenspartnerschaft" is the specific German legal form that
+      # existed for same-sex couples only (until 2017), so naming it discloses the
+      # same fact.
+      - regex: '\b(?:eingetragene[rn]?\s+(?:Lebenspartnerschaft|Partnerschaft)|Lebenspartnerschaftsgesetz|gleichgeschlechtlich(?:e[rnms]?)?)\b'
         score: 0.86
       - regex: '(?<=\b(?:Sexuelle Orientierung|Sexuelle Identität|Geschlechtsidentität|Sexualleben)\s{0,3}[:=]\s{0,3})(?=[^\n;]*[\p{L}\d])(?!(?:keine?(?:\s+Angaben?)?|nein|nichts|ohne|unbekannt|entfällt|nicht\s+(?:angegeben|bekannt|zutreffend|erhoben)|null|leer|n\.?\s?a\.?|n\s*/\s*a|k\.?\s?a\.?)(?![\p{L}\d])[\s.,;]*$)[^\s\n;](?:(?:(?!\.(?:\s|$))[^\n;])*[^\s\n;.,])?'
         score: 0.86
@@ -794,6 +900,31 @@ custom_recognizers:
     patterns:
       - regex: '(?<=\b(?:Gewerkschaftsmitgliedschaft|Gewerkschaftszugehörigkeit|Gewerkschaftsmitglied|Parteimitgliedschaft|Parteizugehörigkeit|Parteimitglied|Gewerkschaft|Partei)\s{0,3}[:=]\s{0,3})(?=[^\n;]*[\p{L}\d])(?!(?:keine?(?:\s+Angaben?)?|nein|nichts|ohne|unbekannt|entfällt|nicht\s+(?:angegeben|bekannt|zutreffend|erhoben)|null|leer|n\.?\s?a\.?|n\s*/\s*a|k\.?\s?a\.?)(?![\p{L}\d])[\s.,;]*$)[^\s\n;](?:(?:(?!\.(?:\s|$))[^\n;])*[^\s\n;.,])?'
         score: 0.86
+      # WORKS-COUNCIL and INDUSTRIAL-ACTION vocabulary. Art. 9 covers trade union
+      # membership, and in a German employer's records the disclosure is almost
+      # never the word "Gewerkschaft" -- it is the works-council role or the strike
+      # payment. Measured: "wurde in den Betriebsrat gewaehlt" and "Streikgeld
+      # wurde ausgezahlt" both leaked with the labelled pattern above in place.
+      #
+      # ACCEPTED COST, stated plainly: "Betriebsrat" also names the BODY in
+      # ordinary corporate prose ("der Betriebsrat wurde informiert"), which is not
+      # a fact about any individual. These sit at 0.86 = review tier and are never
+      # auto-applied, so the reviewer discards that case in one click; the
+      # alternative is staying silent on a real Art. 9 disclosure.
+      - regex: '\b(?:betriebsratsvorsitzende[rn]?|betriebsratsmitglied|betriebsrat|personalratsmitglied|personalrat|schwerbehindertenvertrauensperson|jugendvertretung|gewerkschaftlich|gewerkschafter|gewerkschafterin|tarifkommission|streikgeld|streikkasse|streikbeteiligung|arbeitskampf|warnstreik|urabstimmung|freistellung nach § 38)\b'
+        score: 0.86
+      # Named German unions. Kept out of the case-sensitive block below because
+      # these are unambiguous in any casing.
+      - regex: '\b(?:ver\.di|verdi|ig\s+metall|ig\s+bce|ig\s+bau|gew\b|ngg|evg|gdl|dbb|dgb|cgb)\b'
+        score: 0.86
+      # "Mitglied im Betriebsrat", "gewaehlt in den Personalrat" -- frame form, for
+      # bodies the list above does not name.
+      - regex: '(?<=\b(?:gewählt\s+in\s+(?:den|die|das)|Mitglied\s+(?:im|in\s+der|in\s+den|bei\s+der))\s+)\p{Lu}\p{L}+(?:-\p{Lu}?\p{L}+)*'
+        score: 0.86
+      # VERB-FINAL twin: "wurde in den Wirtschaftsausschuss gewaehlt" is the normal
+      # German perfect, and the verb-first frame above cannot see it.
+      - regex: '(?<=\bin\s+(?:den|die|das)\s+)\p{Lu}\p{L}+(?:-\p{Lu}?\p{L}+)*(?=\s+(?:gewählt|berufen|entsandt)\b)'
+        score: 0.86
   # Named unions and parties, CASE-SENSITIVE and therefore a separate recognizer:
   # case-insensitively, "Die Linke" would match the everyday phrase "die linke
   # Spalte" on any page. Same entity type, so it groups and acts identically.
@@ -803,7 +934,16 @@ custom_recognizers:
     umlaut_variants: true
     case_sensitive: true
     patterns:
-      - regex: '\b(?:ver\.di|IG\s+Metall|IG\s+BCE|IG\s+BAU|Marburger\s+Bund|Vereinigung\s+Cockpit|Piratenpartei|Freie\s+Wähler|Die\s+Linke|Die\s+Grünen|Bündnis\s+90|DGB|GEW|NGG|GdP|EVG|SPD|CDU|CSU|FDP|AfD)\b'
+      # The ARTICLE is matched in either case ([Dd]ie): a party is named
+      # mid-sentence far more often than at its start -- "kandidierte fuer die
+      # Gruenen" -- and with a capital-only "Die Gruenen" the most ordinary
+      # phrasing there is went unmatched. Measured: political_party scored 0%.
+      # "Gruenen" also matches bare, because capitalised it is the party and the
+      # adjective is lowercase; "Linke" does NOT, because it is also a surname and
+      # only the article makes it unambiguous.
+      - regex: '\b(?:[Dd]ie\s+)?Grünen\b'
+        score: 0.86
+      - regex: '\b(?:ver\.di|IG\s+Metall|IG\s+BCE|IG\s+BAU|Marburger\s+Bund|Vereinigung\s+Cockpit|Piratenpartei|Freie\s+Wähler|[Dd]ie\s+Linke|Bündnis\s+90|DGB|GEW|NGG|GdP|EVG|SPD|CDU|CSU|FDP|AfD)\b'
         score: 0.86
 
   # =========================================================================
